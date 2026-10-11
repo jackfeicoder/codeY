@@ -1,11 +1,12 @@
 # CodeY 架构设计
 
-> 版本：0.1，日期：2026-10-11。本文描述目标架构；当前已实现 Maven 骨架、CLI 入口及多 Profile 配置加载、选择与校验，其他模块为占位。开发进度见 [开发路线](#roadmap)。
+> 版本：0.1，日期：2026-10-11。本文描述目标架构；当前已实现 Maven 骨架、CLI 入口、多 Profile 配置与消息模型，其他模块按阶段实现。开发进度见 [开发路线](#roadmap)。
 
 ## 阅读导航
 
 - 第 1—9 节：定位、技术栈、目录、架构图、执行流程与核心策略。
 - [模块职责与接口契约](#modules)
+- [已实现的消息模型](#messages)
 - [配置加载与多模型选择](#configuration)
 - [开发路线与验收标准](#roadmap)
 - [设计决策](#decisions)
@@ -237,7 +238,7 @@ MCP 工具经适配器进入同一 ToolRegistry/ToolExecutor，复用权限、�
 
 ## 10. 模块职责与接口契约
 
-> 以下为目标设计。当前已实现 cli.Main、LlmConfig、AuthMode、ModelProfiles、ConfigLoader、DotEnvReader 和 ConfigException；其余模块仅有包说明。接口名可随实际实现调整。
+> 以下为目标设计。当前已实现 cli.Main、配置模块以及 session.Message、session.MessageRole 和 tool.ToolCall；其余具体类型按阶段实现。接口名可随实际实现调整。
 
 ### 模块边界
 
@@ -270,6 +271,45 @@ MCP 工具经适配器进入同一 ToolRegistry/ToolExecutor，复用权限、�
 | MemoryEntry | id、scope、projectId、content、source、createdAt | 避免不同项目的相同事实被错误合并 |
 
 只有实际需要的字段进入首版。usage 缺失表示未知，不视为零。模型 capabilities（工具支持、上下文窗口等）通过显式配置提供。
+
+<a id="messages"></a>
+
+### 已实现的消息模型
+
+消息放在 session 包，作为会话和后续模型调用的共同数据结构；ToolCall 放在 tool 包，表示模型提出的调用请求。
+
+| 类型 | 字段/方法 | 当前语义 |
+|---|---|---|
+| MessageRole | SYSTEM、USER、ASSISTANT、TOOL | wireValue() 映射为小写协议值，fromWireValue() 解析支持的角色 |
+| Message | role、content、toolCalls、toolCallId | 不可变 record，工具调用列表进行防御性复制 |
+| ToolCall | id、name、arguments | 调用 ID、工具名与完整原始 JSON 参数文本 |
+
+四种消息的分工：system 保存指令，user 保存用户输入，assistant 保存模型文本或工具调用请求，tool 保存工具执行结果。
+
+```java
+ToolCall call = new ToolCall("call_1", "read_file", "{\"path\":\"Main.java\"}");
+List<Message> history = List.of(
+        Message.system("你是编程助手。"),
+        Message.user("解释 Main.java。"),
+        Message.assistantToolCalls(List.of(call)),
+        Message.tool(call.id(), "public class Main {}"),
+        Message.assistant("这是项目入口类。")
+);
+```
+
+`Message.assistant(text, calls)` 支持同时保存说明文本和工具调用。一条 assistant 可提出多个调用，每个调用在后续执行后产生独立 tool 消息，toolCallId 指向原始 id。工具失败也通过对应的结果消息反馈。
+
+单条消息约束：
+
+- 只有 assistant 可携带 toolCalls，同一消息中调用 ID 唯一。
+- 只有 tool 可携带 toolCallId，且必须提供非空 ID。
+- 有工具调用的 assistant 可以让 content 为 null；其他消息必须有 content，空字符串允许表示空输出。
+- ToolCall 的三个字段均需非空；arguments 当前保存原文，JSON 语法和 schema 校验在后续调用与执行层完成。
+- 非法构造参数抛出 IllegalArgumentException；当前不为每种数据结构单独增加异常类。
+
+后续 Chat Completions 适配器显式映射 role.wireValue()、tool_calls、tool_call_id，并把 ToolCall 转成接口要求的 function 结构；不依赖 record 的默认 JSON 形状。跨消息的调用 ID 匹配、全部结果回填和工具调用组完整性由后续 Session/Agent 层检查，当前 Message 仅校验单条消息。
+
+当前为纯文本消息模型，未接入 JSON 序列化、流式工具参数组装或真实工具执行。相关测试覆盖普通对话、多个调用的结果关联、角色约束、空工具输出、重复 ID 和防御性复制。
 
 ### 核心接口示意
 
@@ -537,7 +577,7 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 
 ## 12. 开发路线与验收标准
 
-> 当前：M1，已完成多 Profile 配置加载、选择与校验。各阶段按顺序推进；没有固定工期承诺。先完成当前阶段，再接入后续复杂度。
+> 当前：M1，已完成多 Profile 配置加载、选择与校验，以及消息模型。各阶段按顺序推进；没有固定工期承诺。先完成当前阶段，再接入后续复杂度。
 
 ### M0：工程骨架
 
@@ -555,6 +595,7 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 - [x] LlmConfig 从启动目录 .env 和系统环境变量加载，支持默认超时与 --check-config。
 - [x] 缺少密钥、模型和地址时给出字段级错误；打印配置隐藏 API Key。
 - [x] 支持多 Profile、默认选择、--profile 覆盖、--list-models、none 认证与旧格式兼容；切换接口先校验目标配置。
+- [x] Message/MessageRole 支持四种消息角色；ToolCall 和 toolCallId 表达请求与结果关联，校验单条消息约束。
 - [ ] 对话循环接通后支持 /model，切换在任务边界生效。
 - [ ] 连续两轮对话保持消息顺序，最终文本与流式展示一致。
 - [ ] 测试多行 SSE、拆分参数、正常结束、提前 EOF、HTTP 错误与超时。
@@ -748,6 +789,8 @@ CodeY 实现：类/方法、输入输出与关键控制点。
 ### M1：LLM 与流式调用
 
 已完成的配置部分可先准备：为什么将文件读取、配置合并、配置对象分开？如何定义多来源优先级？如何隔离多个 Profile 的凭证？如何在切换失败时保持原状态？相关实现与测试见 config 包；当前 /model 交互命令仍待实现。
+
+已完成的消息部分可准备：为什么工具调用请求属于 assistant，而执行结果属于 tool？为什么 tool 消息需要 toolCallId？为什么只读消息仍需复制传入的 List？为什么有工具调用的 assistant 可以没有文本？代码和边界见 [消息模型](#messages)。
 
 | 问题 | 回答要点 | 待补证据 |
 |---|---|---|
