@@ -1,0 +1,21 @@
+flowchart TD
+    start["接收任务并创建 Run"] --> append["追加用户消息"]
+    append --> guard{"取消或预算耗尽？"}
+    guard -- "是" --> stopped["返回 CANCELLED 或 BUDGET_EXHAUSTED"]
+    guard -- "否" --> build["构建上下文并预留输出预算"]
+    build --> call["调用 LLM 并展示事件"]
+    call --> valid{"响应完整且合法？"}
+    valid -- "否" --> failed["分类失败与有限重试"]
+    failed --> exhausted{"重试耗尽？"}
+    exhausted -- "是" --> error["返回 FAILED"]
+    exhausted -- "否" --> guard
+    valid -- "是" --> tools{"存在工具调用？"}
+    tools -- "是" --> policy["校验参数与权限"]
+    policy --> execute["执行工具并回填全部结果"]
+    execute --> guard
+    tools -- "否" --> verify{"任务验收证据满足？"}
+    verify -- "是" --> done["返回 COMPLETED 与证据"]
+    verify -- "否" --> continueRun{"仍可继续？"}
+    continueRun -- "是" --> feedback["追加缺失证据或失败反馈"]
+    feedback --> guard
+    continueRun -- "否" --> incomplete["返回 INCOMPLETE"]

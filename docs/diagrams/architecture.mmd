@@ -1,0 +1,18 @@
+flowchart LR
+    user["用户"] --> cli["CLI 与组件装配"]
+    cli --> agent["AgentLoop"]
+    config["Config"] --> cli
+    agent --> context["ContextBuilder"]
+    context --> session["Session 与消息历史"]
+    context --> memory["Memory 检索"]
+    agent --> llm["LlmClient"]
+    llm --> provider["外部模型 API"]
+    agent --> executor["ToolExecutor"]
+    executor --> policy["路径与审批策略"]
+    policy --> builtin["文件与命令工具"]
+    policy --> mcp["MCP 工具适配"]
+    builtin --> workspace["工作区与子进程"]
+    mcp --> server["外部 MCP 服务"]
+    agent --> events["执行事件"]
+    events --> cli
+    events --> store["SessionStore 与轨迹"]

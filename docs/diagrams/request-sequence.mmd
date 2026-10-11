@@ -1,0 +1,28 @@
+sequenceDiagram
+    actor User as 用户
+    participant CLI
+    participant Agent as AgentLoop
+    participant Context as ContextBuilder
+    participant LLM as LlmClient
+    participant Tools as ToolExecutor
+    participant Session
+    User->>CLI: 输入任务
+    CLI->>Agent: run(task, runContext)
+    Agent->>Session: 追加用户消息
+    loop 每一轮，直至明确退出
+        Agent->>Context: build(session, budget)
+        Context-->>Agent: messages 与工具定义
+        Agent->>LLM: generate(request, listener)
+        LLM-->>CLI: 经事件监听器显示文本增量
+        LLM-->>Agent: 完整 LlmResponse
+        Agent->>Session: 追加完整 assistant 消息
+        alt 模型提出工具调用
+            Agent->>Tools: execute(toolCalls, runContext)
+            Tools-->>Agent: 与调用 ID 对应的 ToolResult
+            Agent->>Session: 追加 tool 消息与执行事件
+        else 模型返回最终回答
+            Agent->>Agent: 检查任务对应的验收证据
+        end
+    end
+    Agent-->>CLI: AgentResult，包含完整最终文本与状态
+    CLI-->>User: 展示结果与验证摘要
