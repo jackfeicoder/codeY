@@ -6,7 +6,7 @@
 
 ## 当前进度
 
-当前是项目初始化骨架：已建立 Maven 工程、CLI 入口、模块目录和设计文档。LLM、Agent 循环、工具、记忆和 MCP 尚待实现；当前入口只显示项目说明。
+当前已建立 Maven 工程、CLI 入口、模块目录和设计文档，并完成多模型 Profile 配置加载、选择与校验（M1 配置部分）。支持启动目录 `.env`、系统环境变量、`--profile` 覆盖和本地服务无认证配置；LLM 调用、Agent 循环、工具、记忆和 MCP 尚待实现。
 
 ## 技术基线
 
@@ -17,7 +17,7 @@
 
 ## 架构概览
 
-以下为目标架构。当前仅有工程骨架和说明型 CLI，图中的 Agent、LLM、工具及存储能力按开发路线逐步实现。
+以下为目标架构。当前实现了工程骨架、CLI 入口和配置加载，图中的 Agent、LLM、工具及存储能力按开发路线逐步实现。
 
 ```mermaid
 flowchart LR
@@ -74,9 +74,9 @@ codeY/
 ├── README.md
 ├── pom.xml
 ├── .env.example
-├── docs/                         # 架构、模块、路线、面试和设计决策
-│   ├── diagrams/                 # 可编辑 Mermaid 图
-│   └── references/               # PaiCLI 分析参考
+├── docs/
+│   ├── architecture.md           # 完整设计、配置、路线与学习笔记
+│   └── diagrams/                 # 可编辑 Mermaid 图
 └── src/
     ├── main/
     │   ├── java/io/github/jackfeicoder/codey/
@@ -104,7 +104,7 @@ codeY/
 | 阶段 | 目标 | 状态 |
 |---|---|---|
 | M0 | 工程、入口与设计文档 | 已完成 |
-| M1 | LLM 调用与 SSE 流式输出 | 待实现 |
+| M1 | LLM 调用与 SSE 流式输出 | 进行中：配置加载已完成 |
 | M2 | Agent 循环与只读工具 | 待实现 |
 | M3 | 修改代码、执行命令与验证闭环 | 待实现 |
 | M4 | 上下文预算与历史压缩 | 待实现 |
@@ -112,7 +112,7 @@ codeY/
 | M6 | MCP 工具接入 | 待实现 |
 | M7 | 固定任务评估与项目展示 | 待实现 |
 
-每阶段的验收标准见 [开发路线](docs/roadmap.md)，配套学习问题见 [面试学习笔记](docs/interview.md)。
+每阶段的验收标准见 [开发路线](docs/architecture.md#roadmap)，配套学习问题见 [面试学习笔记](docs/architecture.md#interview)。
 
 ## 构建与启动
 
@@ -123,24 +123,21 @@ mvn clean verify
 java -jar target/codey-0.1.0-SNAPSHOT.jar
 java -jar target/codey-0.1.0-SNAPSHOT.jar --help
 java -jar target/codey-0.1.0-SNAPSHOT.jar --version
+java -jar target/codey-0.1.0-SNAPSHOT.jar --check-config
+java -jar target/codey-0.1.0-SNAPSHOT.jar --list-models
+java -jar target/codey-0.1.0-SNAPSHOT.jar --check-config --profile qwen
 ```
 
 当前版本没有运行时第三方依赖，因此普通 JAR 即可运行。加入依赖后，在 LLM 接入阶段同步配置可执行 JAR 的依赖打包。
 
-## 文档入口
+`--check-config` 需要选中 Profile 的有效配置，但不会调用模型。首次配置时复制 `.env.example` 为启动目录下的 `.env`，已有 `.env` 时手工补充字段；填写地址、密钥和模型。来源优先级为 **系统环境变量 > .env > 默认值**，选择优先级为 **--profile > CODEY_ACTIVE_PROFILE**。旧版 `CODEY_LLM_*` 仍兼容。完整语法、CMD/PowerShell 用法及与 `application.yml` 的关系见 [配置说明](docs/architecture.md#configuration)。
 
-| 文档 | 用途 |
-|---|---|
-| [文档索引](docs/README.md) | 阅读顺序与文档维护规则 |
-| [架构设计](docs/architecture.md) | 范围、技术栈、目录、分层与完整执行流程 |
-| [模块与接口](docs/modules.md) | 模块职责、数据契约、错误与扩展边界 |
-| [开发路线](docs/roadmap.md) | 每阶段的实现任务和验收标准 |
-| [面试学习笔记](docs/interview.md) | 与开发阶段对应的问题、回答要点和项目证据 |
-| [设计决策](docs/decisions.md) | 设计取舍及重新评估条件 |
-| [PaiCLI 源码分析参考](docs/references/paicli-source-architecture-guide.md) | 原项目分析快照，帮助定位参考实现 |
+## 设计文档
+
+[完整设计文档](docs/architecture.md) 集中包含架构与目录、模块接口、执行流程、配置与多模型选择、开发验收、设计决策和面试学习笔记。
 
 ## 学习方式
 
 每完成一个阶段，都补充运行方法、执行证据和设计取舍。参考 PaiCLI 的工程场景与 Hello-Agents 的教学思路，用自己的实现验证理解。
 
-第三方项目是学习参考。本仓库不包含 PaiCLI 的业务源码；参考文档中的源码链接指向分析时的本机目录。
+参考项目和维护约定统一记录在设计文档中。
