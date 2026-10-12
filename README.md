@@ -6,7 +6,7 @@
 
 ## 当前进度
 
-当前已完成多模型 Profile 配置、不可变消息模型和非流式 Chat Completions 调用（M1）。通过 `--prompt` 发送一次请求，支持 `--profile` 选择配置、回答和工具调用解析、结束原因、Token 用量、超时与分类错误。消息支持 system、user、assistant、tool 四种角色。持续对话、SSE、Agent 循环、工具执行、记忆和 MCP 尚待实现；协议已使用本地 HTTP 服务验证，真实厂商调用需使用有效配置另行验证。
+当前已完成多模型 Profile 配置、不可变消息模型、基础提示词加载和非流式 Chat Completions 调用（M1）。通过 `--prompt` 发送一次请求，支持 `--profile` 选择配置、回答和工具调用解析、结束原因、Token 用量、超时与分类错误。消息支持 system、user、assistant、tool 四种角色。持续对话、SSE、Agent 循环、工具执行、记忆和 MCP 尚待实现；协议已使用本地 HTTP 服务验证，真实厂商调用需使用有效配置另行验证。
 
 ## 技术基线
 
@@ -132,6 +132,8 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --prompt "解释 Java record" --profil
 ```
 
 构建生成的 JAR 已包含 Jackson 运行依赖，直接使用 `java -jar` 即可。`--prompt` 会向选中平台发送真实请求；每次启动独立发送 system/user 消息，当前不保存跨请求历史。工具调用只解析不执行，输出被截断时提示 `finish_reason=length`。
+
+基础提示词位于 [src/main/resources/prompts/base.md](src/main/resources/prompts/base.md)。PromptLoader 从 classpath 按 UTF-8 读取全文，Main 将其作为 system 消息注入请求；所有模型 Profile 共用。修改提示词后执行 `mvn package` 更新 JAR。资源缺失或空白时会在发送请求前报告提示词错误。设计与后续扩展见 [Prompt 模块](docs/architecture.md#prompt-design)。
 
 `--check-config` 需要选中 Profile 的有效配置，但不会调用模型。首次配置时复制 `.env.example` 为启动目录下的 `.env`，已有 `.env` 时手工补充字段；填写地址、密钥和模型。来源优先级为 **系统环境变量 > .env > 默认值**，选择优先级为 **--profile > CODEY_ACTIVE_PROFILE**。旧版 `CODEY_LLM_*` 仍兼容。完整语法、CMD/PowerShell 用法及与 `application.yml` 的关系见 [配置说明](docs/architecture.md#configuration)。
 

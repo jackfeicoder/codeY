@@ -9,13 +9,15 @@ import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
 import io.github.jackfeicoder.codey.llm.LlmRequest;
 import io.github.jackfeicoder.codey.llm.LlmResponse;
+import io.github.jackfeicoder.codey.prompt.PromptException;
+import io.github.jackfeicoder.codey.prompt.PromptLoader;
 import io.github.jackfeicoder.codey.session.Message;
 
 import java.nio.file.Path;
 import java.util.List;
 
 /**
- * 命令行入口与组件装配：解析参数 → 选择 Profile → 校验配置或调用模型 → 展示结果。
+ * 命令行入口与组件装配：解析参数 → 选择 Profile → 加载提示词 → 调用模型 → 展示结果。
  * 当前每次 --prompt 只发送一次请求，尚未进入持续对话或 Agent 工具循环。
  */
 public final class Main {
@@ -80,9 +82,11 @@ public final class Main {
             } else {
                 // client 通过统一接口使用，实际 HTTP/JSON 逻辑位于 ChatCompletionsClient。
                 LlmClient client = new ChatCompletionsClient(profiles.activeConfig());
+                // basePrompt 是内置 Markdown 原文，与模型厂商和启动目录无关。
+                String basePrompt = PromptLoader.loadBase();
                 // response 保存完整回答和元数据；本次请求仅包含系统指令与当前问题。
                 LlmResponse response = client.generate(new LlmRequest(List.of(
-                        Message.system("You are CodeY, a helpful coding assistant."), Message.user(prompt))));
+                        Message.system(basePrompt), Message.user(prompt))));
                 System.out.println(response.text());
                 if (!response.toolCalls().isEmpty()) {
                     // 当前只识别工具请求，真实执行和结果回填由后续 Agent 层负责。
@@ -96,6 +100,10 @@ public final class Main {
             // 配置错误需要用户修正，退出码 2 与调用失败区分。
             System.err.println("Configuration error: " + invalid.getMessage());
             System.exit(2);
+        } catch (PromptException failed) {
+            // 资源加载失败时请求尚未发送，展示资源路径供排查打包问题。
+            System.err.println("Prompt error: " + failed.getMessage());
+            System.exit(1);
         } catch (LlmException failed) {
             // 调用错误展示已脱敏的类别与说明，退出码 1。
             System.err.println("LLM error [" + failed.kind() + "]: " + failed.getMessage());
@@ -126,6 +134,7 @@ public final class Main {
                   Process environment > current-working-directory .env > defaults.
                   --check-config validates settings without calling a model.
                   --prompt sends one real, non-streaming request to the selected model.
+                  The built-in prompts/base.md is sent as the system message.
                   --profile overrides CODEY_ACTIVE_PROFILE for this invocation.
                   /model will be added with the interactive conversation loop.
 

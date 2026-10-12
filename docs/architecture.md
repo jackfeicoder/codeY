@@ -1,6 +1,6 @@
 # CodeY 架构设计
 
-> 版本：0.1，日期：2026-10-11。本文描述目标架构；当前已实现多 Profile 配置、消息模型、LLM 非流式调用与 CLI 单次请求，其他模块按阶段实现。协议使用本地 HTTP 服务测试，真实厂商尚未进行端到端调用验证。开发进度见 [开发路线](#roadmap)。
+> 版本：0.1，日期：2026-10-12。本文描述目标架构；当前已实现多 Profile 配置、消息模型、基础提示词加载、LLM 非流式调用与 CLI 单次请求，其他模块按阶段实现。协议使用本地 HTTP 服务测试，真实厂商尚未进行端到端调用验证。开发进度见 [开发路线](#roadmap)。
 
 ## 阅读导航
 
@@ -9,6 +9,7 @@
 - [已实现的消息模型](#messages)
 - [已实现的非流式 LLM 调用](#llm)
 - [代码阅读顺序与当前调用流程](#code-guide)
+- [Prompt 模块设计与文件约定](#prompt-design)
 - [配置加载与多模型选择](#configuration)
 - [开发路线与验收标准](#roadmap)
 - [设计决策](#decisions)
@@ -60,6 +61,7 @@ codeY/
     │   ├── java/io/github/jackfeicoder/codey/
     │   │   ├── cli/          # Main、装配、输入与展示
     │   │   ├── config/       # 环境配置、模型配置、工作区
+    │   │   ├── prompt/       # PromptLoader、PromptException
     │   │   ├── agent/        # AgentLoop、预算、取消、结果
     │   │   ├── llm/          # LlmClient、请求响应、SSE
     │   │   ├── tool/
@@ -71,12 +73,13 @@ codeY/
     │   │   ├── policy/       # 路径范围、审批与执行策略
     │   │   └── observability/ # 执行轨迹、Token 与耗时
     │   └── resources/prompts/
+    │       └── base.md       # 随 JAR 打包的基础提示词
     └── test/
         ├── java/io/github/jackfeicoder/codey/
         └── resources/fixtures/
 ```
 
-模块包当前使用 package-info.java 声明用途，避免空目录在 Git 中丢失。资源空目录使用 .gitkeep 占位，不提前加入复杂抽象。prompts 后续保存系统提示词，fixtures 保存脱敏协议响应和小型测试项目；测试按主代码的包结构组织，默认不依赖真实 API Key。
+模块包使用 package-info.java 声明用途，避免空目录在 Git 中丢失。资源空目录使用 .gitkeep 占位，不提前加入复杂抽象。prompts/base.md 保存已接入的基础系统提示词，fixtures 保存脱敏协议响应和小型测试项目；测试按主代码的包结构组织，默认不依赖真实 API Key。
 
 运行时数据目录 `.codey/` 按需创建并忽略提交，目标布局如下，当前未生成：
 
@@ -358,7 +361,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --prompt "解释 Java record" --profil
 
 每次 --prompt 是独立的一次请求，不恢复历史。help/version/list/check 不发起模型调用。参数或配置错误退出码为 2，模型调用错误为 1；获得响应时输出文本，截断时另外提示，工具调用暂不执行。
 
-测试使用 JDK HttpServer 的临时本地端口与假密钥，覆盖配置选择、消息/工具字段映射、文本/工具响应、可空 usage、HTTP 错误、非法 JSON、完整参数、慢响应体超时、线程中断、网络失败和密钥不回显。本阶段完整构建的 130 项测试通过；另有 13 项可执行 JAR 检查验证独立启动、Profile 路由、无认证调用、错误/截断提示和参数组合，确认 Jackson 已打包。没有发送真实服务商请求。
+测试使用 JDK HttpServer 的临时本地端口与假密钥，覆盖配置选择、消息/工具字段映射、文本/工具响应、可空 usage、HTTP 错误、非法 JSON、完整参数、慢响应体超时、线程中断、网络失败和密钥不回显。加入提示词测试后完整构建的 133 项测试通过；此前 13 项可执行 JAR 检查验证独立启动、Profile 路由、无认证调用、错误/截断提示和参数组合，确认 Jackson 已打包。本次另完成 3 项提示词 JAR 检查，详见 [Prompt 模块](#prompt-design)。没有发送真实服务商请求。
 
 协议依据：[OpenAI Chat Completions API Reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)。其他提供商的实际兼容性需要各自的请求样例验证。
 
@@ -382,6 +385,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --prompt "解释 Java record" --profil
 | 8 | llm/LlmClient.java | 统一接口中 generate 的调用契约 |
 | 9 | llm/ChatCompletionsClient.java | encode → HTTP 等待 → decode，以及错误和超时处理 |
 | 10 | llm/LlmException.java | 错误类别、可空状态码与后续重试提示 |
+| 11 | prompt/PromptLoader.java、PromptException.java、resources/prompts/base.md | classpath UTF-8 加载、资源错误，以及 system 消息注入 |
 
 运行 `--prompt` 时的实际调用链：
 
@@ -394,8 +398,9 @@ Main.main(args)
   │    └─ ModelProfiles → 别名列表与当前选择的快照
   ├─ ModelProfiles.activeConfig()
   │    └─ ConfigLoader.buildConfig(prefix) → 已校验的 LlmConfig
-  ├─ 创建 Message.system(...)、Message.user(...) → LlmRequest
   ├─ LlmClient client = new ChatCompletionsClient(config)
+  ├─ PromptLoader.loadBase() → classpath /prompts/base.md 的 UTF-8 全文
+  ├─ 创建 Message.system(basePrompt)、Message.user(...) → LlmRequest
   ├─ client.generate(request)
   │    ├─ encode → model/messages/stream=false JSON
   │    ├─ HttpRequest → 地址、认证头、超时、正文
@@ -701,6 +706,7 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 - [x] 实现五个核心 LLM 文件，支持非流式 Chat Completions、--prompt 和分类错误。
 - [x] 本地 HTTP 测试验证请求、文本/工具响应、usage、超时、线程中断与错误处理。
 - [x] 加入 Jackson 与 Shade 打包，生成包含依赖的可执行 JAR。
+- [x] 从 resources/prompts/base.md 加载基础提示词，通过 system 消息注入；缺失或空白时发送前失败。
 - [ ] 使用真实平台配置验证非流式调用与提供商实际兼容性。
 - [ ] 对话循环接通后支持 /model，切换在任务边界生效。
 - [ ] 连续两轮对话保持消息顺序，最终文本与流式展示一致。
@@ -966,11 +972,101 @@ CodeY 实现：类/方法、输入输出与关键控制点。
 
 每个案例保留触发条件、最小复现、修改和验证。案例由实际开发产生，不预先编造经历或收益。
 
-## 15. 参考资料与维护方式
+<a id="prompt-design"></a>
+
+## 15. Prompt 模块设计与文件约定
+
+> 第一阶段已实现：PromptLoader 从 classpath 读取 prompts/base.md，Main 将全文作为 system 消息发送。项目指令、提示词组合、运行模式仍为后续设计。
+
+### 主流实现的共同点与差异
+
+提示词文件名没有统一标准。Markdown 便于阅读，但加载后仍是文本；文件发挥什么作用，取决于宿主代码的读取、组合和注入规则。
+
+- Claude Code 使用 CLAUDE.md 保存项目约定、构建命令和工作习惯，具体发现范围与优先级由产品定义。见 [Claude Code 项目说明](https://code.claude.com/docs/en/memory)。
+- Codex 使用 AGENTS.md 作为项目指令约定，并按目录范围组织指令。它与内置系统提示词属于不同来源。见 [Codex 提示词指南](https://developers.openai.com/cookbook/examples/gpt-5/codex_prompting_guide)。
+- Deep Agents 组合基础提示词，并由中间件补充文件、记忆、子 Agent 等能力说明。见 [Deep Agents 架构](https://github.com/langchain-ai/deepagents/blob/main/libs/ARCHITECTURE.md)。
+- Pi 选择较小的核心，允许通过模板、技能和扩展增加能力；其默认实现没有计划模式和子 Agent。见 [Pi Coding Agent](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md)。
+
+因此，CodeY 根据实际能力增加提示词片段，不预先复制其他项目的完整模板集合。
+
+### 常见文件名的含义
+
+| 文件名 | 常见职责 | CodeY 的处理 |
+|---|---|---|
+| system.md / base.md | 身份、回复习惯、证据要求、基础工作规则 | 第一阶段只做一个基础文件 |
+| 项目名.md / CODEY.md | 自定义项目说明；也可能被作者用作内部模板 | 不是通用约定，先不增加 |
+| AGENTS.md | 工作区中的项目指令，例如测试命令、代码规范 | 后续优先支持这个约定 |
+| agent.md / Agent.md | 某个项目自定义的默认 Agent 模式或角色 | 与 AGENTS.md 区分，名称相近不代表同一机制 |
+| CLAUDE.md | Claude Code 常用的项目规则文件 | 后续有兼容需求时做显式回退 |
+| ReAct.md | 根据行动结果继续决策的工作指导 | 工具循环实现后按需增加，不要求模型输出内部思维 |
+| plan.md | 规划行为或计划任务模板 | 先定义运行模式，再决定是否增加 |
+| multi-agent.md | 协作角色、委派和交接规则 | 实现任务编排后再考虑 |
+| auto.md / approve.md | 审批模式下的行为说明 | 与 Java 审批策略配套，文本本身不授予权限 |
+
+PaiCLI 的实际目录将 base.md、modes、approvals、context 等分开。特别注意：其 modes/plan.md 是带 taskType、taskDescription 占位符的任务执行模板，含义与 Claude Code 的只读计划模式不同。不要根据文件名推断运行能力。
+
+### 第一阶段：基础提示词加载
+
+按当前约定使用 base.md，保存在 src/main/resources/prompts 中，作为运行资源随 JAR 打包。加载后直接使用 Markdown 原文，不转换成 HTML。说明性文档仍只维护 README 和本设计文档。
+
+```text
+src/main/java/io/github/jackfeicoder/codey/
+└── prompt/
+    ├── PromptLoader.java
+    ├── PromptException.java
+    └── package-info.java
+src/main/resources/
+└── prompts/
+    └── base.md
+```
+
+PromptLoader 使用 UTF-8 从 classpath 读取内置资源，支持打包后的 JAR。基础资源缺失或为空时明确报错；不要依赖开发机上的 src/main/resources 文件路径。
+
+base.md 首版包含：CodeY 的编程助手身份、默认中文回复、清晰解释代码、准确说明依据、只报告实际执行的操作。当前尚无工具执行能力，提示词中明确依据用户提供的材料分析。
+
+Main 的调用流程调整为：加载配置 → 选择模型 Profile → 读取基础提示词 → 组装 system 和 user 消息 → LlmClient.generate → 显示响应。提示词模块不依赖厂商别名，也不读取 API Key。
+
+PromptException 表示资源缺失、空白或读取失败，由 Main 展示 Prompt error 并以退出码 1 结束；配置与模型异常继续使用各自类型。修改 base.md 后重新构建 JAR 即生效，无需调整 LLM 适配器。
+
+### 第二阶段：项目指令与提示词组合
+
+有工作区与会话后再增加两个类：
+
+- ProjectInstructionsLoader：读取明确指定工作区根目录的 AGENTS.md；文件可选，缺失时继续运行。首版不递归扫描、不读取任意父目录；限制文件大小，例如 16 KiB，并校验实际路径属于工作区，记录来源路径。
+- PromptAssembler：组合基础提示词、已启用模式和运行环境信息；将项目指令作为带来源标签的独立上下文块供 ContextBuilder 使用，避免与内置规则混成无来源文本。
+
+首版只选一个项目规则来源。后续若支持 CLAUDE.md，明确使用“AGENTS.md 优先，缺失时回退 CLAUDE.md”的 CodeY 自身规则，不同时重复注入多个内容近似的文件。
+
+```text
+PromptLoader ─────────────── 基础行为说明 ─┐
+ProjectInstructionsLoader ── 项目规则/来源 ─┼→ ContextBuilder → LlmRequest
+PromptAssembler ──────────── 模式/运行环境 ─┤
+Session ──────────────────── 历史/当前请求 ─┘
+```
+
+PromptAssembler 负责提示词片段组合；ContextBuilder 负责消息顺序、会话历史、工具结果和上下文预算。基础内容可以在会话开始时加载，模式与工具变化时重新组装相关片段；不要让 PromptLoader 同时承担记忆管理。
+
+### 第三阶段：工具与模式提示词
+
+工具接入后，由 ToolRegistry 提供真实的工具名称、描述和参数 schema，避免在提示词文件中维护另一份完整工具清单。只注入已实现且当前启用的能力说明；工具 schema 随后通过 LlmRequest 的协议字段传给模型。
+
+ReAct 依赖 AgentLoop 实现“请求模型 → 校验工具调用 → 执行 → 写入 tool 消息 → 再次请求模型”，一个 ReAct.md 只是行为指导，不实现循环。原生 tool_calls 足以表达行动，不要求输出 Thought/Action/Observation 格式或模型内部思维。
+
+如增加 PLAN 模式，先规定允许的工具范围和退出行为，再补充 plan.txt。审批模式同样先由 ToolExecutor 与 ApprovalPolicy 执行，再注入必要的说明。Claude Code 的计划与审批行为也由产品的权限机制控制，见 [Claude Code 权限说明](https://code.claude.com/docs/en/permissions)。
+
+### 验收与面试要点
+
+第一阶段验证 UTF-8 中文、缺失/空白基础资源，以及打包 JAR 后仍可读取。第二阶段验证可选项目文件缺失、大小限制、来源标记和路径范围；后续模式验证实际允许的工具，不以模型口头遵守规则作为权限测试。
+
+已完成验证：PromptLoader 的 3 项测试与其余测试合计 133 项全部通过，mvn verify 构建成功。另使用临时工作目录和本地模拟 HTTP 服务验证可执行 JAR：请求中的 system 内容与 base.md 全文一致且中文完整；移除资源的测试 JAR 在请求前以退出码 1 报错；--help 不依赖提示词资源。这 3 项检查没有调用真实模型。
+
+面试可说明：Prompt 是给模型的行为与背景文本；Harness 通过代码控制上下文、循环、工具执行、审批和预算。MD 的数量不代表 Agent 的完整程度，应让提示词与实际能力保持一致。
+
+## 16. 参考资料与维护方式
 
 - [PaiCLI](https://gitcode.com/javabetter/paicli)：参考实际编程 Agent 的工程场景。本机源码分析原文保留在 `E:\Desktop\github\paicli\docs\paicli-source-architecture-guide.md`；其中描述的是 PaiCLI，不代表 CodeY 已实现的能力。
 - [Hello-Agents](https://github.com/datawhalechina/hello-agents)：按需参考框架、记忆、上下文工程相关章节。
 - [Agent Harness 概念划分](https://www.langchain.com/blog/agent-frameworks-runtimes-and-harnesses-oh-my)：理解框架、运行时与 Harness 的职责边界。
 - [长期任务 Harness 实践](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)：理解进度交接、验收与跨会话工作。
 
-仓库仅维护两份 Markdown：README 展示项目和快速使用，本设计文档集中记录架构、配置、实现顺序、取舍和学习笔记。实现变化时同步更新状态，完成阶段后补充运行证据；规划中的能力始终明确标注为待实现。
+说明性文档仅维护两份 Markdown：README 展示项目和快速使用，本设计文档集中记录架构、配置、实现顺序、取舍和学习笔记。resources/prompts/base.md 是程序使用的提示词资源。实现变化时同步更新状态，完成阶段后补充运行证据；规划中的能力始终明确标注为待实现。
