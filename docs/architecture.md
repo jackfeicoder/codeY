@@ -1,6 +1,6 @@
 # CodeY 架构设计
 
-> 版本：0.1，日期：2026-10-12。本文描述目标架构；当前已实现多 Profile 配置、消息模型、基础提示词加载、LLM 非流式调用与 CLI 单次请求，其他模块按阶段实现。协议使用本地 HTTP 服务测试，真实厂商尚未进行端到端调用验证。开发进度见 [开发路线](#roadmap)。
+> 版本：0.1，日期：2026-10-12。当前已实现配置、消息、基础提示词、非流式调用、可选工作区和本地会话保存/恢复（含全局列表、分页、标题生成与改名）；其他模块按阶段实现。验证使用本地模拟模型，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
 
 ## 阅读导航
 
@@ -8,8 +8,10 @@
 - [模块职责与接口契约](#modules)
 - [已实现的消息模型](#messages)
 - [已实现的非流式 LLM 调用](#llm)
+- [已实现的 Session 与连续对话](#session-chat)
 - [代码阅读顺序与当前调用流程](#code-guide)
 - [Prompt 模块设计与文件约定](#prompt-design)
+- [工作区选择、历史列表与会话恢复方案](#workspace-sessions)
 - [配置加载与多模型选择](#configuration)
 - [开发路线与验收标准](#roadmap)
 - [设计决策](#decisions)
@@ -36,7 +38,7 @@ Harness 在本项目中指运行核心及其策略：Agent 循环、上下文构
 | JSON | Jackson 2.18.2 | M1 已实现消息映射与响应解析 |
 | 日志 | 初期标准输出；后续 SLF4J | M1/M3；模型内容与日志分流，避免输出密钥 |
 | 测试 | JUnit 5.10.2 + JDK HttpServer | 配置、消息及非流式 HTTP 测试已实现，默认不调用真实模型 |
-| 状态存储 | 项目内 JSON/JSONL 文件 | M5；先实现可解释的事件与状态恢复 |
+| 状态存储 | 用户目录 JSON 快照，后续 JSONL 事件 | 会话选择阶段先恢复文本；M5 补工具执行状态 |
 | MCP | JSON-RPC + stdio | M6；先支持一条传输链，HTTP 后续增加 |
 
 当前运行依赖为 Jackson 2.18.2；JUnit 5.10.2 为测试依赖。Maven Shade 3.5.1 在 package 阶段生成包含依赖与 Main 入口的可执行 JAR。此处记录已验证的项目版本，不声明其为各组件的最新版本。
@@ -59,7 +61,7 @@ codeY/
 └── src/
     ├── main/
     │   ├── java/io/github/jackfeicoder/codey/
-    │   │   ├── cli/          # Main、装配、输入与展示
+    │   │   ├── cli/          # Main、ChatCli、装配、输入与展示
     │   │   ├── config/       # 环境配置、模型配置、工作区
     │   │   ├── prompt/       # PromptLoader、PromptException
     │   │   ├── agent/        # AgentLoop、预算、取消、结果
@@ -67,7 +69,8 @@ codeY/
     │   │   ├── tool/
     │   │   │   └── builtin/  # 文件、搜索、命令工具
     │   │   ├── context/      # 上下文收集、选择、预算与压缩
-    │   │   ├── session/      # 消息、执行事件、会话存储
+    │   │   ├── session/      # Message、Session、快照、存储与标题；工具事件后续实现
+    │   │   ├── workspace/    # 可选目录绑定与真实路径解析
     │   │   ├── memory/       # 长期记忆的检索与保存
     │   │   ├── mcp/          # MCP 客户端及工具适配
     │   │   ├── policy/       # 路径范围、审批与执行策略
@@ -81,12 +84,17 @@ codeY/
 
 模块包使用 package-info.java 声明用途，避免空目录在 Git 中丢失。资源空目录使用 .gitkeep 占位，不提前加入复杂抽象。prompts/base.md 保存已接入的基础系统提示词，fixtures 保存脱敏协议响应和小型测试项目；测试按主代码的包结构组织，默认不依赖真实 API Key。
 
-运行时数据目录 `.codey/` 按需创建并忽略提交，目标布局如下，当前未生成：
+会话数据按需创建，已实现布局与后续项目数据如下。会话集中放在用户目录，便于统一展示不同项目及普通聊天；项目数据目录忽略提交。详细实现见 [工作区与会话方案](#workspace-sessions)。
 
 ```text
-工作区/.codey/
-├── sessions/<session-id>/events.jsonl
-├── sessions/<session-id>/state.json
+用户目录/.codey/
+└── sessions/<session-id>/
+    ├── session.json           # 第一版：元数据、基础提示词与成功文本历史
+    ├── session.lock           # 使用期间持有操作系统文件锁
+    └── events.jsonl           # 工具阶段再增加，不提前实现
+
+工作区/.codey/                 # 后续项目缓存、记忆与运行结果
+├── cache/
 ├── memory/project.json
 └── runs/<run-id>/summary.json
 ```
@@ -225,13 +233,13 @@ MCP 工具经适配器进入同一 ToolRegistry/ToolExecutor，复用权限、�
 
 ## 8. 会话恢复与操作边界
 
-会话恢复必须绑定工作区与模型配置引用，不持久化 API Key。持久化步骤事件和状态快照。进程意外退出后，先检查最后一条工具是否已完成；不直接重放写文件、命令或其他有副作用的调用。
+会话保存可选的工作区绑定与模型配置引用，不持久化 API Key；无工作区会话同样可恢复。第一版只恢复文本快照，工作区与模型缺失的处理见 [详细方案](#workspace-sessions)。工具阶段再持久化步骤事件和执行状态。进程意外退出后，先检查最后一条工具是否已完成；不直接重放写文件、命令或其他有副作用的调用。
 
 文件路径校验基于规范化路径和真实路径处理已有文件、符号链接及目标父目录；路径前缀的字符串判断不足以覆盖边界。命令工具能操作更大范围，因此路径限制与进程隔离是不同能力。初期使用命令审批，后续根据需要引入进程隔离。
 
 ## 9. 实现验证与已知边界
 
-- 当前验收 Maven 构建、可执行 JAR、配置/消息/HTTP 测试，以及 --prompt 的本地 HTTP 请求；真实服务商调用、持续对话、SSE 和 Agent 循环后续验证。
+- 当前验收 Maven 构建、可执行 JAR、配置/消息/提示词/Session/HTTP 测试，以及 --prompt、--chat 的本地 HTTP 请求；真实服务商调用、SSE 和 Agent 循环后续验证。
 - LLM 接入用本地 HTTP/SSE 替身验证，不使用真实密钥作为默认测试前提。
 - 工具使用临时工作区验证路径、分页、错误和超时；命令用无网络的测试程序。
 - 上下文验证工具调用组完整性、预算和规则保留；恢复验证副作用不会被盲目重放。
@@ -243,14 +251,16 @@ MCP 工具经适配器进入同一 ToolRegistry/ToolExecutor，复用权限、�
 
 ## 10. 模块职责与接口契约
 
-> 以下为目标设计。当前已实现 cli.Main、配置模块、Message/MessageRole/ToolCall，以及 LLM 层的五个非流式核心文件；其余具体类型按阶段实现。接口名可随实际实现调整。
+> 以下含目标设计。当前已实现 Main/ChatCli/SessionLauncher、配置、基础提示词、Message/MessageRole/ToolCall、Session 及本地快照/存储/服务、可选工作区、五个 LLM 核心文件。其余具体类型按阶段实现。
 
 ### 模块边界
 
 | 包 | 职责 | 计划核心类型 | 约束 |
 |---|---|---|---|
-| cli | 装配、输入、渲染、退出 | Main、CliApplication、ConsoleRenderer | 不持有 Agent 算法；核心代码不直接输出终端 |
-| config | 加载、选择并验证配置 | LlmConfig、ModelProfiles、AuthMode；后续 AppConfig/WorkspaceConfig | 密钥不进入日志、会话或仓库 |
+| cli | 装配、输入、渲染、退出 | Main、ChatCli、SessionLauncher | 不持有 Agent 算法；核心代码不直接输出终端 |
+| prompt | 内置提示词加载与后续片段组合 | PromptLoader、PromptException；后续 PromptAssembler | 按 classpath 读取，与模型厂商和密钥无关 |
+| config | 加载、选择并验证配置 | LlmConfig、ModelProfiles、AuthMode、SessionSettings | 密钥不进入日志、会话或仓库 |
+| workspace | 可选工作区与真实目录校验 | WorkspaceBinding、WorkspaceResolver | 不改变 .env 来源，不代替工具权限 |
 | agent | 执行循环、预算、取消、完成判定 | AgentLoop、RunContext、AgentResult、RunBudget | 一次 run 的状态独立，明确退出原因 |
 | llm | 请求编码、HTTP、SSE、响应组装 | LlmClient、LlmRequest、LlmResponse、StreamListener | 总返回完整结果；展示回调不影响返回值 |
 | tool | 定义、注册、调度、参数验证 | Tool、ToolDefinition、ToolCall、ToolResult、ToolRegistry、ToolExecutor | Agent 依赖执行器，工具不反向调用 Agent |
@@ -272,7 +282,7 @@ MCP 工具经适配器进入同一 ToolRegistry/ToolExecutor，复用权限、�
 | LlmResponse | message、finishReason、usage；text()/toolCalls() | 复用 assistant Message 保存内容，避免重复存储文本和调用 |
 | RunContext | runId、workspace、budget、cancelToken | 每次任务的明确执行环境 |
 | AgentResult | status、finalText、verification、metrics、artifacts | CLI 和后续 API 共用；文本不能为空只是因为已流式展示 |
-| Session | sessionId、workspace、messages、events | 上下文选择的数据来源，完整历史留存 |
+| Session | systemMessage/history；元数据由 SessionSnapshot 保存 | 内存保存成功轮次，SessionService 关联 ID/工作区/存储 |
 | MemoryEntry | id、scope、projectId、content、source、createdAt | 避免不同项目的相同事实被错误合并 |
 
 只有实际需要的字段进入首版。usage 缺失表示未知，不视为零。模型 capabilities（工具支持、上下文窗口等）通过显式配置提供。
@@ -361,7 +371,53 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --prompt "解释 Java record" --profil
 
 每次 --prompt 是独立的一次请求，不恢复历史。help/version/list/check 不发起模型调用。参数或配置错误退出码为 2，模型调用错误为 1；获得响应时输出文本，截断时另外提示，工具调用暂不执行。
 
-测试使用 JDK HttpServer 的临时本地端口与假密钥，覆盖配置选择、消息/工具字段映射、文本/工具响应、可空 usage、HTTP 错误、非法 JSON、完整参数、慢响应体超时、线程中断、网络失败和密钥不回显。加入提示词测试后完整构建的 133 项测试通过；此前 13 项可执行 JAR 检查验证独立启动、Profile 路由、无认证调用、错误/截断提示和参数组合，确认 Jackson 已打包。本次另完成 3 项提示词 JAR 检查，详见 [Prompt 模块](#prompt-design)。没有发送真实服务商请求。
+测试使用本地 HTTP 服务与假密钥，覆盖配置、协议、错误、超时及线程中断。内存对话阶段为 151 项测试；加入持久化/标题/工作区后当前为 178 项，另完成 12 项持久化 JAR 检查，见 [工作区与历史会话实现](#workspace-sessions)。没有发送真实服务商请求。
+
+<a id="session-chat"></a>
+
+### 已实现的 Session 与连续对话
+
+| 类型/方法 | 当前职责 |
+|---|---|
+| Session(basePrompt) | 初始化一个内存会话，第一条为 system 消息 |
+| messages() | 返回已保存历史的不可修改快照 |
+| messagesFor(input) | 历史副本追加本轮问题，构造请求但不修改历史 |
+| completeTurn(input, answer) | 校验后保存 user 与普通 assistant，形成完整成功轮次 |
+| clear() | 删除所有对话轮次，保留原始 system 消息 |
+| Session.restore(snapshot) | 从校验后的快照恢复，system 只出现一次 |
+| ChatCli.answer(input) | 调用模型、展示并提交成功文本轮次；返回是否需要保存 |
+| ChatCli.run() | 保留供内存调用者使用；实际 CLI 使用 SessionLauncher 管理持久化与命令 |
+
+```text
+Main（无参数或 --chat）
+  → SessionLauncher 全局历史选择 / 新建
+  → 创建或恢复 SessionService，获得会话写锁
+  → SessionLauncher 读取一行
+      ├─ /exit 或 EOF：保存待写内容并退出
+      ├─ /clear：保存旧会话，新建 ID，保留旧记录
+      ├─ 会话命令：分页、改名、切换；不作为普通问题发送
+      └─ 普通问题：ChatCli.answer → Session.messagesFor → LlmRequest → generate
+          ├─ 普通回答：completeTurn → 显示 → captureTurn/save → 首轮标题任务
+          ├─ 调用失败：提示，不提交本轮，继续输入
+          └─ 工具请求：提示未执行，不提交缺少 tool 结果的轮次
+```
+
+第二轮请求为 system → 第一问 → 第一答 → 第二问。请求快照和已保存历史独立，失败无需删除尾部消息；校验非法提交时历史也保持不变。截断回答保存已收到文本，同时提示 length，用户可继续追问。请求中断时结束交互，不再阻塞等待输入。
+
+交互启动方式：
+
+```shell
+java -jar target/codey-0.1.0-SNAPSHOT.jar --chat
+java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --profile qwen
+```
+
+每行一个问题，同一活动会话的 Profile 固定；恢复时可 --profile 覆盖，/model 后续增加。终端使用 Console，重定向输入输出使用 UTF-8。正常退出或 EOF 返回 0；非法参数/单次入口配置错误返回 2；存储、提示词、输入错误返回 1。交互模型错误可继续，交互配置无效时要求选择别名，未保存结果先重试再开始下一轮。
+
+Session 保存成功文本对话，并非完整执行审计日志；不保存失败轮次或未执行工具调用。SessionService/JsonSessionStore 已提供跨进程文本恢复。当前仍发送全部历史，没有 Token 预算、裁剪或摘要；超长时可 /clear，新会话不删除旧历史。
+
+模块边界：Session 保存发生过的对话，ContextBuilder 后续选择和组织本次请求，Memory 后续提取/保存/召回可复用事实。当前不增加 context 或 memory 的具体实现。
+
+阶段记录：最初新增 11 项 Session 与 7 项 ChatCli 测试，共 151 项通过，并完成 8 项内存交互 JAR 检查。目前入口与 /clear 已升级为持久化语义，最新验证见 [第 16 节](#workspace-sessions)。
 
 协议依据：[OpenAI Chat Completions API Reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)。其他提供商的实际兼容性需要各自的请求样例验证。
 
@@ -386,6 +442,10 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --prompt "解释 Java record" --profil
 | 9 | llm/ChatCompletionsClient.java | encode → HTTP 等待 → decode，以及错误和超时处理 |
 | 10 | llm/LlmException.java | 错误类别、可空状态码与后续重试提示 |
 | 11 | prompt/PromptLoader.java、PromptException.java、resources/prompts/base.md | classpath UTF-8 加载、资源错误，以及 system 消息注入 |
+| 12 | session/Session.java、cli/ChatCli.java | 请求快照、成功提交、清空与输入循环；失败如何保持历史不变 |
+| 13 | cli/SessionLauncher.java、config/SessionSettings.java、workspace 包 | 列表/对话状态、延迟模型校验、可选工作区与配置来源 |
+| 14 | SessionSnapshot、SessionService、SessionStore、JsonSessionStore | 版本化 DTO、dirty 重试、文件锁、原子保存和恢复 |
+| 15 | SessionTitleGenerator | 一次独立短请求，输入有界，结果不进入历史，失败回退 |
 
 运行 `--prompt` 时的实际调用链：
 
@@ -500,7 +560,7 @@ interface SessionStore {
 
 ## 11. 配置加载与多模型选择
 
-> 当前已实现：LlmConfig、AuthMode、ModelProfiles、ConfigLoader、DotEnvReader，以及 CLI 的 --list-models、--check-config、--profile 和 --prompt。支持命名 Profile 与旧版单模型配置。--check-config 仅本地校验，--prompt 才发起真实模型请求。
+> 当前已实现：LlmConfig、AuthMode、ModelProfiles、ConfigLoader、DotEnvReader，以及 CLI 的 --list-models、--check-config、--profile、--prompt 和 --chat。支持命名 Profile 与旧版单模型配置。--check-config 仅本地校验，--prompt/--chat 才发起真实模型请求。
 
 ### .env、环境变量、YAML 和配置类
 
@@ -549,7 +609,7 @@ llm:
 - .env.example 是可提交的字段模板，不会作为运行配置读取。
 - .env 无法读取、内容不符合约定或有重复字段时报错，只输出字段/行号，不回显内容。
 
-启动目录和 Agent 操作的工作区是不同概念，当前按启动目录定位配置；CODEY_WORKSPACE 的加载留到后续 Agent 配置实现。
+启动目录与 Agent 工作区不同。模型配置一直从启动目录加载；SessionSettings 已加载 CODEY_WORKSPACE 作为新建菜单的建议，CODEY_DATA_DIR 控制存储位置，CODEY_AUTO_TITLE 控制额外标题请求。环境变量仍优先于启动目录 .env。
 
 ### 多 Profile 配置与选择
 
@@ -590,7 +650,7 @@ CODEY_PROFILE_LOCAL_TIMEOUT_SECONDS=60
 
 ConfigLoader.loadProfiles() 返回不可变配置快照。profileNames() 列出别名，activeConfig() 校验并返回当前配置，configFor(name) 读取指定配置。select(name) 校验目标后返回新快照，失败时原快照保持不变。
 
-文件修改后需要重新加载配置；快照不会自动热更新。交互式 /model 命令将在对话循环实现后使用这些接口。任务执行时持有自己的 LlmConfig，避免修改正在进行的请求。
+活动会话的模型客户端不会自动热更新。新建或恢复时重新从启动目录解析配置；--profile 优先于保存的别名，别名失效时要求明确选择。会话内 /model 后续实现，不修改正在进行的请求。
 
 ### 旧版单模型兼容
 
@@ -650,9 +710,9 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --check-config --profile qwen
 java -jar target/codey-0.1.0-SNAPSHOT.jar --check-config --profile local
 ```
 
-成功时输出配置已通过本地校验，并用 apiKey=<redacted> 隐藏密钥。失败时退出码为 2。默认/help/version 不要求配置存在。
+成功时输出配置已通过本地校验，并用 apiKey=<redacted> 隐藏密钥。失败时退出码为 2。help/version 不加载配置；无参数会话列表不要求模型凭证，但会读取会话设置与存储。
 
---profile 不修改文件，当前必须配合 --check-config、--list-models 或 --prompt。每次只指定一种操作。/model 当前尚未实现。
+--profile 不修改文件，当前必须配合 --check-config、--list-models、--prompt 或 --chat。每次只指定一种操作。/model 当前尚未实现。
 
 环境变量覆盖示例（PowerShell）：
 
@@ -684,7 +744,7 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 
 ## 12. 开发路线与验收标准
 
-> 当前：M1，已完成多 Profile 配置、消息模型与非流式 LLM 调用。各阶段按顺序推进；没有固定工期承诺。先完成当前阶段，再接入后续复杂度。
+> 当前：M1 的非流式对话已完成，并提前实现 M5 的文本会话保存/恢复、工作区选择和标题。SSE、Agent 工具循环与执行状态恢复仍按路线推进。
 
 ### M0：工程骨架
 
@@ -707,12 +767,16 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 - [x] 本地 HTTP 测试验证请求、文本/工具响应、usage、超时、线程中断与错误处理。
 - [x] 加入 Jackson 与 Shade 打包，生成包含依赖的可执行 JAR。
 - [x] 从 resources/prompts/base.md 加载基础提示词，通过 system 消息注入；缺失或空白时发送前失败。
+- [x] 内存 Session 与 --chat 连续非流式对话，支持 /clear、/exit、EOF；失败不提交本轮。
+- [x] 全局历史启动器、每页 10 条、/new、/resume、/rename；/clear 保留旧会话并新建 ID。
+- [x] 可选工作区、文本快照、写锁、dirty 重试与一次独立自动标题请求。
+- [x] 连续两轮保持历史顺序，使用本地接口验证交互 JAR。
 - [ ] 使用真实平台配置验证非流式调用与提供商实际兼容性。
-- [ ] 对话循环接通后支持 /model，切换在任务边界生效。
-- [ ] 连续两轮对话保持消息顺序，最终文本与流式展示一致。
+- [ ] 支持 /model，切换在任务边界生效。
+- [ ] 流式输出接通后验证最终文本与流式展示一致。
 - [ ] 测试多行 SSE、拆分参数、正常结束、提前 EOF，并补充流式错误和超时场景。
 - [ ] 支持取消并关闭响应流；日志不输出 API Key。
-- [ ] 加入持续对话与流式能力后更新独立启动验证。
+- [ ] 加入流式能力后更新独立启动验证。
 
 产出证据：脱敏请求/响应、流式样例、协议测试结果。面试：HTTP、SSE、超时、适配。
 
@@ -757,8 +821,9 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 
 引入 JSONL 事件和状态快照、项目级长期记忆。先完成明确的本地存储和恢复逻辑。
 
-- [ ] 新进程可恢复消息历史、工作区和执行状态。
-- [ ] 模型配置引用可恢复，API Key 不落盘。
+- [x] 新进程可恢复文本消息、可选工作区与模型配置引用，凭证不写入会话 DTO。
+- [x] JSON 文本快照具备文件锁、版本检查、原子替换与损坏记录隔离。
+- [ ] 工具阶段增加执行事件与状态恢复。
 - [ ] 项目记忆带范围、来源与时间，跨项目不串用。
 - [ ] 写入采用明确单写者/锁和原子替换；损坏尾行可检测处理。
 - [ ] 中断于工具执行前后时，避免盲目重放有副作用的操作。
@@ -844,9 +909,9 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 
 ### D07：阶段式持久化与明确恢复
 
-原因：先跑通内存会话，再用项目内 JSONL/JSON 保存关键事件和状态，方便理解与复现。
+原因：先跑通内存会话，再用用户目录的单个 JSON 快照保存文本会话，支持跨项目历史列表与无工作区聊天；工具阶段补充 JSONL 执行事件。详细方案见 [工作区与会话方案](#workspace-sessions)。
 
-代价：本地文件不适合多进程并发写；需要明确单写者、尾行损坏检测与原子写入。
+代价：JSON 快照每轮重写完整文件，适合初期小会话；需要文件锁、版本校验和原子替换。后续 JSONL 另处理尾行损坏和事件重放。
 
 重新评估：出现并发存储或复杂查询时考虑 SQLite。任何存储形式都不自动保证有副作用的任务可安全重放。
 
@@ -1058,11 +1123,191 @@ ReAct 依赖 AgentLoop 实现“请求模型 → 校验工具调用 → 执行 �
 
 第一阶段验证 UTF-8 中文、缺失/空白基础资源，以及打包 JAR 后仍可读取。第二阶段验证可选项目文件缺失、大小限制、来源标记和路径范围；后续模式验证实际允许的工具，不以模型口头遵守规则作为权限测试。
 
-已完成验证：PromptLoader 的 3 项测试与其余测试合计 133 项全部通过，mvn verify 构建成功。另使用临时工作目录和本地模拟 HTTP 服务验证可执行 JAR：请求中的 system 内容与 base.md 全文一致且中文完整；移除资源的测试 JAR 在请求前以退出码 1 报错；--help 不依赖提示词资源。这 3 项检查没有调用真实模型。
+提示词阶段的验证：PromptLoader 的 3 项测试与其余测试当时合计 133 项全部通过。另使用临时工作目录和本地模拟 HTTP 服务验证可执行 JAR：请求中的 system 内容与 base.md 全文一致且中文完整；移除资源的测试 JAR 在请求前以退出码 1 报错；--help 不依赖提示词资源。这 3 项检查没有调用真实模型。当前总测试数与交互验证见 [Session 与连续对话](#session-chat)。
 
 面试可说明：Prompt 是给模型的行为与背景文本；Harness 通过代码控制上下文、循环、工具执行、审批和预算。MD 的数量不代表 Agent 的完整程度，应让提示词与实际能力保持一致。
 
-## 16. 参考资料与维护方式
+<a id="workspace-sessions"></a>
+
+## 16. 工作区选择、历史列表与会话恢复方案
+
+> 实现状态：首版已完成。无参数/--chat 的全局最近列表、分页、新建、标题/ID 恢复、可选工作区、手动/自动标题、本地 JSON 快照与单写者锁已接入。/model、工具状态恢复与云端同步仍待实现。
+
+### 参考依据与 CodeY 的取舍
+
+本项目是 CLI，主要参考两者的 CLI 会话行为；不推断桌面端、云端与 CLI 使用同一套存储。
+
+- Codex 提供 resume、--last、--all 与工作目录参数 --cd；恢复时当前目录与原目录不同会询问使用哪一个。借鉴“目录关联、可筛选历史、显式恢复”。见 [OpenAI 官方命令说明](https://learn.chatgpt.com/docs/developer-commands?surface=cli)。
+- Claude Code 支持 --continue、--resume 和会话选择器，本地记录与项目目录关联；/clear 开始新上下文并保留原会话。借鉴“持续保存、恢复入口、清空与删除分离”。见 [Claude Code 会话说明](https://code.claude.com/docs/en/sessions)。
+
+下面是 CodeY 自己的产品与工程决策，不是对上述产品内部类结构或文件格式的复制。按当前产品要求，入口默认展示所有工作区的近期会话，以标题或 ID 选择；目录作为会话属性。保留“有工作区 / 无工作区”选择，不引入云端同步、多根目录、Git worktree 和会话分支。
+
+### 首版启动与选择流程
+
+无参数与 --chat 使用同一会话启动器，--help/--version/--prompt 保持明确用途。启动器自动显示全局最近 10 条会话，不先显示目录筛选菜单。只有 /new 新建时才选择工作区；显式 --workspace/--no-workspace 可跳过选择。
+
+```text
+CodeY
+最近会话（按最后更新时间倒序，所有工作区）
+序号  会话 ID   标题              工作区             更新时间
+1     a21f8b93  CodeY 配置解析    E:\...\codeY        ...
+2     b34d7a62  Java record 学习  普通聊天           ...
+
+输入序号、标题或 ID 继续会话
+/new 新建   /more_session 下一批   /exit 退出
+
+/new → 选择工作区
+1. 当前目录：E:\Desktop\github\codeY
+2. 输入其他目录
+3. 不使用工作区，普通聊天
+0. 返回
+
+选择工作区 → 输入标题（可留空，第一轮后自动生成）→ 开始对话
+```
+
+启动器与历史列表只加载数据，不调用模型；没有历史时仍显示 /new 与 /exit。输入结束时正常退出，不在无输入的环境中反复等待或隐式新建。恢复后显示标题、工作区、选中的 Profile 与近期对话，等待下一条输入；不会自动重发上次问题。无成功轮次的空会话默认不列出。
+
+分页采用全局最近更新顺序，更新时间相同用完整 ID 稳定排序。/more_session 明确定义为追加下一批 10 条，连续使用即可查看全部；到底时提示没有更多会话，不循环回第一页。启动器持有一次列表快照，序号在已显示项目中连续编号，不因其他进程更新会话而改变对应关系。/sessions 显式刷新并回到最近 10 条；大量数据以后改用数据库游标。
+
+选择规则：序号只针对当前已显示列表；标题按完整标题精确匹配，ID 支持完整 UUID 或唯一前缀，标题/ID 搜索整个会话库，不只搜索最近一页。短 ID 默认展示前 8 位，冲突时增加展示长度；前缀匹配多个会话时显示候选项，不任意选择。标题允许重复，重名或不同选择方式产生歧义时同样列出候选项，要求按序号或完整 ID 指定。
+
+启动器中的普通输入用于选择会话；进入对话后的普通输入始终视为用户问题，即使与某个会话标题相同。会话内使用 /resume 标题或ID 切换，避免标题和问题混淆。纯数字标题与序号冲突时可用 /resume 标题 明确指定。首版不自动用模糊匹配结果恢复，拼写不匹配时提示并展示可选项。
+
+已提供直接入口，避免重复选择：
+
+```shell
+java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace "E:\projects\demo"
+java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --no-workspace
+java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --resume SESSION_ID_OR_TITLE
+java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --resume "CodeY 配置解析" --profile qwen
+```
+
+--workspace 或 --no-workspace 直接新建，跳过启动列表，二者互斥；--title 可直接提供标题，留空标题通过交互回车选择自动生成。--resume 与工作区/标题覆盖互斥，--profile 可覆盖恢复时别名。--prompt 不自动保存。只有完整 UUID 可恢复未出现在列表的空会话，其他选择方式针对已有历史。
+
+### 标题生成、修改与唯一标识
+
+每个会话有稳定 UUID 和可修改标题。UUID 用于文件目录、保存、恢复和引用；标题只是显示与查找字段，改名不移动目录，也不产生新会话。
+
+- 新建时标题可由 --title 或交互输入指定，要求单行、非空白且不超过 40 个 Unicode 码点。标题可重复，不限制为文件名。
+- 用户未指定时，初始为“新会话”；第一轮成功后先从第一次用户问题生成本地摘要占位，立即保存对话，再用独立模型请求生成一次简洁标题。标题不是第一轮正常回答，也不直接取模型整段回答作为标题。
+- 标题请求只带生成标题的指令与第一条问题的有界副本，最多 2000 个码点；不添加到 Session.messages，不携带整个历史，不调用工具，也不触发下一次标题生成。
+- 标题模型使用第一轮成功时的 Profile，超时取模型配置与 5 秒中的较小值。正常回答展示与保存后执行，可能短暂等待；后续再考虑后台任务。标题失败单独提示，不算用户的一轮对话；当前未持久化独立成本指标。
+- 校验生成结果为非空、单行且长度合规；失败、超时或结果无效时保留本地摘要，不影响已保存回答，不在每次启动或每轮对话时重复请求。配置可关闭额外模型调用，采用本地摘要。
+- 发起生成前保存已尝试标记；若进程在标题生成期间结束，恢复时保留本地摘要并按回退处理，不自动再发一次。当前只保存成功轮次，标题的首问指首次成功提交的用户问题。
+- /rename 新标题 允许用户随时修改。用户指定或手动修改的标题优先；将来异步生成时检查会话 ID、标题来源及生成任务版本，避免旧结果覆盖用户改名或写入另一个会话。
+
+标题生成只决定列表中的名称，不代表准确的全会话摘要。第一版不随话题变化持续改名，用户可手动修改；未来可增加显式重新生成命令。
+
+### 工作区的语义与配置来源
+
+WorkspaceBinding 明确区分 DIRECTORY 与 NONE：DIRECTORY 保存绝对真实路径；NONE 没有目录字段。不要用空字符串、当前目录或 user.home 冒充“无工作区”。工作区绑定在创建会话时确定，首版不支持会话内 /cd。
+
+- 当前启动目录只用于查找 .env；选择工作区不调用 chdir，不改写 user.dir，也不自动读取选中项目的密钥文件。
+- 相对路径相对启动目录解析；接受带空格的路径，使用 Path.toRealPath 校验存在且为目录，不要求必须是 Git 仓库，也不要求目录一定可写。
+- 启动参数优先；没有参数时通过菜单明确选择。CODEY_WORKSPACE 提供“配置建议目录”菜单项，进程环境覆盖启动目录 .env；模板中的点号不自动跳过选择，也不覆盖历史会话的绑定。
+- 配置建议目录作为额外选项展示，即使与当前目录相同也不会自动选定；失效建议不阻止选择其他目录。显式 --workspace 无效时报告参数错误。
+- 工具阶段有工作区才按能力注册项目文件、搜索和命令工具；NONE 不注册这些工具。项目指令也只从绑定目录按明确规则读取。选目录本身不扫描整个项目或把全项目注入模型。
+
+工作区是文件和命令的定位依据；工具路径规则、审批与进程隔离继续由对应模块处理。当前尚未接入工具，选定目录不会立即增加读写能力。
+
+### 会话数据结构与保存内容
+
+第一版采用单个版本化 SessionSnapshot，避免元数据与消息分文件更新造成不一致：
+
+| 字段 | 含义 |
+|---|---|
+| schemaVersion | 磁盘格式版本，首版为 1 |
+| id | UUID，与目录名一致；标题/前缀解析为合法完整 ID 后再加载 |
+| title | 用户标题、模型生成标题，或首问的本地摘要 |
+| titleSource | MANUAL、PENDING、LLM、FALLBACK，表示标题来源与生成状态 |
+| titleGenerationAttempted | 自动生成已尝试或由手动改名终止，避免恢复后重复调用 |
+| createdAt / updatedAt | UTC 时间，显示时转换为本地时间 |
+| revision | 每次成功保存递增，检查是否覆盖了陈旧快照 |
+| workspace | DIRECTORY + 实际路径，或 NONE |
+| profileAlias | 当前继续使用的模型配置别名，不包含凭证 |
+| systemPrompt / promptHash | 创建时的基础提示词快照及摘要 |
+| messages | 已提交 user/assistant 列表，按原顺序保留 |
+
+systemPrompt 单独存储，恢复时仅生成一条 system 消息，再追加保存的对话；不向已包含 system 的列表重复注入 base.md。数据 DTO 与 LLM 请求 JSON 分开，磁盘版本不依赖服务商 wire 格式。
+
+文件中不序列化 LlmConfig、完整环境变量或 API Key；Profile 的当前凭证只在启动时重新解析。消息是用户与模型产生的原文，因此仍可能含用户主动粘贴的敏感内容。恢复旧会话首版沿用其基础提示词快照，若与当前 base.md 摘要不同则显示提示；后续项目规则与真实工具能力需重新加载，不恢复过期权限。
+
+首版仍只保存成功文本轮次；失败调用和未执行的工具请求不进入可恢复上下文。工具阶段再增加 turnId、工具结果、执行状态和事件日志，不以文本快照承诺恢复正在执行的任务。
+
+### 本地存储与写入策略
+
+默认存储根为 Java user.home 下的 .codey；可通过 CODEY_DATA_DIR 显式指定，进程环境覆盖启动目录 .env。会话文件独立于工作区，项目移动或无工作区聊天不影响数据位置。保存根与工作区路径是两个字段。
+
+```text
+用户目录/.codey/sessions/<UUID>/
+├── session.json       # 完整快照，唯一数据来源
+└── session.lock       # 写入期间及会话使用期间的文件锁
+```
+
+SessionStore 提供 create/save/load/list；实现使用已引入的 Jackson，无需新增数据库依赖。首版扫描 session.json 形成所有会话的列表，排序后分页，不默认按工作区过滤，也不先维护另一份全局索引。代价是小会话适合，大量/大型会话后再考虑 SQLite 或可重建索引；工作区筛选可作为后续可选条件。
+
+每个成功轮次立即保存，不能只依赖 /exit 或 shutdown hook。保存时持有会话文件锁，校验 revision，UTF-8 写同目录临时文件并 force，再原子替换 session.json。目标文件系统不支持原子替换时明确报错并保留旧快照，不把非原子覆盖描述为同等保证；正常进程中断时恢复最后完成的快照，断电耐久性仍取决于文件系统。
+
+同一会话只允许一个进程继续写，第二个进程可以查看列表但不能取得写锁；锁由操作系统释放，不通过删除锁文件判定解锁。不同会话各用自己的锁。加载检查版本、字段、消息角色和完整轮次；损坏/不支持的文件标记错误，不覆盖为空会话，一个损坏项不阻止其他历史显示。
+
+存储失败时保留本轮内存结果并明确标记“未保存”；先重试保存，再继续下一轮模型调用。退出时再尝试，仍失败以错误退出码报告；不把只展示了回答当作已经保存，也不自动重新请求模型生成相同回答。
+
+### 恢复、模型选择与目录变化
+
+恢复顺序：加载并校验快照 → 检查工作区 → 选择并校验模型配置 → 获得会话写锁后复核 revision → 重建 Session → 显示近期历史 → 等待输入。列表和历史查看不依赖有效 API Key，准备继续对话时才要求可用配置。
+
+Profile 选择顺序为 --profile > 历史保存的别名；原别名缺失或配置无效时报告字段错误并要求输入已配置的别名（或 /back），不静默换厂商。明确选择另一模型后保留消息并保存别名，不复制旧凭证。
+
+原工作区存在则沿用；原目录失效仍可查看历史，但不自动使用启动目录。首版提供返回菜单、新建普通聊天或新建另一工作区会话；保留原会话绑定与记录。目录迁移、复制历史后换工作区属于后续显式迁移/分支功能。
+
+恢复会话不恢复旧进程、不还原文件版本、不重放写入或命令。后续接入工具时，重新读取当前项目状态，检查未完成执行，再决定如何继续。
+
+### 会话内命令的语义
+
+| 命令 | 持久化阶段计划行为 |
+|---|---|
+| /exit | 保存待写快照后退出，保存失败报告错误退出码 |
+| /new | 保留当前记录，进入新会话工作区选择 |
+| /sessions | 保留当前记录，显示所有工作区最近 10 条会话，重置分页快照 |
+| /more_session | 在列表中追加下一批 10 条；会话内先打开历史列表，展示最近一批 |
+| /resume [标题或ID] | 无参数打开历史选择器，有参数按精确标题或唯一 ID 解析后恢复 |
+| /rename 新标题 | 只修改当前会话标题和标题来源，不改变 ID 与消息历史 |
+| /clear | 保存当前会话，创建新 ID，沿用工作区与当前 Profile，使用当前 base.md；不删除原历史 |
+| /model | 后续在轮次边界切换配置，沿用已有历史 |
+
+上表除 /model 外均已实现。/clear 新建无手动标题的会话，首轮按标题流程处理；原会话仍可恢复。菜单、分页、切换、改名本身都不调用模型，只有首轮成功后的自动标题任务可能额外调用。删除会话后续另设功能。
+
+### 模块职责与实施顺序
+
+| 类型/模块 | 实现职责 |
+|---|---|
+| workspace/WorkspaceBinding、WorkspaceResolver | 表达可选工作区，解析与校验目录 |
+| session/SessionSnapshot | 合并元数据与消息的版本化 DTO，校验 ID、角色、提示词摘要和时间 |
+| session/Session | 保持轻量内存消息，增加 restore；元数据和工作区通过 SessionService 的快照关联 |
+| session/SessionStore、JsonSessionStore | 本地读写、列表、版本检查和会话写锁 |
+| session/SessionService | 协调新建、恢复、保存、标题修改与切换，不直接输出终端 |
+| session/SessionTitleGenerator | 首问标题生成、长度校验与本地回退，独立于普通对话历史 |
+| cli/SessionLauncher | 全局最近列表、稳定分页、标题/ID 选择与工作区输入；ChatCli 继续负责对话输入 |
+| config | 解析存储位置与建议工作区，保持模型凭证来源不变 |
+
+这些步骤已接通。SessionService 维持 dirty 快照，失败时下一次输入先重试保存；JsonSessionStore 限制单个快照 16 MiB，校验重复字段/尾随数据/版本，force 后原子替换，不使用非原子覆盖回退。/model、项目规则、上下文预算、工具执行恢复后续增加；云端存储以后通过接口扩展。
+
+实现调用流程：
+
+```text
+Main → SessionSettings + JsonSessionStore → SessionLauncher
+  ├─ list → 最近 10 条 / more → 稳定列表快照
+  ├─ /new → WorkspaceResolver → 标题 → 延迟选择模型 → SessionService.create
+  └─ /resume → 标题/ID 消歧 → 历史预览 → 检查目录/模型 → lock/load → Session.restore
+活动会话：ChatCli.answer → Session.completeTurn → captureTurn → save
+首轮无手动标题：保存摘要 → 保存尝试标记 → 独立标题请求 → 校验/回退 → 再保存
+```
+
+验收：全局列表包含不同目录与普通聊天；首次展示 10 条、下一批无重复且序号稳定、到底明确提示；标题与完整/短 ID 选择、重名与前缀冲突处理；手动标题优先、自动任务仅一次且不入历史、失败回退、改名后 ID 不变；无工作区与不同项目分别新建；相对路径/空格/链接目录解析；选工作区不改变 .env 来源；成功轮次重启恢复；失败不入历史；系统消息只有一条；/clear 后原会话仍可恢复；菜单不发请求；损坏文件与失效工作区可定位；Profile 缺失不静默切换；保存失败不谎报成功；同会话双进程仅一写者。所有测试使用临时目录和本地模型替身。
+
+验证记录：新增 27 项持久化、启动器、标题、配置与目录测试，连同原有测试共 178 项通过。已通过本地模拟 HTTP 的 12 项 JAR 检查：默认入口与新建、跨进程按标题恢复及 Profile 覆盖、无凭证查看列表、/clear 留存旧记录、标题回退及失败/工具轮次排除、全局 23 条分页、重名/短 ID 消歧、双进程互斥写锁、单次调用兼容、参数冲突/帮助/版本，以及真实慢标题响应触发 5 秒请求超时、强制结束进程后锁释放并恢复最后快照。未向真实厂商发送请求。
+
+## 17. 参考资料与维护方式
 
 - [PaiCLI](https://gitcode.com/javabetter/paicli)：参考实际编程 Agent 的工程场景。本机源码分析原文保留在 `E:\Desktop\github\paicli\docs\paicli-source-architecture-guide.md`；其中描述的是 PaiCLI，不代表 CodeY 已实现的能力。
 - [Hello-Agents](https://github.com/datawhalechina/hello-agents)：按需参考框架、记忆、上下文工程相关章节。
