@@ -6,18 +6,19 @@
 
 ## 当前进度
 
-当前已建立 Maven 工程、CLI 入口、模块目录和设计文档，完成多模型 Profile 配置加载、选择与校验，以及不可变消息模型（M1）。消息支持 system、user、assistant、tool 四种角色和工具调用关联。支持启动目录 `.env`、系统环境变量、`--profile` 覆盖和本地服务无认证配置；LLM 调用、Agent 循环、工具执行、记忆和 MCP 尚待实现。
+当前已完成多模型 Profile 配置、不可变消息模型和非流式 Chat Completions 调用（M1）。通过 `--prompt` 发送一次请求，支持 `--profile` 选择配置、回答和工具调用解析、结束原因、Token 用量、超时与分类错误。消息支持 system、user、assistant、tool 四种角色。持续对话、SSE、Agent 循环、工具执行、记忆和 MCP 尚待实现；协议已使用本地 HTTP 服务验证，真实厂商调用需使用有效配置另行验证。
 
 ## 技术基线
 
 - Java 17、Maven 单模块。
 - 基础包：`io.github.jackfeicoder.codey`。
-- 首版计划采用 JDK HttpClient 接入兼容 Chat Completions 的接口，使用 Jackson 处理 JSON。
+- 使用 JDK HttpClient 调用兼容 Chat Completions 的接口，Jackson 2.18.2 处理 JSON。
+- Maven Shade 将运行依赖打入可执行 JAR。
 - 第一版聚焦单 Agent；上下文、持久化、MCP 按阶段加入。
 
 ## 架构概览
 
-以下为目标架构。当前实现了工程骨架、CLI 入口和配置加载，图中的 Agent、LLM、工具及存储能力按开发路线逐步实现。
+以下为目标架构。当前实现了配置、消息、CLI 单次请求和 LLM 非流式调用；图中的 Agent、工具执行及存储能力按开发路线逐步实现。
 
 ```mermaid
 flowchart LR
@@ -104,7 +105,7 @@ codeY/
 | 阶段 | 目标 | 状态 |
 |---|---|---|
 | M0 | 工程、入口与设计文档 | 已完成 |
-| M1 | LLM 调用与 SSE 流式输出 | 进行中：配置与消息模型已完成 |
+| M1 | LLM 调用与 SSE 流式输出 | 进行中：配置、消息与非流式调用已完成 |
 | M2 | Agent 循环与只读工具 | 待实现 |
 | M3 | 修改代码、执行命令与验证闭环 | 待实现 |
 | M4 | 上下文预算与历史压缩 | 待实现 |
@@ -126,15 +127,19 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --version
 java -jar target/codey-0.1.0-SNAPSHOT.jar --check-config
 java -jar target/codey-0.1.0-SNAPSHOT.jar --list-models
 java -jar target/codey-0.1.0-SNAPSHOT.jar --check-config --profile qwen
+java -jar target/codey-0.1.0-SNAPSHOT.jar --prompt "你好，介绍一下你自己"
+java -jar target/codey-0.1.0-SNAPSHOT.jar --prompt "解释 Java record" --profile qwen
 ```
 
-当前版本没有运行时第三方依赖，因此普通 JAR 即可运行。加入依赖后，在 LLM 接入阶段同步配置可执行 JAR 的依赖打包。
+构建生成的 JAR 已包含 Jackson 运行依赖，直接使用 `java -jar` 即可。`--prompt` 会向选中平台发送真实请求；每次启动独立发送 system/user 消息，当前不保存跨请求历史。工具调用只解析不执行，输出被截断时提示 `finish_reason=length`。
 
 `--check-config` 需要选中 Profile 的有效配置，但不会调用模型。首次配置时复制 `.env.example` 为启动目录下的 `.env`，已有 `.env` 时手工补充字段；填写地址、密钥和模型。来源优先级为 **系统环境变量 > .env > 默认值**，选择优先级为 **--profile > CODEY_ACTIVE_PROFILE**。旧版 `CODEY_LLM_*` 仍兼容。完整语法、CMD/PowerShell 用法及与 `application.yml` 的关系见 [配置说明](docs/architecture.md#configuration)。
 
 ## 设计文档
 
 [完整设计文档](docs/architecture.md) 集中包含架构与目录、模块接口、执行流程、配置与多模型选择、开发验收、设计决策和面试学习笔记。
+
+学习代码可从 [阅读顺序与当前调用流程](docs/architecture.md#code-guide) 开始。主代码和测试已补充中文类、方法、字段及关键变量注释；构建配置和环境模板也有用途说明。
 
 ## 学习方式
 

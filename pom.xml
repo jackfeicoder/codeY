@@ -3,17 +3,26 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
+    <!-- 项目坐标：组织、制品名称和当前开发版本。 -->
     <groupId>io.github.jackfeicoder</groupId>
     <artifactId>codey</artifactId>
     <version>0.1.0-SNAPSHOT</version>
     <name>CodeY</name>
     <description>A CLI coding agent built from scratch in Java.</description>
     <properties>
+        <!-- 编译目标 Java 17；源文件与构建报告统一使用 UTF-8。 -->
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     </properties>
     <dependencies>
+        <!-- 运行依赖：把内部消息转换为请求 JSON，并解析模型返回的数据。 -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.18.2</version>
+        </dependency>
+        <!-- 测试依赖：仅在测试阶段使用，不打入最终运行 JAR。 -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
@@ -23,16 +32,19 @@
     </dependencies>
     <build>
         <plugins>
+            <!-- 按 release 配置编译代码，约束目标 JDK 的语言与 API。 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.13.0</version>
             </plugin>
+            <!-- 执行 JUnit 测试，验证配置、消息与本地 HTTP 调用。 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
             </plugin>
+            <!-- 配置 JAR 的 main 入口，使 java -jar 能启动 CLI。 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
@@ -44,6 +56,39 @@
                         </manifest>
                     </archive>
                 </configuration>
+            </plugin>
+            <!-- 将 Jackson 等运行依赖合并进可执行 JAR，无需另设 classpath。 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.1</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <!-- 原依赖签名不适用于重新打包的文件，因此排除这些签名。 -->
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                            <!-- 保留入口信息并合并服务发现文件，避免运行时缺少实现。 -->
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>io.github.jackfeicoder.codey.cli.Main</mainClass>
+                                </transformer>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

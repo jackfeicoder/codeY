@@ -1,12 +1,14 @@
 # CodeY 架构设计
 
-> 版本：0.1，日期：2026-10-11。本文描述目标架构；当前已实现 Maven 骨架、CLI 入口、多 Profile 配置与消息模型，其他模块按阶段实现。开发进度见 [开发路线](#roadmap)。
+> 版本：0.1，日期：2026-10-11。本文描述目标架构；当前已实现多 Profile 配置、消息模型、LLM 非流式调用与 CLI 单次请求，其他模块按阶段实现。协议使用本地 HTTP 服务测试，真实厂商尚未进行端到端调用验证。开发进度见 [开发路线](#roadmap)。
 
 ## 阅读导航
 
 - 第 1—9 节：定位、技术栈、目录、架构图、执行流程与核心策略。
 - [模块职责与接口契约](#modules)
 - [已实现的消息模型](#messages)
+- [已实现的非流式 LLM 调用](#llm)
+- [代码阅读顺序与当前调用流程](#code-guide)
 - [配置加载与多模型选择](#configuration)
 - [开发路线与验收标准](#roadmap)
 - [设计决策](#decisions)
@@ -29,14 +31,14 @@ Harness 在本项目中指运行核心及其策略：Agent 循环、上下文构
 | 语言 | Java 17 | M0；本机可用，records 等能力足够支持首版 |
 | 工程 | Maven 单模块 | M0；按包组织，降低初期装配成本 |
 | CLI | JDK 标准输入输出 | M0/M1；后续有输入编辑需求再接 JLine |
-| HTTP | JDK HttpClient | M1 计划；明确读写协议、超时与流关闭 |
-| JSON | Jackson | M1 计划；接入时锁定具体版本并记录 |
+| HTTP | JDK HttpClient | M1 已实现非流式请求；共享连接客户端，单次配置绑定 |
+| JSON | Jackson 2.18.2 | M1 已实现消息映射与响应解析 |
 | 日志 | 初期标准输出；后续 SLF4J | M1/M3；模型内容与日志分流，避免输出密钥 |
-| 测试 | JUnit 5 + 本地 HTTP 替身 | M1 计划；默认测试不调用真实模型 |
+| 测试 | JUnit 5.10.2 + JDK HttpServer | 配置、消息及非流式 HTTP 测试已实现，默认不调用真实模型 |
 | 状态存储 | 项目内 JSON/JSONL 文件 | M5；先实现可解释的事件与状态恢复 |
 | MCP | JSON-RPC + stdio | M6；先支持一条传输链，HTTP 后续增加 |
 
-当前 pom 声明构建插件和测试范围的 JUnit 5.10.2，没有第三方运行时依赖。加入 Jackson 等依赖时同步配置依赖打包。依赖版本在实际接入阶段选择、锁定和验证，不直接继承原项目的完整依赖列表。
+当前运行依赖为 Jackson 2.18.2；JUnit 5.10.2 为测试依赖。Maven Shade 3.5.1 在 package 阶段生成包含依赖与 Main 入口的可执行 JAR。此处记录已验证的项目版本，不声明其为各组件的最新版本。
 
 ## 3. 目录结构
 
@@ -226,7 +228,7 @@ MCP 工具经适配器进入同一 ToolRegistry/ToolExecutor，复用权限、�
 
 ## 9. 实现验证与已知边界
 
-- 当前验收 Maven 构建、可执行 JAR、help/version 以及配置加载测试和 --check-config；没有模型调用。
+- 当前验收 Maven 构建、可执行 JAR、配置/消息/HTTP 测试，以及 --prompt 的本地 HTTP 请求；真实服务商调用、持续对话、SSE 和 Agent 循环后续验证。
 - LLM 接入用本地 HTTP/SSE 替身验证，不使用真实密钥作为默认测试前提。
 - 工具使用临时工作区验证路径、分页、错误和超时；命令用无网络的测试程序。
 - 上下文验证工具调用组完整性、预算和规则保留；恢复验证副作用不会被盲目重放。
@@ -238,7 +240,7 @@ MCP 工具经适配器进入同一 ToolRegistry/ToolExecutor，复用权限、�
 
 ## 10. 模块职责与接口契约
 
-> 以下为目标设计。当前已实现 cli.Main、配置模块以及 session.Message、session.MessageRole 和 tool.ToolCall；其余具体类型按阶段实现。接口名可随实际实现调整。
+> 以下为目标设计。当前已实现 cli.Main、配置模块、Message/MessageRole/ToolCall，以及 LLM 层的五个非流式核心文件；其余具体类型按阶段实现。接口名可随实际实现调整。
 
 ### 模块边界
 
@@ -264,7 +266,7 @@ MCP 工具经适配器进入同一 ToolRegistry/ToolExecutor，复用权限、�
 | Message | role、content、toolCalls、toolCallId | 保持模型协议中的消息结构 |
 | ToolCall | id、name、arguments | arguments 从 JSON 校验后执行；流式碎片按 index/id 拼接 |
 | ToolResult | callId、status、output、errorCode、exitCode、duration | 一条调用无论成功失败都产生对应结果 |
-| LlmResponse | text、toolCalls、finishReason、usage | 最终结果与展示事件分开；不完整响应显式失败 |
+| LlmResponse | message、finishReason、usage；text()/toolCalls() | 复用 assistant Message 保存内容，避免重复存储文本和调用 |
 | RunContext | runId、workspace、budget、cancelToken | 每次任务的明确执行环境 |
 | AgentResult | status、finalText、verification、metrics、artifacts | CLI 和后续 API 共用；文本不能为空只是因为已流式展示 |
 | Session | sessionId、workspace、messages、events | 上下文选择的数据来源，完整历史留存 |
@@ -304,12 +306,113 @@ List<Message> history = List.of(
 - 只有 assistant 可携带 toolCalls，同一消息中调用 ID 唯一。
 - 只有 tool 可携带 toolCallId，且必须提供非空 ID。
 - 有工具调用的 assistant 可以让 content 为 null；其他消息必须有 content，空字符串允许表示空输出。
-- ToolCall 的三个字段均需非空；arguments 当前保存原文，JSON 语法和 schema 校验在后续调用与执行层完成。
+- ToolCall 的三个字段均需非空；arguments 保存原文，JSON 对象语法已由 LLM 适配器校验，工具 schema 校验留给执行层。
 - 非法构造参数抛出 IllegalArgumentException；当前不为每种数据结构单独增加异常类。
 
-后续 Chat Completions 适配器显式映射 role.wireValue()、tool_calls、tool_call_id，并把 ToolCall 转成接口要求的 function 结构；不依赖 record 的默认 JSON 形状。跨消息的调用 ID 匹配、全部结果回填和工具调用组完整性由后续 Session/Agent 层检查，当前 Message 仅校验单条消息。
+Chat Completions 适配器已显式映射 role.wireValue()、tool_calls、tool_call_id，并把 ToolCall 转成接口要求的 function 结构；不依赖 record 的默认 JSON 形状。跨消息的调用 ID 匹配、全部结果回填和工具调用组完整性由后续 Session/Agent 层检查，当前 Message 仅校验单条消息。
 
-当前为纯文本消息模型，未接入 JSON 序列化、流式工具参数组装或真实工具执行。相关测试覆盖普通对话、多个调用的结果关联、角色约束、空工具输出、重复 ID 和防御性复制。
+当前为纯文本消息模型，已接入 JSON 映射，流式工具参数组装和真实工具执行待实现。相关测试覆盖普通对话、多个调用的结果关联、角色约束、空工具输出、重复 ID 和防御性复制。
+
+<a id="llm"></a>
+
+### 已实现的非流式 LLM 调用
+
+| 文件 | 职责 |
+|---|---|
+| LlmClient.java | 定义 generate(LlmRequest)，供后续 Agent 使用 |
+| ChatCompletionsClient.java | HTTP 传输、显式 JSON 映射、完整响应解析 |
+| LlmRequest.java | 防御性复制非空消息列表；配置由客户端提供 |
+| LlmResponse.java | assistant 消息、结束原因和可空 TokenUsage |
+| LlmException.java | HTTP、网络、超时、中断、请求/响应错误与模型拒绝结果分类 |
+
+```java
+LlmConfig config = ConfigLoader.loadProfiles().activeConfig();
+LlmClient client = new ChatCompletionsClient(config);
+LlmResponse response = client.generate(new LlmRequest(List.of(
+        Message.system("You are CodeY, a coding assistant."),
+        Message.user("解释 Java record。")
+)));
+System.out.println(response.text());
+```
+
+实际执行：读取选中的 LlmConfig → 构建 model/messages/stream=false JSON → 向 BASE_URL 后追加 /chat/completions 发送 POST → 检查 HTTP 状态 → 解析 choices[0].message、finish_reason、usage → 返回 LlmResponse。
+
+实现规则：
+
+- 一个实现适配兼容接口，各实例绑定自己的不可变配置，复用默认 HttpClient；默认不跟随重定向。
+- bearer 认证发送 Authorization，none 不发送；请求体不包含 API Key。
+- 总等待超时覆盖响应头及完整响应体；超时取消 future，线程中断时取消请求并恢复中断标志。
+- 明确返回完整结果；工具请求转换为 ToolCall，只解析不执行。参数必须为完整 JSON 对象，但不在此处验证具体工具 schema。
+- 保留 finish_reason，length 表示截断；tool_calls 结束但没有调用时视为不完整响应。旧式 function_call、图片内容和非 function 工具类型暂不支持。
+- usage 或某计数字段缺失时为 null；拒绝非法或负数计数，不把未知值计为零。
+- HTTP 错误保留状态码；不输出原始响应、请求或可能包含内容的 Jackson 异常。不自动重试，isRetryable 仅为后续策略提供分类提示。
+- 当前请求只有消息列表，没有 tools schema/生成参数/流式开关；这些将在后续阶段显式加入。
+
+CLI 用法（CMD/PowerShell）：
+
+```shell
+mvn clean verify
+java -jar target/codey-0.1.0-SNAPSHOT.jar --prompt "你好"
+java -jar target/codey-0.1.0-SNAPSHOT.jar --prompt "解释 Java record" --profile qwen
+```
+
+每次 --prompt 是独立的一次请求，不恢复历史。help/version/list/check 不发起模型调用。参数或配置错误退出码为 2，模型调用错误为 1；获得响应时输出文本，截断时另外提示，工具调用暂不执行。
+
+测试使用 JDK HttpServer 的临时本地端口与假密钥，覆盖配置选择、消息/工具字段映射、文本/工具响应、可空 usage、HTTP 错误、非法 JSON、完整参数、慢响应体超时、线程中断、网络失败和密钥不回显。本阶段完整构建的 130 项测试通过；另有 13 项可执行 JAR 检查验证独立启动、Profile 路由、无认证调用、错误/截断提示和参数组合，确认 Jackson 已打包。没有发送真实服务商请求。
+
+协议依据：[OpenAI Chat Completions API Reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)。其他提供商的实际兼容性需要各自的请求样例验证。
+
+<a id="code-guide"></a>
+
+### 代码阅读顺序与当前调用流程
+
+主代码与测试文件已加入中文说明。类注释描述职责，方法注释描述输入输出或验证目标，字段/关键局部变量注释说明数据含义；package-info.java 说明各包职责及当前/后续状态。
+
+建议按下面顺序读已经实现的代码：
+
+| 顺序 | 文件 | 阅读重点 |
+|---|---|---|
+| 1 | cli/Main.java | action/profile/prompt 三个参数变量，操作分发与退出码 |
+| 2 | config/ConfigLoader.java | 合并来源、生成别名列表、确定默认选择、转换字段 |
+| 3 | config/DotEnvReader.java | 逐行解析、引号和注释规则，错误只报告行号 |
+| 4 | config/ModelProfiles.java | 别名与模型 ID 区别，按需加载，不可变切换 |
+| 5 | config/LlmConfig.java、AuthMode.java、ConfigException.java | 强类型配置、认证约束与配置错误 |
+| 6 | session/Message.java、MessageRole.java、tool/ToolCall.java | 四种消息来源，工具请求与结果的 ID 关联 |
+| 7 | llm/LlmRequest.java、LlmResponse.java | 输入/输出数据契约与完整结果保存 |
+| 8 | llm/LlmClient.java | 统一接口中 generate 的调用契约 |
+| 9 | llm/ChatCompletionsClient.java | encode → HTTP 等待 → decode，以及错误和超时处理 |
+| 10 | llm/LlmException.java | 错误类别、可空状态码与后续重试提示 |
+
+运行 `--prompt` 时的实际调用链：
+
+```text
+Main.main(args)
+  ├─ 解析 action、profile、prompt
+  ├─ ConfigLoader.loadProfiles(...)
+  │    ├─ DotEnvReader.read(.env) → 文件键值
+  │    ├─ 合并 System.getenv() → 环境值覆盖文件值
+  │    └─ ModelProfiles → 别名列表与当前选择的快照
+  ├─ ModelProfiles.activeConfig()
+  │    └─ ConfigLoader.buildConfig(prefix) → 已校验的 LlmConfig
+  ├─ 创建 Message.system(...)、Message.user(...) → LlmRequest
+  ├─ LlmClient client = new ChatCompletionsClient(config)
+  ├─ client.generate(request)
+  │    ├─ encode → model/messages/stream=false JSON
+  │    ├─ HttpRequest → 地址、认证头、超时、正文
+  │    ├─ sendAsync → future.get 限时等待完整响应
+  │    ├─ 校验 HTTP 状态
+  │    └─ decode → assistant Message、finishReason、TokenUsage
+  └─ 输出 response.text()，必要时提示工具请求或截断
+```
+
+接口、多态与 record 的区别：
+
+- LlmClient 声明方法，ChatCompletionsClient 实现方法；变量类型为接口时，实际执行仍由具体对象决定。
+- LlmRequest/LlmResponse 等 record 保存数据，访问方法和 equals/hashCode/toString 由编译器提供；源码中的紧凑构造器主要负责校验。
+- record 固定字段引用，但集合需要 List.copyOf/Map.copyOf 保护内容。局部变量保存本轮中间结果，字段保存对象需要长期持有的状态。
+- role.wireValue() 和 JSON 编解码明确处理协议命名，内部 Java 字段不必直接使用接口下划线格式。
+
+测试文件也按场景加了说明。配置测试使用临时文件和假环境，消息测试检查数据约束，HTTP 测试使用本地服务器与假密钥。阅读测试可先看方法注释，再按“准备输入 → 执行 → 断言结果 → 清理”追踪代码。
 
 ### 核心接口示意
 
@@ -317,8 +420,7 @@ List<Message> history = List.of(
 
 ```java
 interface LlmClient {
-    LlmResponse generate(LlmRequest request, StreamListener listener,
-                         CancellationToken cancellation);
+    LlmResponse generate(LlmRequest request); // 当前接口，流式/取消接口后续扩展
 }
 
 interface Tool {
@@ -393,7 +495,7 @@ interface SessionStore {
 
 ## 11. 配置加载与多模型选择
 
-> 当前已实现：LlmConfig、AuthMode、ModelProfiles、ConfigLoader、DotEnvReader，以及 CLI 的 --list-models、--check-config 和 --profile。支持命名 Profile 与旧版单模型配置。当前校验不会调用模型，也不会验证密钥在服务商是否有效。
+> 当前已实现：LlmConfig、AuthMode、ModelProfiles、ConfigLoader、DotEnvReader，以及 CLI 的 --list-models、--check-config、--profile 和 --prompt。支持命名 Profile 与旧版单模型配置。--check-config 仅本地校验，--prompt 才发起真实模型请求。
 
 ### .env、环境变量、YAML 和配置类
 
@@ -545,7 +647,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --check-config --profile local
 
 成功时输出配置已通过本地校验，并用 apiKey=<redacted> 隐藏密钥。失败时退出码为 2。默认/help/version 不要求配置存在。
 
---profile 不修改文件，当前必须配合 --check-config 或 --list-models。两个操作不可同时指定。/model 当前尚未实现。
+--profile 不修改文件，当前必须配合 --check-config、--list-models 或 --prompt。每次只指定一种操作。/model 当前尚未实现。
 
 环境变量覆盖示例（PowerShell）：
 
@@ -577,7 +679,7 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 
 ## 12. 开发路线与验收标准
 
-> 当前：M1，已完成多 Profile 配置加载、选择与校验，以及消息模型。各阶段按顺序推进；没有固定工期承诺。先完成当前阶段，再接入后续复杂度。
+> 当前：M1，已完成多 Profile 配置、消息模型与非流式 LLM 调用。各阶段按顺序推进；没有固定工期承诺。先完成当前阶段，再接入后续复杂度。
 
 ### M0：工程骨架
 
@@ -596,11 +698,15 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 - [x] 缺少密钥、模型和地址时给出字段级错误；打印配置隐藏 API Key。
 - [x] 支持多 Profile、默认选择、--profile 覆盖、--list-models、none 认证与旧格式兼容；切换接口先校验目标配置。
 - [x] Message/MessageRole 支持四种消息角色；ToolCall 和 toolCallId 表达请求与结果关联，校验单条消息约束。
+- [x] 实现五个核心 LLM 文件，支持非流式 Chat Completions、--prompt 和分类错误。
+- [x] 本地 HTTP 测试验证请求、文本/工具响应、usage、超时、线程中断与错误处理。
+- [x] 加入 Jackson 与 Shade 打包，生成包含依赖的可执行 JAR。
+- [ ] 使用真实平台配置验证非流式调用与提供商实际兼容性。
 - [ ] 对话循环接通后支持 /model，切换在任务边界生效。
 - [ ] 连续两轮对话保持消息顺序，最终文本与流式展示一致。
-- [ ] 测试多行 SSE、拆分参数、正常结束、提前 EOF、HTTP 错误与超时。
+- [ ] 测试多行 SSE、拆分参数、正常结束、提前 EOF，并补充流式错误和超时场景。
 - [ ] 支持取消并关闭响应流；日志不输出 API Key。
-- [ ] 加入运行依赖后更新可执行 JAR 打包，并验证独立启动。
+- [ ] 加入持续对话与流式能力后更新独立启动验证。
 
 产出证据：脱敏请求/响应、流式样例、协议测试结果。面试：HTTP、SSE、超时、适配。
 
