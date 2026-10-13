@@ -1,12 +1,13 @@
 # CodeY 架构设计
 
-> 版本：0.1，日期：2026-10-12。当前已实现配置、消息、基础提示词、非流式调用、可选工作区和本地会话保存/恢复（含全局列表、分页、标题生成与改名）；其他模块按阶段实现。验证使用本地模拟模型，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
+> 版本：0.1，日期：2026-10-13。当前已实现配置、消息、基础提示词、非流式调用、可选工作区、本地会话管理，以及工具定义/注册/执行/结果骨架。内置工具、tools 请求字段和 Agent 循环尚未接入。验证使用本地替身，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
 
 ## 阅读导航
 
 - 第 1—9 节：定位、技术栈、目录、架构图、执行流程与核心策略。
 - [模块职责与接口契约](#modules)
 - [已实现的消息模型](#messages)
+- [工具模块骨架与工具描述](#tool-foundation)
 - [已实现的非流式 LLM 调用](#llm)
 - [已实现的 Session 与连续对话](#session-chat)
 - [代码阅读顺序与当前调用流程](#code-guide)
@@ -213,7 +214,7 @@ sequenceDiagram
 
 首版 read_file、list_files、search_text、write_file、execute_command。read_file 默认分页，返回路径、行号、截断信息。工具输出保留执行元数据，与发给模型的截断文本分开。
 
-工具定义、注册与执行分开。ToolResult 结构化保存 status、errorCode、output、exitCode、duration 和 artifacts。参数验证与路径策略在执行前运行。
+工具定义、注册与执行分开。当前 ToolResult 保存调用 ID、工具名称、status、errorCode、output、durationMillis 与 truncated；exitCode、artifacts、路径策略及命令审批随具体工具接入。基础执行器只解析 JSON 对象，并调用工具的显式校验方法。
 
 初期工具顺序执行。具备依赖与资源冲突判断后才并行只读操作；文件写入和改变工作区的命令按顺序执行。命令通过平台适配运行，明确工作目录、退出码和超时，不固定使用 bash。
 
@@ -278,7 +279,7 @@ MCP 工具经适配器进入同一 ToolRegistry/ToolExecutor，复用权限、�
 |---|---|---|
 | Message | role、content、toolCalls、toolCallId | 保持模型协议中的消息结构 |
 | ToolCall | id、name、arguments | arguments 从 JSON 校验后执行；流式碎片按 index/id 拼接 |
-| ToolResult | callId、status、output、errorCode、exitCode、duration | 一条调用无论成功失败都产生对应结果 |
+| ToolResult | callId、name、status、output、errorCode、durationMillis、truncated | 已实现同步结果，exitCode/artifacts 后续按需加入 |
 | LlmResponse | message、finishReason、usage；text()/toolCalls() | 复用 assistant Message 保存内容，避免重复存储文本和调用 |
 | RunContext | runId、workspace、budget、cancelToken | 每次任务的明确执行环境 |
 | AgentResult | status、finalText、verification、metrics、artifacts | CLI 和后续 API 共用；文本不能为空只是因为已流式展示 |
@@ -326,6 +327,82 @@ Chat Completions 适配器已显式映射 role.wireValue()、tool_calls、tool_c
 
 当前为纯文本消息模型，已接入 JSON 映射，流式工具参数组装和真实工具执行待实现。相关测试覆盖普通对话、多个调用的结果关联、角色约束、空工具输出、重复 ID 和防御性复制。
 
+<a id="tool-foundation"></a>
+
+### 已实现的工具模块骨架与描述
+
+> 当前完成的是可通过 Java 装配与调用的基础模块；测试工具只存在于测试源码。没有注册 read_file 等生产工具，没有向模型发送 tools 定义，也没有执行 Agent 循环。现有 CLI 对工具调用仍仅解析和提示。
+
+```text
+tool/
+├── Tool.java              # 实现契约：定义、具体参数校验、执行
+├── ToolDefinition.java    # name、description、parameters JSON Schema
+├── ToolCall.java          # 已有：模型请求的 id/name/arguments
+├── ToolContext.java       # 宿主提供的工作区与输出上限
+├── ToolRegistry.java      # 注册、查找、稳定定义快照、可用能力筛选
+├── ToolExecutor.java      # 统一同步调度与错误归一化
+├── ToolResult.java        # 成功/错误、调用关联、耗时、截断；可转 tool 消息
+├── ToolException.java     # 工具预期业务失败，保留可展示错误类别
+├── package-info.java
+└── builtin/
+    └── package-info.java  # ReadFileTool 等下一阶段加入
+```
+
+ToolDefinition 将描述与执行分开。description 用自然语言说明用途与限制；parameters 使用 Jackson JsonNode 表达 JSON Schema，当前校验其顶层为 object，并在构造和访问时复制，避免外部修改已注册说明。它不绑定服务商接口形状，后续由 LLM 适配器转换。
+
+工具说明与参数 schema 放在具体 Tool 的 definition() 中，形成一份来源；不在 base.md 中维护另一份工具清单。较长的操作建议以后可单独放提示词资源，但不代替工具 schema、Java 实现或参数校验。当前调用协议的结构参考 [OpenAI Function Calling 官方说明](https://developers.openai.com/api/docs/guides/function-calling)。
+
+未来 read_file 的定义可以表达为下面的请求片段；仅为格式示例，尚未接入 LlmRequest：
+
+```json
+{
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "读取当前工作区内的文本文件。path 使用相对工作区的路径。",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string", "description": "文件的相对路径" }
+          },
+          "required": ["path"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}
+```
+
+基础执行流程：
+
+```text
+Java 装配 Tool → registry.register(tool)
+registry.definitions(context) → 当前可用定义（等待接入 LLM tools）
+ToolCall → ToolExecutor
+  → 查已注册名称，不反射加载任意类
+  → 解析完整 JSON 对象，拒绝重复键、尾随数据和超过 64 Ki 字符的输入
+  → 按 requiresWorkspace 检查宿主绑定与真实目录是否可用
+  → Tool.validateArguments：具体字段、类型、业务限制
+  → Tool.execute：得到文本或预期异常
+  → ToolResult：保留原调用 ID、状态/错误码、毫秒耗时、输出截断
+  → toMessage()：结构化正文 + Message.tool(callId, ...)
+```
+
+Registry 以名称绑定定义和实现，按注册顺序展示；重复名称明确失败，定义列表不可修改。需要工作区的工具在 NONE 或失效目录下不展示给模型，执行器也会拒绝对应调用；这只是基础可用性检查，具体路径越界、链接处理和命令隔离仍由后续工具/策略实现。
+
+ToolContext 由宿主提供，默认输出上限为 16000 个 Unicode 码点。模型 arguments 不决定工作区或宿主上限。输出截断保留完整字符，truncated 字段表明信息不完整；该限制在执行后作用于返回文本，读取工具仍需先限制实际读取量。
+
+ToolResult 的失败类别包括 UNKNOWN_TOOL、INVALID_ARGUMENTS、WORKSPACE_REQUIRED、WORKSPACE_UNAVAILABLE、EXECUTION_FAILED、INTERRUPTED。预期 ToolException 保留可展示说明；未知 RuntimeException 使用通用错误，不回显原始异常或参数。InterruptedException 恢复线程标志；JVM Error 不当作业务错误吞掉。成功和失败结果都可转为原 toolCallId 对应的消息，转换本身不追加历史或调用模型。
+
+当前没有通用 JSON Schema 校验器：Tool 必须显式实现 validateArguments，schema 用于声明/后续发送，不能假设定义 schema 就自动完成业务校验。执行器为同步串行调用，durationMillis 只是测量值；工具超时、审批、取消令牌、并行调度与审计事件尚未实现。接 MCP 的复杂 schema 时再引入完整校验能力。
+
+下一步先加入 ReadFileTool（定义 + 参数/路径校验 + 有界读取）；之后扩展 LlmRequest 的 tools 并在适配器映射；最后 AgentLoop 回填 assistant/tool 消息并继续请求。现有 SessionSnapshot 仍仅保存成功文本轮次，工具消息组的会话与持久化支持要同时扩展，不能直接塞入当前文本快照。
+
+验证：新增 23 项工具基础测试，完整 mvn verify 共 201 项通过。覆盖 schema 防御性复制、注册顺序/重复、工作区筛选、非法/重复/尾随 JSON、业务校验先于执行、未知工具、结果 ID 关联、Unicode 截断、异常归一化、中断标志与 JVM Error 传播。使用测试 echo 工具，不读取用户文件，不请求真实模型。
+
 <a id="llm"></a>
 
 ### 已实现的非流式 LLM 调用
@@ -371,7 +448,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --prompt "解释 Java record" --profil
 
 每次 --prompt 是独立的一次请求，不恢复历史。help/version/list/check 不发起模型调用。参数或配置错误退出码为 2，模型调用错误为 1；获得响应时输出文本，截断时另外提示，工具调用暂不执行。
 
-测试使用本地 HTTP 服务与假密钥，覆盖配置、协议、错误、超时及线程中断。内存对话阶段为 151 项测试；加入持久化/标题/工作区后当前为 178 项，另完成 12 项持久化 JAR 检查，见 [工作区与历史会话实现](#workspace-sessions)。没有发送真实服务商请求。
+测试使用本地 HTTP 服务与假密钥，覆盖配置、协议、错误、超时及中断。内存对话阶段为 151 项，持久化阶段为 178 项并完成 12 项 JAR 检查；本次工具基础加入 23 项，当前总计 201 项通过，见 [工具模块](#tool-foundation)。没有发送真实服务商请求。
 
 <a id="session-chat"></a>
 
@@ -446,6 +523,7 @@ Session 保存成功文本对话，并非完整执行审计日志；不保存失
 | 13 | cli/SessionLauncher.java、config/SessionSettings.java、workspace 包 | 列表/对话状态、延迟模型校验、可选工作区与配置来源 |
 | 14 | SessionSnapshot、SessionService、SessionStore、JsonSessionStore | 版本化 DTO、dirty 重试、文件锁、原子保存和恢复 |
 | 15 | SessionTitleGenerator | 一次独立短请求，输入有界，结果不进入历史，失败回退 |
+| 16 | tool/Tool、ToolDefinition、ToolContext、ToolRegistry、ToolExecutor、ToolResult、ToolException | 描述与实现分开、注册与执行分开、具体参数校验契约和结果回填 |
 
 运行 `--prompt` 时的实际调用链：
 
@@ -490,7 +568,9 @@ interface LlmClient {
 
 interface Tool {
     ToolDefinition definition();
-    ToolResult execute(ToolCall call, RunContext context);
+    boolean requiresWorkspace();
+    void validateArguments(JsonNode arguments, ToolContext context);
+    String execute(JsonNode arguments, ToolContext context) throws InterruptedException;
 }
 
 interface ContextBuilder {
@@ -784,6 +864,9 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 
 实现 AgentLoop、ToolRegistry、ToolExecutor、read_file/list_files/search_text，使用结构化工具结果与运行状态。
 
+- [x] 工具定义/接口、宿主上下文、注册表、基础同步执行器、结果与异常类型。
+- [x] 校验完整 JSON 对象、调用具体参数校验、工作区可用性检查、有界输出与关联 tool 消息。
+- [ ] 内置 ReadFileTool 与工具请求 tools 字段接入。
 - [ ] 输入“找到项目入口并解释”，模型自动搜索和读取文件。
 - [ ] assistant tool_calls 与全部 tool 结果配对，未知工具也有结果。
 - [ ] read_file 默认分页，大文件输出不会无限增长。
@@ -1314,4 +1397,4 @@ Main → SessionSettings + JsonSessionStore → SessionLauncher
 - [Agent Harness 概念划分](https://www.langchain.com/blog/agent-frameworks-runtimes-and-harnesses-oh-my)：理解框架、运行时与 Harness 的职责边界。
 - [长期任务 Harness 实践](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)：理解进度交接、验收与跨会话工作。
 
-说明性文档仅维护两份 Markdown：README 展示项目和快速使用，本设计文档集中记录架构、配置、实现顺序、取舍和学习笔记。resources/prompts/base.md 是程序使用的提示词资源。实现变化时同步更新状态，完成阶段后补充运行证据；规划中的能力始终明确标注为待实现。
+说明性文档仅维护两份 Markdown：README 提供快速使用，并按模块记录功能、涉及文件、调用流程与实现方式；本设计文档集中保留完整架构、配置契约、实施顺序、取舍和学习笔记。后续实现模块时同步更新 README 导航、对应模块章节与此处状态。resources/prompts/base.md 是运行资源。完成阶段后补充真实验证证据，规划能力始终明确标注为待实现。
