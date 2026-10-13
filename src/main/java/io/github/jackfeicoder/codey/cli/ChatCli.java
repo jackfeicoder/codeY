@@ -54,7 +54,7 @@ public final class ChatCli {
             output.flush();
             // null 表示 EOF，例如管道结束或终端关闭，不再次请求模型。
             String line = input.readLine();
-            if (line == null || "/exit".equals(line.strip())) {
+            if (line == null || "/exit".equals(line.strip()) || "exit".equalsIgnoreCase(line.strip())) {
                 output.println("Bye.");
                 output.flush();
                 return;

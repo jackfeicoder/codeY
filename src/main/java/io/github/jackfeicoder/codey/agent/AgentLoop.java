@@ -4,7 +4,7 @@ import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
 import io.github.jackfeicoder.codey.llm.LlmRequest;
 import io.github.jackfeicoder.codey.llm.LlmResponse;
-import io.github.jackfeicoder.codey.session.Message;
+import io.github.jackfeicoder.codey.observability.DebugPrinter;
 import io.github.jackfeicoder.codey.session.Session;
 import io.github.jackfeicoder.codey.tool.ToolContext;
 import io.github.jackfeicoder.codey.tool.ToolExecutor;
@@ -29,30 +29,45 @@ public final class AgentLoop {
     private final ToolExecutor executor;
     /** 单任务的模型请求预算，构造后固定。 */
     private final int maxSteps;
+    /** 在执行位置打印简洁进度，由 Main 提供输出；默认静默便于复用。 */
+    private final DebugPrinter debug;
 
     /** 使用默认预算装配循环，注册工具由宿主负责。 */
     public AgentLoop(LlmClient client, ToolRegistry registry) { this(client, registry, DEFAULT_MAX_STEPS); }
 
     /** 显式预算便于运行策略和测试，不在此读取配置或创建厂商客户端。 */
     public AgentLoop(LlmClient client, ToolRegistry registry, int maxSteps) {
+        this(client, registry, maxSteps, DebugPrinter.NONE);
+    }
+
+    /** 指定调试输出，旧构造方式保持静默，不增加事件调度接口。 */
+    public AgentLoop(LlmClient client, ToolRegistry registry, int maxSteps, DebugPrinter debug) {
         this.client = Objects.requireNonNull(client, "client");
         this.registry = Objects.requireNonNull(registry, "registry");
         if (maxSteps < 1 || maxSteps > 100) throw new IllegalArgumentException("Agent steps must be within 1..100.");
         this.maxSteps = maxSteps;
         this.executor = new ToolExecutor(registry);
+        this.debug = Objects.requireNonNull(debug, "debug");
     }
 
     /** 在独立消息副本上执行，不修改 Session；调用方只提交正常完成结果。 */
     public AgentResult run(Session session, String input, ToolContext context) {
         Objects.requireNonNull(session, "session");
         Objects.requireNonNull(context, "context");
+        return execute(session, input, context); // 最终回答、错误和预算提示继续由 CLI 展示。
+    }
+
+    /** 实际循环使用请求副本，打印的数据不加入消息历史。 */
+    private AgentResult execute(Session session, String input, ToolContext context) {
         int historySize = session.messages().size(); // 返回结果只截取新增的一轮，旧历史不重复保存。
         var messages = new ArrayList<>(session.messagesFor(input));
         Set<String> callIds = new HashSet<>(); // 同一任务内跨步骤检测重复调用 ID。
         int executions = 0;
         for (int step = 1; step <= maxSteps; step++) {
             checkInterrupted();
-            LlmResponse response = client.generate(new LlmRequest(messages, registry.definitions(context)));
+            LlmRequest request = new LlmRequest(messages, registry.definitions(context));
+            debug.round(step);
+            LlmResponse response = client.generate(request);
             checkInterrupted();
             if (response == null) throw invalid("Model returned no response.");
             if (response.toolCalls().isEmpty()) {
@@ -74,8 +89,10 @@ public final class AgentLoop {
             messages.add(response.message());
             for (var call : response.toolCalls()) {
                 checkInterrupted();
+                debug.tool(step, call);
                 var result = executor.execute(call, context);
                 executions++;
+                debug.toolFailed(step, result);
                 checkInterrupted(); // 中断不进入下一工具或模型请求。
                 messages.add(result.toMessage()); // 错误也回填，让模型下一轮修正参数。
             }

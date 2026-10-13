@@ -5,6 +5,7 @@ import io.github.jackfeicoder.codey.config.ConfigException;
 import io.github.jackfeicoder.codey.config.SessionSettings;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
+import io.github.jackfeicoder.codey.observability.DebugPrinter;
 import io.github.jackfeicoder.codey.session.SessionException;
 import io.github.jackfeicoder.codey.session.SessionService;
 import io.github.jackfeicoder.codey.session.SessionSnapshot;
@@ -56,6 +57,8 @@ public final class SessionLauncher {
     private final Options options;
     /** Main 注入的工具注册表，具体读取工具不会散落在会话业务中创建。 */
     private final ToolRegistry tools;
+    /** Agent 的简洁进度输出，不加入会话消息。 */
+    private final DebugPrinter debug;
     /** 已显示列表的稳定快照与数量，分页不会重新编号。 */
     private List<SessionSnapshot> listing = List.of();
     /** 本次列表已显示数量，序号不随着翻页重置。 */
@@ -81,6 +84,14 @@ public final class SessionLauncher {
                            Function<String, ModelChoice> models, Supplier<String> basePrompt,
                            BufferedReader input, PrintWriter output, PrintWriter errors, Options options,
                            ToolRegistry tools) {
+        this(startup, settings, store, models, basePrompt, input, output, errors, options, tools, DebugPrinter.NONE);
+    }
+
+    /** Main 统一提供工具与进度输出，独立标题请求保持静默。 */
+    public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
+                           Function<String, ModelChoice> models, Supplier<String> basePrompt,
+                           BufferedReader input, PrintWriter output, PrintWriter errors, Options options,
+                           ToolRegistry tools, DebugPrinter debug) {
         this.startup = startup.toAbsolutePath().normalize();
         this.settings = settings;
         this.store = store;
@@ -91,6 +102,7 @@ public final class SessionLauncher {
         this.errors = errors;
         this.options = options;
         this.tools = java.util.Objects.requireNonNull(tools, "tools");
+        this.debug = java.util.Objects.requireNonNull(debug, "debug");
     }
 
     /** EOF 或 /exit 结束；错误保存会话返回 1，参数配置错误由 Main 分类。 */
@@ -113,7 +125,14 @@ public final class SessionLauncher {
                 if (!savePending()) continue; // 不覆盖未保存结果，也不重复调用模型。
                 String command = line.strip();
                 try {
-                    if ("/new".equals(command)) {
+                    if ("exit".equalsIgnoreCase(command)) {
+                        if (browsing) {
+                            output.println("Bye.");
+                            return 0; // 列表中 exit 退出；聊天中 exit 只返回列表。
+                        }
+                        browsing = true;
+                        refresh(); // 刚才的轮次已保存；保留活动会话，可 /back 或选择其他会话。
+                    } else if ("/new".equals(command)) {
                         newSession(null, false, null);
                     } else if ("/clear".equals(command) && active != null) {
                         replace(SessionService.create(store, active.snapshot().workspace(), model.profile(),
@@ -133,7 +152,7 @@ public final class SessionLauncher {
                     } else if ("/back".equals(command) && active != null) {
                         browsing = false;
                     } else if (command.startsWith("/")) {
-                        output.println("命令：/new /sessions /more_session /resume 标题或ID /rename 标题 /clear /exit");
+                        output.println("命令：/new /sessions /more_session /resume 标题或ID /rename 标题 /clear；exit 返回列表；/exit 退出程序");
                     } else if (browsing) {
                         resume(command, true);
                     } else {
@@ -167,7 +186,7 @@ public final class SessionLauncher {
         output.println("CodeY · 所有工作区的最近会话");
         output.println("序号 | ID | 标题 | 工作区 | 更新时间");
         more();
-        output.println("输入序号、完整标题或 ID；/new 新建，/more_session 下一批，/sessions 刷新，/exit 退出。");
+        output.println("输入序号、完整标题或 ID；/new 新建，/more_session 下一批，/sessions 刷新，exit 或 /exit 退出。");
         if (active != null) output.println("/back 返回当前会话。");
     }
 
@@ -338,7 +357,7 @@ public final class SessionLauncher {
 
     /** 先保存成功回答，再执行一次有界标题任务；生成文本不会加入历史。 */
     private void answer(String line) {
-        ChatCli chat = new ChatCli(new AgentLoop(model.chat(), tools), active.session(),
+        ChatCli chat = new ChatCli(new AgentLoop(model.chat(), tools, AgentLoop.DEFAULT_MAX_STEPS, debug), active.session(),
                 new ToolContext(active.snapshot().workspace()), input, output, errors);
         if (chat.answer(line)) {
             active.captureTurn();

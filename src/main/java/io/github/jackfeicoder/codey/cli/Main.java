@@ -1,6 +1,7 @@
 package io.github.jackfeicoder.codey.cli;
 
 import io.github.jackfeicoder.codey.agent.AgentLoop;
+import io.github.jackfeicoder.codey.observability.DebugPrinter;
 import io.github.jackfeicoder.codey.config.ConfigException;
 import io.github.jackfeicoder.codey.config.ConfigLoader;
 import io.github.jackfeicoder.codey.config.LlmConfig;
@@ -119,11 +120,15 @@ public final class Main {
                 System.out.println(config);
             } else {
                 // client 通过统一接口使用，实际 HTTP/JSON 逻辑位于 ChatCompletionsClient。
+                Console console = System.console();
+                PrintWriter debugOutput = console == null ? new PrintWriter(System.out, true, StandardCharsets.UTF_8)
+                        : console.writer();
+                var debug = new DebugPrinter(debugOutput); // 仅显示轮次、工具与文件摘要。
                 LlmClient client = new ChatCompletionsClient(profiles.activeConfig());
                 // basePrompt 是内置 Markdown 原文，与模型厂商和启动目录无关。
                 String basePrompt = PromptLoader.loadBase();
                 // --prompt 没有工作区，read_file 不会列入可用定义；循环仍由同一 Agent 处理。
-                var result = new AgentLoop(client, createTools()).run(new Session(basePrompt), prompt,
+                var result = new AgentLoop(client, createTools(), AgentLoop.DEFAULT_MAX_STEPS, debug).run(new Session(basePrompt), prompt,
                         new ToolContext(WorkspaceBinding.none()));
                 if (!result.completed()) {
                     System.err.println("Agent stopped [BUDGET_EXHAUSTED].");
@@ -174,6 +179,7 @@ public final class Main {
                 ? new PrintWriter(System.out, true, StandardCharsets.UTF_8) : console.writer();
         PrintWriter errors = new PrintWriter(System.err, true,
                 console == null ? StandardCharsets.UTF_8 : console.charset());
+        var debug = new DebugPrinter(output); // 只显示轮次、工具名称和涉及的文件。
         return new SessionLauncher(startup, settings, new JsonSessionStore(settings.dataDirectory()), name -> {
             // 历史浏览不执行此工厂；准备继续会话时才校验目标 Profile。
             ModelProfiles profiles = ConfigLoader.loadProfiles(startup, environment, name);
@@ -183,7 +189,7 @@ public final class Main {
             LlmConfig titleConfig = new LlmConfig(config.baseUrl(), config.apiKey(), config.model(), timeout, config.authMode());
             return new SessionLauncher.ModelChoice(profiles.activeProfile(), new ChatCompletionsClient(config),
                     new ChatCompletionsClient(titleConfig));
-        }, PromptLoader::loadBase, input, output, errors, options, createTools()).run();
+        }, PromptLoader::loadBase, input, output, errors, options, createTools(), debug).run();
     }
 
     /** 统一注册本阶段工具；是否向模型提供，由 Registry 按会话上下文筛选。 */
@@ -223,12 +229,15 @@ public final class Main {
                   /new creates; /more_session loads the next 10; /resume TITLE_OR_ID restores.
                   /sessions refreshes; /rename TITLE renames; /back returns to the active chat.
                   /clear saves the old chat and creates a new one; /exit saves and exits.
+                  In chat, exit returns to session management; in the session list, exit quits.
                   CODEY_DATA_DIR defaults to user.home/.codey; CODEY_AUTO_TITLE defaults to true.
                   Automatic titles use a separate model request with at most a 5-second timeout.
                   The built-in prompts/base.md is sent as the system message.
                   --profile overrides CODEY_ACTIVE_PROFILE for this invocation.
                   Workspace chats expose read_file through structured tools; Agent allows up to 8 requests per task.
                   Completed assistant/tool groups are saved; failed or exhausted tasks are not committed.
+                  Progress shows numbered model requests, called tools and involved files.
+                  Request/response bodies, prompts, history and tool output are not printed as debug logs.
                   /model, file search, writes and command execution will be added later.
 
                 Start learning:

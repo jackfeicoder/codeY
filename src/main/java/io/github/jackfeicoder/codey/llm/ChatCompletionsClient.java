@@ -79,6 +79,7 @@ public final class ChatCompletionsClient implements LlmClient {
     @Override
     public LlmResponse generate(LlmRequest request) {
         Objects.requireNonNull(request, "request");
+        String body = encode(request); // 完整正文用于请求，不输出到控制台。
         HttpRequest httpRequest; // 构建完成的 HTTP 请求，包含头、地址、超时与 JSON 请求体。
         try {
             // builder 组装请求；encode 负责把 Java 消息映射成协议字段。
@@ -86,7 +87,7 @@ public final class ChatCompletionsClient implements LlmClient {
                     .timeout(config.timeout())
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(encode(request), StandardCharsets.UTF_8));
+                    .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
             if (config.authMode() == AuthMode.BEARER) {
                 builder.header("Authorization", "Bearer " + config.apiKey());
             }
@@ -119,7 +120,7 @@ public final class ChatCompletionsClient implements LlmClient {
             }
             throw new LlmException(LlmException.Kind.NETWORK, "LLM request failed due to a network error.");
         }
-        int status = response.statusCode(); // 非 2xx 响应按 HTTP 错误处理，不解析或回显正文。
+        int status = response.statusCode(); // 非 2xx 按 HTTP 错误处理，异常说明仍保持脱敏。
         if (status < 200 || status >= 300) {
             throw new LlmException(LlmException.Kind.HTTP, status, "LLM request failed with HTTP status " + status + ".");
         }
