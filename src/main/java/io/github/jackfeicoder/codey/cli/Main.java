@@ -6,6 +6,7 @@ import io.github.jackfeicoder.codey.config.ConfigException;
 import io.github.jackfeicoder.codey.config.ConfigLoader;
 import io.github.jackfeicoder.codey.config.LlmConfig;
 import io.github.jackfeicoder.codey.config.ModelProfiles;
+import io.github.jackfeicoder.codey.config.ModelPreferenceStore;
 import io.github.jackfeicoder.codey.config.SessionSettings;
 import io.github.jackfeicoder.codey.llm.ChatCompletionsClient;
 import io.github.jackfeicoder.codey.llm.LlmClient;
@@ -107,7 +108,15 @@ public final class Main {
                 return;
             }
             // profiles 是启动时的配置快照，命令行别名覆盖默认选择。
-            ModelProfiles profiles = ConfigLoader.loadProfiles(Path.of(""), System.getenv(), profile);
+            Path startup = Path.of("").toAbsolutePath().normalize();
+            Map<String, String> environment = System.getenv();
+            var preferences = new ModelPreferenceStore(SessionSettings.load(startup, environment).dataDirectory());
+            String preferred = profile;
+            if (preferred == null) {
+                try { preferred = preferences.load().orElse(null); }
+                catch (ConfigException invalid) { System.err.println("模型偏好：" + invalid.getMessage()); }
+            }
+            ModelProfiles profiles = ConfigLoader.loadProfiles(startup, environment, preferred);
             if ("--list-models".equals(action)) {
                 System.out.println("Configured profiles (* = selected; credentials are validated on use):");
                 for (String name : profiles.profileNames()) {
@@ -137,6 +146,8 @@ public final class Main {
                 }
                 var response = result.response();
                 System.out.println(response.text());
+                try { preferences.save(profiles.activeProfile()); }
+                catch (ConfigException failed) { System.err.println("默认模型偏好未保存：" + failed.getMessage()); }
                 if (response.isTruncated()) {
                     System.err.println("Model output was truncated (finish_reason=length).");
                 }
@@ -189,7 +200,8 @@ public final class Main {
             LlmConfig titleConfig = new LlmConfig(config.baseUrl(), config.apiKey(), config.model(), timeout, config.authMode());
             return new SessionLauncher.ModelChoice(profiles.activeProfile(), new ChatCompletionsClient(config),
                     new ChatCompletionsClient(titleConfig));
-        }, PromptLoader::loadBase, input, output, errors, options, createTools(), debug).run();
+        }, PromptLoader::loadBase, input, output, errors, options, createTools(), debug,
+                () -> ConfigLoader.loadModelCatalog(startup, environment)).run();
     }
 
     /** 统一注册本阶段工具；是否向模型提供，由 Registry 按会话上下文筛选。 */
@@ -222,23 +234,26 @@ public final class Main {
                   java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --resume ID_OR_TITLE [--profile ALIAS]
 
                 Configuration:
-                  Process environment > current-working-directory .env > defaults.
+                  Process environment > CODEY_CONFIG_DIR .env (or startup-directory .env) > defaults.
                   --check-config validates settings without calling a model.
                   --prompt runs one non-streaming chat task without a workspace.
                   No arguments or --chat lists the latest 10 sessions across all workspaces.
                   /new creates; /more_session loads the next 10; /resume TITLE_OR_ID restores.
                   /sessions refreshes; /rename TITLE renames; /back returns to the active chat.
+                  /help lists commands; /list model lists profile aliases and model IDs.
+                  /model ALIAS switches the active conversation model while preserving history.
                   /clear saves the old chat and creates a new one; /exit saves and exits.
                   In chat, exit returns to session management; in the session list, exit quits.
                   CODEY_DATA_DIR defaults to user.home/.codey; CODEY_AUTO_TITLE defaults to true.
                   Automatic titles use a separate model request with at most a 5-second timeout.
                   The built-in prompts/base.md is sent as the system message.
-                  --profile overrides CODEY_ACTIVE_PROFILE for this invocation.
+                  Initial selection: --profile > last-used profile > saved session profile > CODEY_ACTIVE_PROFILE.
+                  Successful selections persist in CODEY_DATA_DIR/model-preference.json, without credentials.
                   Workspace chats expose read_file through structured tools; Agent allows up to 8 requests per task.
                   Completed assistant/tool groups are saved; failed or exhausted tasks are not committed.
                   Progress shows numbered model requests, called tools and involved files.
                   Request/response bodies, prompts, history and tool output are not printed as debug logs.
-                  /model, file search, writes and command execution will be added later.
+                  File search, writes and command execution will be added later.
 
                 Start learning:
                   README.md

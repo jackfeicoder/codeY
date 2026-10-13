@@ -9,6 +9,13 @@ import java.util.Map;
  * 流程：校验别名 → 生成字段前缀 → 加载目标配置；切换返回新快照。
  */
 public final class ModelProfiles {
+    /**
+     * 列表的非敏感信息，不包含 URL、密钥或完整配置。
+     * @param alias /model 使用的配置别名
+     * @param modelId 提供商的模型 ID，缺失时显示占位说明
+     * @param configured 本地配置校验是否通过，不表示远端一定在线
+     */
+    public record ProfileInfo(String alias, String modelId, boolean configured) { }
     /** 已声明的别名列表，统一为小写且不可修改。 */
     private final List<String> profileNames;
     /** 当前选中的配置别名，不是服务商的模型 ID。 */
@@ -30,6 +37,18 @@ public final class ModelProfiles {
     /** 获取可选别名，用于 CLI 列表展示。 */
     public List<String> profileNames() {
         return profileNames;
+    }
+
+    /** 列出全部已声明配置及模型 ID；坏配置标记而不阻止查看其他模型，不创建客户端。 */
+    public List<ProfileInfo> listInfo() {
+        return profileNames.stream().map(name -> {
+            String prefix = namedProfiles ? "CODEY_PROFILE_" + name.toUpperCase(Locale.ROOT) + "_" : "CODEY_LLM_";
+            String modelId = values.getOrDefault(prefix + "MODEL", "未填写模型 ID");
+            boolean configured;
+            try { configFor(name); configured = true; }
+            catch (ConfigException invalid) { configured = false; }
+            return new ProfileInfo(name, modelId, configured);
+        }).toList();
     }
 
     /** 获取当前别名；不会读取或校验其模型字段。 */

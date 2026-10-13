@@ -3,6 +3,8 @@ package io.github.jackfeicoder.codey.cli;
 import io.github.jackfeicoder.codey.agent.AgentLoop;
 import io.github.jackfeicoder.codey.config.ConfigException;
 import io.github.jackfeicoder.codey.config.SessionSettings;
+import io.github.jackfeicoder.codey.config.ModelPreferenceStore;
+import io.github.jackfeicoder.codey.config.ModelProfiles;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
 import io.github.jackfeicoder.codey.observability.DebugPrinter;
@@ -45,6 +47,16 @@ public final class SessionLauncher {
     private final SessionStore store;
     /** 延迟创建模型客户端，参数是明确选择的别名。 */
     private final Function<String, ModelChoice> models;
+    /** 仅加载非敏感模型目录；/list model 不触发客户端创建或远端请求。 */
+    private final Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog;
+    /** 用户级默认模型偏好，不随工作区改变。 */
+    private final ModelPreferenceStore modelPreferences;
+    /** 已读取或本次运行最后成功选择的别名。 */
+    private String lastUsedProfile;
+    /** 避免每次操作重复读取偏好文件或重复报告损坏。 */
+    private boolean preferenceLoaded;
+    /** --profile 只覆盖本次启动的首次选择，之后 /model 的选择可用于 /new。 */
+    private String startupProfile;
     /** 新会话加载当前基础提示词，历史会话使用自己的快照。 */
     private final Supplier<String> basePrompt;
     /** 调用方持有的逐行输入，不在启动器内关闭。 */
@@ -92,10 +104,21 @@ public final class SessionLauncher {
                            Function<String, ModelChoice> models, Supplier<String> basePrompt,
                            BufferedReader input, PrintWriter output, PrintWriter errors, Options options,
                            ToolRegistry tools, DebugPrinter debug) {
+        this(startup, settings, store, models, basePrompt, input, output, errors, options, tools, debug, List::of);
+    }
+
+    /** 完整装配入口额外提供模型目录，偏好从 settings 的用户数据目录持久化。 */
+    public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
+                           Function<String, ModelChoice> models, Supplier<String> basePrompt,
+                           BufferedReader input, PrintWriter output, PrintWriter errors, Options options,
+                           ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog) {
         this.startup = startup.toAbsolutePath().normalize();
         this.settings = settings;
         this.store = store;
         this.models = models;
+        this.modelCatalog = java.util.Objects.requireNonNull(modelCatalog, "modelCatalog");
+        this.modelPreferences = new ModelPreferenceStore(settings.dataDirectory());
+        this.startupProfile = options.profile();
         this.basePrompt = basePrompt;
         this.input = input;
         this.output = output;
@@ -132,6 +155,15 @@ public final class SessionLauncher {
                         }
                         browsing = true;
                         refresh(); // 刚才的轮次已保存；保留活动会话，可 /back 或选择其他会话。
+                    } else if ("/help".equals(command)) {
+                        printCommands();
+                    } else if (command.matches("/list\\s+model")) {
+                        listModels();
+                    } else if ("/model".equals(command)) {
+                        output.println("当前模型：" + (model == null ? "未选择" : model.profile())
+                                + "；用法：/model 配置别名，/list model 查看列表。");
+                    } else if (command.matches("/model\\s+.*")) {
+                        switchModel(unquote(command.substring(6).strip()));
                     } else if ("/new".equals(command)) {
                         newSession(null, false, null);
                     } else if ("/clear".equals(command) && active != null) {
@@ -152,12 +184,14 @@ public final class SessionLauncher {
                     } else if ("/back".equals(command) && active != null) {
                         browsing = false;
                     } else if (command.startsWith("/")) {
-                        output.println("命令：/new /sessions /more_session /resume 标题或ID /rename 标题 /clear；exit 返回列表；/exit 退出程序");
+                        output.println("未知命令，输入 /help 查看全部命令。");
                     } else if (browsing) {
                         resume(command, true);
                     } else {
                         answer(line);
                     }
+                } catch (ConfigException failed) {
+                    errors.println("Configuration error: " + failed.getMessage());
                 } catch (SessionException | IllegalArgumentException failed) {
                     errors.println((active != null && active.dirty() ? "未保存，结果仍在内存：" : "Session error: ")
                             + failed.getMessage());
@@ -186,7 +220,7 @@ public final class SessionLauncher {
         output.println("CodeY · 所有工作区的最近会话");
         output.println("序号 | ID | 标题 | 工作区 | 更新时间");
         more();
-        output.println("输入序号、完整标题或 ID；/new 新建，/more_session 下一批，/sessions 刷新，exit 或 /exit 退出。");
+        output.println("输入序号、完整标题或 ID；/new 新建，/more_session 下一批，/sessions 刷新，/help 查看命令，exit 或 /exit 退出。");
         if (active != null) output.println("/back 返回当前会话。");
     }
 
@@ -308,9 +342,10 @@ public final class SessionLauncher {
         }
     }
 
-    /** 覆盖优先级：启动 --profile、保存的别名、配置默认；缺失时要求明确选择。 */
+    /** 首次 --profile 优先，然后最后使用、会话保存别名、配置默认；无效时要求明确选择。 */
     private ModelChoice chooseModel(String savedProfile) throws IOException {
-        String profile = options.profile() != null ? options.profile() : savedProfile;
+        String last = lastProfile();
+        String profile = startupProfile != null ? startupProfile : last != null ? last : savedProfile;
         while (!exiting) {
             try { return models.apply(profile); }
             catch (ConfigException invalid) {
@@ -334,12 +369,78 @@ public final class SessionLauncher {
         }
         active = candidate;
         model = selected;
+        startupProfile = null; // 后续新建与恢复使用最近选择，不重复套用启动覆盖。
+        rememberModel(selected.profile());
         browsing = false;
         output.println("会话：" + active.snapshot().title() + " | ID " + active.snapshot().id()
                 + " | " + active.snapshot().workspace().display() + " | Profile " + selected.profile());
         if (!SessionSnapshot.hash(basePrompt.get()).equals(active.snapshot().promptHash())) {
             output.println("基础提示词版本已变化，本会话沿用创建时的快照。");
         }
+    }
+
+    /** 统一列出交互命令；管理页和聊天中都可查看，不向模型发送。 */
+    private void printCommands() {
+        output.println("""
+                CodeY 命令：
+                  /help                 查看全部交互命令
+                  /list model           查看已配置模型别名、模型 ID 和配置状态
+                  /model                查看当前模型
+                  /model 配置别名       切换当前会话模型，保留完整历史
+                  /new                  新建会话，选择工作区和标题
+                  /sessions             刷新全局会话列表
+                  /more_session         查看下一批会话
+                  /resume               打开会话列表
+                  /resume 标题或ID      恢复指定会话
+                  /rename 标题          修改当前会话标题
+                  /back                 返回活动会话；新建输入时取消
+                  /clear                新建同工作区/模型会话，旧会话保留
+                  exit                  聊天返回列表；列表中退出程序
+                  /exit                 保存并退出程序；EOF 同样退出
+                默认模型为最后一次成功选择的配置；首次没有记录时使用 .env 默认值。
+                """);
+    }
+
+    /** 列表不校验远端连通性、不切换选择、不写偏好，也不展示凭证。 */
+    private void listModels() {
+        List<ModelProfiles.ProfileInfo> entries = modelCatalog.get();
+        String last = lastProfile();
+        output.println("模型目录（/model 使用配置别名；配置通过仅代表本地校验）：");
+        output.println("当前会话：" + (model == null ? "未选择" : model.profile())
+                + "；默认模型：" + (last == null ? "首次使用 .env 的 CODEY_ACTIVE_PROFILE" : last));
+        for (var entry : entries) {
+            output.println((model != null && model.profile().equals(entry.alias()) ? "* " : "  ")
+                    + entry.alias() + " | " + entry.modelId() + " | " + (entry.configured() ? "配置有效" : "配置待完善"));
+        }
+        if (entries.isEmpty()) output.println("暂无模型目录，请检查 CODEY_PROFILE_NAMES 配置。");
+    }
+
+    /** 验证目标客户端与保存会话属性成功后才替换模型，Session 对象与工具历史保持原样。 */
+    private void switchModel(String profile) {
+        if (active == null) { output.println("请先 /new 或 /resume 进入一个会话，再切换模型。"); return; }
+        ModelChoice selected = models.apply(profile); // 不套用启动覆盖，也不发探测请求。
+        active.switchProfile(selected.profile());
+        model = selected;
+        rememberModel(selected.profile());
+        output.println("已切换模型：" + selected.profile() + "；原会话和消息历史已保留。");
+    }
+
+    /** 惰性加载用户默认偏好，损坏时报告并回退至保存别名/配置默认，不影响浏览。 */
+    private String lastProfile() {
+        if (!preferenceLoaded) {
+            preferenceLoaded = true;
+            try { lastUsedProfile = modelPreferences.load().orElse(null); }
+            catch (ConfigException invalid) { errors.println("模型偏好：" + invalid.getMessage()); }
+        }
+        return lastUsedProfile;
+    }
+
+    /** 当前运行立即记住选择；默认文件保存失败单独提示，不撤销已成功保存的会话切换。 */
+    private void rememberModel(String profile) {
+        lastUsedProfile = profile;
+        preferenceLoaded = true;
+        try { modelPreferences.save(profile); }
+        catch (ConfigException failed) { errors.println("模型已选择，但默认偏好未保存：" + failed.getMessage()); }
     }
 
     /** 预览最近四条消息，有界输出；纯工具调用没有文本时展示名称和调用 ID。 */

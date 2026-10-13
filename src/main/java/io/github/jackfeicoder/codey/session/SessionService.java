@@ -78,6 +78,15 @@ public final class SessionService implements AutoCloseable {
         dirty = true;
     }
 
+    /** 切换模型别名先持锁保存，成功后才更新内存；失败保留旧模型属性与全部历史。 */
+    public void switchProfile(String profile) {
+        if (dirty) throw new SessionException("Save pending conversation before switching models.");
+        if (snapshot.profileAlias().equals(profile)) return;
+        SessionSnapshot candidate = snapshot.withProfile(profile).withRevision(Math.addExact(snapshot.revision(), 1));
+        lease.save(candidate);
+        snapshot = candidate; // 内存 Session 不重建，因此文本和工具历史原样保留。
+    }
+
     /** 成功后清除 dirty；失败不更新 revision，下一次可重试相同内容。 */
     public void save() {
         if (dirty) {

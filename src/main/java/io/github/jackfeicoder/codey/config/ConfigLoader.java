@@ -42,16 +42,27 @@ public final class ConfigLoader {
 
     /**
      * 建立配置快照。字段内容在选中时校验，别名列表在此处校验。
-     * @param workingDirectory 查找 .env 的启动目录
+     * @param workingDirectory 启动目录；CODEY_CONFIG_DIR 未指定时在此查找 .env
      * @param environment 进程环境或测试提供的键值，覆盖文件中的同名字段
      * @param profileOverride 命令行指定的别名；null 表示使用默认选择，不修改文件
      */
     public static ModelProfiles loadProfiles(Path workingDirectory, Map<String, String> environment,
                                             String profileOverride) {
+        return loadProfiles(workingDirectory, environment, profileOverride, false);
+    }
+
+    /** 模型目录不依赖默认别名是否有效；仅列配置状态，不选客户端或改变用户默认。 */
+    public static List<ModelProfiles.ProfileInfo> loadModelCatalog(Path workingDirectory, Map<String, String> environment) {
+        return loadProfiles(workingDirectory, environment, null, true).listInfo();
+    }
+
+    /** 共用配置解析，目录视图临时以首个别名建立元数据快照。 */
+    private static ModelProfiles loadProfiles(Path workingDirectory, Map<String, String> environment,
+                                             String profileOverride, boolean catalogOnly) {
         Objects.requireNonNull(workingDirectory, "workingDirectory");
         Objects.requireNonNull(environment, "environment");
         // values 保存合并后的原始字符串，空环境变量也会覆盖文件值。
-        Map<String, String> values = new HashMap<>(DotEnvReader.read(workingDirectory.resolve(".env")));
+        Map<String, String> values = new HashMap<>(DotEnvReader.read(configurationDirectory(workingDirectory, environment).resolve(".env")));
         values.putAll(environment);
         boolean namedProfiles = values.containsKey("CODEY_PROFILE_NAMES"); // 是否采用多 Profile 格式。
         List<String> names = new ArrayList<>(); // 规范化后的别名列表，供后续选择校验使用。
@@ -71,10 +82,26 @@ public final class ConfigLoader {
         }
         String active = profileOverride; // 优先采用命令行选择，其次读取默认别名。
         if (active == null) {
-            active = namedProfiles ? required(values, "CODEY_ACTIVE_PROFILE")
+            active = catalogOnly ? names.get(0) : namedProfiles ? required(values, "CODEY_ACTIVE_PROFILE")
                     : values.getOrDefault("CODEY_ACTIVE_PROFILE", "default");
         }
         return new ModelProfiles(names, active, values, namedProfiles);
+    }
+
+    /** 显式配置目录与启动工作区分开；未设置时保持从启动目录读取 .env 的原行为。 */
+    public static Path configurationDirectory(Path startupDirectory, Map<String, String> environment) {
+        String configured = environment.get("CODEY_CONFIG_DIR"); // 由环境或启动脚本提供，不从 .env 自引用。
+        if (configured == null) return startupDirectory.toAbsolutePath().normalize();
+        if (configured.isBlank()) throw new ConfigException("CODEY_CONFIG_DIR must be a nonblank directory path.");
+        try {
+            Path directory = startupDirectory.resolve(configured).toAbsolutePath().normalize();
+            if (!java.nio.file.Files.isDirectory(directory)) {
+                throw new ConfigException("CODEY_CONFIG_DIR must refer to an existing directory.");
+            }
+            return directory;
+        } catch (java.nio.file.InvalidPathException invalid) {
+            throw new ConfigException("CODEY_CONFIG_DIR must be a valid directory path.");
+        }
     }
 
     /** 根据统一字段前缀组装一套配置；不按厂商名字编写专用分支。 */
