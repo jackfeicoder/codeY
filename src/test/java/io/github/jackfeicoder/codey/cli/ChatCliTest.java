@@ -72,9 +72,9 @@ class ChatCliTest {
         assertTrue(harness.errors.toString().contains("This turn was not saved"));
     }
 
-    /** 未执行的工具调用不会留下缺少 tool 结果的消息组。 */
+    /** 未注册工具也回填错误，随后最终回答和完整消息组一并提交。 */
     @Test
-    void toolRequestIsDisplayedButNotCommitted() throws IOException {
+    void unknownToolIsReturnedToModelAndCompletedGroupIsCommitted() throws IOException {
         List<LlmRequest> requests = new ArrayList<>();
         Harness harness = new Harness(request -> {
             requests.add(request);
@@ -85,9 +85,13 @@ class ChatCliTest {
             return reply("answer");
         });
         harness.run("tool question\nnext\n");
-        assertEquals(List.of(Message.system("base"), Message.user("next")), requests.get(1).messages());
-        assertEquals(3, harness.session.messages().size());
-        assertTrue(harness.errors.toString().contains("Tool execution is not implemented"));
+        assertEquals(3, requests.size()); // 首问两次模型调用，第二个用户问题一次。
+        assertEquals("tool question", requests.get(1).messages().get(1).content());
+        assertEquals("call-1", requests.get(1).messages().get(3).toolCallId());
+        assertTrue(requests.get(1).messages().get(3).content().contains("UNKNOWN_TOOL"));
+        assertEquals("next", requests.get(2).messages().get(5).content());
+        assertEquals(7, harness.session.messages().size());
+        assertEquals("", harness.errors.toString());
     }
 
     /** 长度截断时保存已收到的回答并提示，下一轮可根据该文本要求继续。 */
@@ -97,6 +101,22 @@ class ChatCliTest {
         harness.run("question\n");
         assertEquals(Message.assistant("partial"), harness.session.messages().get(2));
         assertTrue(harness.errors.toString().contains("finish_reason=length"));
+    }
+
+    /** 预算退出展示明确状态，不保存残缺任务，下一用户输入仍可正常完成。 */
+    @Test
+    void budgetExhaustionIsReportedAndNextInputUsesOnlyCommittedHistory() throws IOException {
+        int[] count = {0};
+        Harness harness = new Harness(request -> {
+            if (++count[0] <= 8) return new LlmResponse(Message.assistantToolCalls(
+                    List.of(new ToolCall("call-" + count[0], "unknown", "{}"))), "tool_calls", null);
+            assertEquals(List.of(Message.system("base"), Message.user("next")), request.messages());
+            return reply("done");
+        });
+        harness.run("loop\nnext\n/exit\n");
+        assertEquals(9, count[0]);
+        assertEquals(3, harness.session.messages().size());
+        assertTrue(harness.errors.toString().contains("BUDGET_EXHAUSTED"));
     }
 
     /** EOF 正常结束且不发送空请求。 */

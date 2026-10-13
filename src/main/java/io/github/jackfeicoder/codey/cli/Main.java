@@ -1,5 +1,6 @@
 package io.github.jackfeicoder.codey.cli;
 
+import io.github.jackfeicoder.codey.agent.AgentLoop;
 import io.github.jackfeicoder.codey.config.ConfigException;
 import io.github.jackfeicoder.codey.config.ConfigLoader;
 import io.github.jackfeicoder.codey.config.LlmConfig;
@@ -8,13 +9,15 @@ import io.github.jackfeicoder.codey.config.SessionSettings;
 import io.github.jackfeicoder.codey.llm.ChatCompletionsClient;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
-import io.github.jackfeicoder.codey.llm.LlmRequest;
-import io.github.jackfeicoder.codey.llm.LlmResponse;
 import io.github.jackfeicoder.codey.prompt.PromptException;
 import io.github.jackfeicoder.codey.prompt.PromptLoader;
-import io.github.jackfeicoder.codey.session.Message;
+import io.github.jackfeicoder.codey.session.Session;
 import io.github.jackfeicoder.codey.session.JsonSessionStore;
 import io.github.jackfeicoder.codey.session.SessionException;
+import io.github.jackfeicoder.codey.tool.ToolContext;
+import io.github.jackfeicoder.codey.tool.ToolRegistry;
+import io.github.jackfeicoder.codey.tool.builtin.ReadFileTool;
+import io.github.jackfeicoder.codey.workspace.WorkspaceBinding;
 
 import java.io.BufferedReader;
 import java.io.Console;
@@ -24,12 +27,11 @@ import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.List;
 import java.util.Map;
 
 /**
  * 命令行入口与组件装配：解析参数 → 选择 Profile → 加载提示词 → 调用模型 → 展示结果。
- * 无参数或 --chat 打开持久化会话入口，--prompt 发送一次请求；工具执行后续实现。
+ * 无参数或 --chat 打开持久化会话入口，--prompt 执行一条普通聊天任务；循环交给 AgentLoop。
  */
 public final class Main {
     /** 入口类通过静态 main 启动，无需创建实例。 */
@@ -120,14 +122,16 @@ public final class Main {
                 LlmClient client = new ChatCompletionsClient(profiles.activeConfig());
                 // basePrompt 是内置 Markdown 原文，与模型厂商和启动目录无关。
                 String basePrompt = PromptLoader.loadBase();
-                // response 保存完整回答和元数据；本次请求仅包含系统指令与当前问题。
-                LlmResponse response = client.generate(new LlmRequest(List.of(
-                        Message.system(basePrompt), Message.user(prompt))));
-                System.out.println(response.text());
-                if (!response.toolCalls().isEmpty()) {
-                    // 当前只识别工具请求，真实执行和结果回填由后续 Agent 层负责。
-                    System.out.println("Model returned tool calls. Tool execution is not implemented yet.");
+                // --prompt 没有工作区，read_file 不会列入可用定义；循环仍由同一 Agent 处理。
+                var result = new AgentLoop(client, createTools()).run(new Session(basePrompt), prompt,
+                        new ToolContext(WorkspaceBinding.none()));
+                if (!result.completed()) {
+                    System.err.println("Agent stopped [BUDGET_EXHAUSTED].");
+                    System.exit(1);
+                    return;
                 }
+                var response = result.response();
+                System.out.println(response.text());
                 if (response.isTruncated()) {
                     System.err.println("Model output was truncated (finish_reason=length).");
                 }
@@ -179,7 +183,12 @@ public final class Main {
             LlmConfig titleConfig = new LlmConfig(config.baseUrl(), config.apiKey(), config.model(), timeout, config.authMode());
             return new SessionLauncher.ModelChoice(profiles.activeProfile(), new ChatCompletionsClient(config),
                     new ChatCompletionsClient(titleConfig));
-        }, PromptLoader::loadBase, input, output, errors, options).run();
+        }, PromptLoader::loadBase, input, output, errors, options, createTools()).run();
+    }
+
+    /** 统一注册本阶段工具；是否向模型提供，由 Registry 按会话上下文筛选。 */
+    private static ToolRegistry createTools() {
+        return new ToolRegistry().register(new ReadFileTool());
     }
 
     /** 统一处理非法参数，不回显可能包含敏感内容的用户输入。 */
@@ -193,7 +202,7 @@ public final class Main {
         System.out.println("""
                 CodeY - A CLI coding agent built from scratch in Java.
 
-                Status: model profiles, non-streaming calls and persistent conversations are available.
+                Status: model profiles, persistent conversations and read_file Agent loops are available.
 
                 Usage:
                   java -jar target/codey-0.1.0-SNAPSHOT.jar
@@ -209,7 +218,7 @@ public final class Main {
                 Configuration:
                   Process environment > current-working-directory .env > defaults.
                   --check-config validates settings without calling a model.
-                  --prompt sends one real, non-streaming request to the selected model.
+                  --prompt runs one non-streaming chat task without a workspace.
                   No arguments or --chat lists the latest 10 sessions across all workspaces.
                   /new creates; /more_session loads the next 10; /resume TITLE_OR_ID restores.
                   /sessions refreshes; /rename TITLE renames; /back returns to the active chat.
@@ -218,7 +227,9 @@ public final class Main {
                   Automatic titles use a separate model request with at most a 5-second timeout.
                   The built-in prompts/base.md is sent as the system message.
                   --profile overrides CODEY_ACTIVE_PROFILE for this invocation.
-                  /model and Agent tool execution will be added later.
+                  Workspace chats expose read_file through structured tools; Agent allows up to 8 requests per task.
+                  Completed assistant/tool groups are saved; failed or exhausted tasks are not committed.
+                  /model, file search, writes and command execution will be added later.
 
                 Start learning:
                   README.md

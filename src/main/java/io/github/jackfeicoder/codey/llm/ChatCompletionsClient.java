@@ -128,7 +128,7 @@ public final class ChatCompletionsClient implements LlmClient {
 
     /** 将请求消息显式映射为 Chat Completions JSON，避免默认字段名与接口不一致。 */
     private String encode(LlmRequest request) {
-        ObjectNode root = mapper.createObjectNode(); // 请求顶层对象：model、stream、messages。
+        ObjectNode root = mapper.createObjectNode(); // 请求顶层对象：model、stream、messages、可选 tools。
         root.put("model", config.model());
         root.put("stream", false);
         ArrayNode messages = root.putArray("messages"); // 保存按历史顺序排列的协议消息。
@@ -156,6 +156,16 @@ public final class ChatCompletionsClient implements LlmClient {
             if (message.toolCallId() != null) {
                 // Java 的 toolCallId 显式转换为协议要求的 tool_call_id。
                 encoded.put("tool_call_id", message.toolCallId());
+            }
+        }
+        if (!request.tools().isEmpty()) {
+            ArrayNode tools = root.putArray("tools"); // 工具说明单独编码，不拼接进 system 提示词。
+            for (var definition : request.tools()) {
+                ObjectNode encoded = tools.addObject().put("type", "function");
+                ObjectNode function = encoded.putObject("function");
+                function.put("name", definition.name());
+                function.put("description", definition.description());
+                function.set("parameters", definition.parameters());
             }
         }
         try {

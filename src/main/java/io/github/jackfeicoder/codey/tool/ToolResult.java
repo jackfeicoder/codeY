@@ -21,7 +21,9 @@ public record ToolResult(String callId, String name, Status status, String outpu
     public enum Status { SUCCESS, ERROR }
     /** 首版统一错误类别，后续路径/审批策略可按真实需求扩展。 */
     public enum ErrorCode {
-        UNKNOWN_TOOL, INVALID_ARGUMENTS, WORKSPACE_REQUIRED, WORKSPACE_UNAVAILABLE, EXECUTION_FAILED, INTERRUPTED
+        UNKNOWN_TOOL, INVALID_ARGUMENTS, WORKSPACE_REQUIRED, WORKSPACE_UNAVAILABLE, EXECUTION_FAILED, INTERRUPTED,
+        PATH_OUTSIDE_WORKSPACE, FILE_NOT_FOUND, NOT_A_FILE, FILE_NOT_READABLE, FILE_READ_FAILED,
+        FILE_TOO_LARGE, LINE_TOO_LONG, INVALID_ENCODING, NOT_TEXT_FILE, OUTPUT_LIMIT_TOO_SMALL
     }
     /** 只用于结果正文编码，不复用模型响应解析器。 */
     private static final ObjectMapper MAPPER = new ObjectMapper();

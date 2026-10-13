@@ -1,6 +1,7 @@
 package io.github.jackfeicoder.codey.session;
 
 import io.github.jackfeicoder.codey.workspace.WorkspaceBinding;
+import io.github.jackfeicoder.codey.tool.ToolCall;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -13,6 +14,66 @@ import static org.junit.jupiter.api.Assertions.*;
 /** 使用真实临时文件验证重启恢复、单写者、版本冲突、损坏隔离和 dirty 重试。 */
 class JsonSessionStoreTest {
     @TempDir Path directory;
+
+    /** v2 工具消息、原始调用参数和结果 ID 完整往返，恢复后可继续下一用户轮次。 */
+    @Test
+    void toolConversationSurvivesRestartWithMatchingIds() {
+        JsonSessionStore store = new JsonSessionStore(directory);
+        String id;
+        var turn = List.of(Message.user("read"), Message.assistantToolCalls(
+                List.of(new ToolCall("read-id", "read_file", "{\"path\":\"README.md\"}"))),
+                Message.tool("read-id", "{\"status\":\"success\",\"output\":\"中文内容\"}"), Message.assistant("summary"));
+        try (SessionService service = SessionService.create(store, WorkspaceBinding.none(), "fixture", "base", "tools")) {
+            id = service.snapshot().id();
+            service.session().completeAgentTurn(turn);
+            service.captureTurn(); service.save();
+            assertEquals(2, service.snapshot().schemaVersion());
+        }
+        try (SessionService resumed = SessionService.resume(new JsonSessionStore(directory), id, "fixture")) {
+            assertEquals(turn, resumed.snapshot().messages());
+            assertEquals(6, resumed.session().messagesFor("continue").size());
+            resumed.session().completeTurn("continue", Message.assistant("continued"));
+            resumed.captureTurn(); resumed.save();
+        }
+        assertEquals(6, store.load(id).messages().size());
+    }
+
+    /** 旧 v1 文本快照仍能加载，持锁恢复并保存时升级 v2，不丢内容。 */
+    @Test
+    void resumesAndUpgradesLegacyTextSnapshot() throws Exception {
+        JsonSessionStore store = new JsonSessionStore(directory);
+        String id;
+        try (SessionService service = SessionService.create(store, WorkspaceBinding.none(), "fixture", "base", "old")) {
+            id = service.snapshot().id();
+            service.session().completeTurn("q", Message.assistant("a"));
+            service.captureTurn(); service.save();
+        }
+        Path file = directory.resolve("sessions").resolve(id).resolve("session.json");
+        Files.writeString(file, Files.readString(file).replace("\"schemaVersion\" : 2", "\"schemaVersion\" : 1"));
+        assertEquals(1, store.load(id).schemaVersion());
+        try (SessionService resumed = SessionService.resume(store, id, "fixture")) { resumed.save(); }
+        assertEquals(2, store.load(id).schemaVersion());
+        assertEquals(List.of(Message.user("q"), Message.assistant("a")), store.load(id).messages());
+    }
+
+    /** 残缺 tool 消息组即使 JSON 完整也作为损坏记录隔离。 */
+    @Test
+    void corruptToolPairIsRejectedDuringLoad() throws Exception {
+        JsonSessionStore store = new JsonSessionStore(directory);
+        String id;
+        try (SessionService service = SessionService.create(store, WorkspaceBinding.none(), "fixture", "base", "tools")) {
+            id = service.snapshot().id();
+            service.session().completeAgentTurn(List.of(Message.user("q"), Message.assistantToolCalls(
+                    List.of(new ToolCall("a", "read_file", "{}"))), Message.tool("a", "r"), Message.assistant("done")));
+            service.captureTurn(); service.save();
+        }
+        Path file = directory.resolve("sessions").resolve(id).resolve("session.json");
+        String original = Files.readString(file);
+        Files.writeString(file, original.replace("\"toolCallId\" : \"a\"", "\"toolCallId\" : \"unknown\""));
+        assertThrows(SessionException.class, () -> store.load(id));
+        Files.writeString(file, original.replace("\"schemaVersion\" : 2", "\"schemaVersion\" : 1"));
+        assertThrows(SessionException.class, () -> store.load(id));
+    }
 
     /** 中文与消息顺序往返保持一致，恢复只包含一条 system，快照不含凭证。 */
     @Test
@@ -101,7 +162,7 @@ class JsonSessionStoreTest {
         }
         Path file = directory.resolve("sessions").resolve(id).resolve("session.json");
         String original = Files.readString(file);
-        for (String invalid : List.of(original.replace("\"schemaVersion\" : 1", "\"schemaVersion\" : 2"),
+        for (String invalid : List.of(original.replace("\"schemaVersion\" : 2", "\"schemaVersion\" : 99"),
                 original.replace("\"revision\" : 0", "\"revision\" : 0, \"revision\":0"), original + " {}")) {
             Files.writeString(file, invalid);
             assertThrows(SessionException.class, () -> store.load(id));

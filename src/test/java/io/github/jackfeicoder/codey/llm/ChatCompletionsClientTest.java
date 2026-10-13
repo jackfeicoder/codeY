@@ -11,6 +11,7 @@ import io.github.jackfeicoder.codey.config.LlmConfig;
 import io.github.jackfeicoder.codey.session.Message;
 import io.github.jackfeicoder.codey.session.MessageRole;
 import io.github.jackfeicoder.codey.tool.ToolCall;
+import io.github.jackfeicoder.codey.tool.builtin.ReadFileTool;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -106,6 +107,27 @@ class ChatCompletionsClientTest {
         client(baseUrl, AuthMode.NONE, Duration.ofSeconds(5)).generate(request());
         assertNull(capturedAuth.get());
         assertEquals("/chat/completions", capturedPath.get());
+    }
+
+    /** 工具描述通过独立 tools 字段发送，保留参数 schema，不污染系统消息。 */
+    @Test
+    void encodesStructuredToolDefinitionsWithoutAddingPromptText() {
+        var definition = new ReadFileTool().definition();
+        client().generate(new LlmRequest(request().messages(), List.of(definition)));
+        JsonNode body = capturedBody.get();
+        assertEquals("function", body.at("/tools/0/type").asText());
+        assertEquals(definition.name(), body.at("/tools/0/function/name").asText());
+        assertEquals(definition.description(), body.at("/tools/0/function/description").asText());
+        assertEquals(definition.parameters(), body.at("/tools/0/function/parameters"));
+        assertFalse(body.has("tool_choice")); // 使用协议默认选择，不强制每次执行工具。
+        assertEquals(request().messages().get(0).content(), body.at("/messages/0/content").asText());
+    }
+
+    /** 无工具聊天和标题生成保持原请求结构，避免空 tools 的服务商兼容问题。 */
+    @Test
+    void omitsToolsFieldWhenNoToolsAreAvailable() {
+        client().generate(request());
+        assertFalse(capturedBody.get().has("tools"));
     }
 
     /** 验证 Java 字段映射为 tool_calls、function 和 tool_call_id 协议结构。 */

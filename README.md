@@ -6,9 +6,9 @@
 
 ## 当前进度
 
-当前已完成多模型 Profile 配置、消息模型、基础提示词、非流式模型调用和本地会话保存/恢复。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 保留单次调用。SSE、Agent 循环、工具执行、长期记忆和 MCP 尚待实现；已使用本地模拟模型验证，真实厂商兼容性需另行验证。
+当前已完成多模型 Profile 配置、消息模型、基础提示词、非流式模型调用、本地会话保存/恢复，以及基础 Agent 工具循环。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。SSE、搜索/写入/命令工具、长期记忆和 MCP 尚待实现；已使用本地模拟模型验证，真实厂商兼容性需另行验证。
 
-工具模块骨架已加入：Tool、ToolDefinition、ToolContext、ToolRegistry、ToolExecutor、ToolResult、ToolException，复用现有 ToolCall。支持注册、JSON 对象解析、工具参数校验契约、工作区检查和有界结果；CLI 尚未注册内置工具，也未发送 tools 定义或进入工具循环。说明见 [工具模块与描述](docs/architecture.md#tool-foundation)。
+工作区会话已注册 `read_file`，通过请求的结构化 `tools` 字段发送描述，由 AgentLoop 执行并回填结果，继续请求最终回答。默认每个任务最多请求模型 8 次；完成的工具消息组随会话保存，恢复时不自动重放。说明见 [Agent 循环](docs/architecture.md#agent-loop) 和 [读文件工具](docs/architecture.md#read-file)。
 
 ## 模块导航
 
@@ -23,8 +23,8 @@
 | [模型对话模块](#module-llm) | 已实现：非流式 Chat Completions |
 | [CLI 交互模块](#module-cli) | 已实现：启动选择、输入、分页与会话命令 |
 | [会话管理模块](#module-session) | 已实现：内存历史、本地保存/恢复与标题 |
-| [工具模块](#module-tool) | 骨架已实现：定义、注册、同步执行与结果；内置工具待接入 |
-| [Agent 执行模块](#module-agent) | 待实现：模型与工具的执行循环 |
+| [工具模块](#module-tool) | 已实现基础结构与 read_file，已接入模型和 CLI |
+| [Agent 执行模块](#module-agent) | 已实现：工具循环、轮次预算、中断与完成状态 |
 | [上下文模块](#module-context) | 待实现：请求组织、预算与压缩 |
 | [记忆模块](#module-memory) | 待实现：长期事实保存与召回 |
 | [MCP 模块](#module-mcp) | 待实现：外部工具协议与适配 |
@@ -81,18 +81,19 @@ flowchart LR
 
 ## 当前调用流程与目标闭环
 
-当前文本会话的实际流程：
+当前会话的实际流程：
 
 ```text
-Main → 加载会话设置 → SessionLauncher 展示历史
+Main → 注册工具 / 加载会话设置 → SessionLauncher 展示历史
   → 新建/恢复：选择工作区与模型配置，创建或恢复 SessionService
-  → 用户问题 → ChatCli.answer → Session.messagesFor → LlmRequest
-  → ChatCompletionsClient.generate → LlmResponse
-  → 普通回答：Session.completeTurn → SessionService.captureTurn/save
+  → 用户问题 → ChatCli.answer → AgentLoop.run
+  → Session.messagesFor + Registry.definitions → LlmRequest(messages, tools)
+  → ChatCompletionsClient.generate → 工具请求：Executor 执行 / 回填 → 再请求
+  → 最终回答：Session.completeAgentTurn → SessionService.captureTurn/save
   → 首轮无手动标题：独立生成标题或保留首问摘要，再保存
 ```
 
-工具模块目前可通过 Java 注册并执行测试工具；现有 CLI 未连接它。下面是后续 Agent 闭环的目标流程：
+以上是当前已接通的只读工具闭环。下面是后续加入修改、验证、流式与上下文预算后的目标流程：
 
 1. 用户输入任务，创建独立的运行上下文并追加用户消息。
 2. 构建本轮上下文，加入规则、历史、相关记忆和工具定义。
@@ -101,7 +102,7 @@ Main → 加载会话设置 → SessionLauncher 展示历史
 5. 如果模型返回最终回答，按任务类型检查验收证据；代码修改任务需要约定的编译或测试结果。
 6. 返回完整结果、验证摘要与明确状态：完成、未完成、失败、取消或预算耗尽。
 
-目标实现中工具按顺序执行，流式展示保留完整返回值；当前会话只保存成功文本轮次，完整执行事件、上下文筛选和长期记忆后续补充。
+当前工具按顺序执行，会话保存完整文本/工具轮次；流式展示、完整执行事件、上下文筛选和长期记忆后续补充。
 
 完整流程图、时序图和恢复策略见 [架构设计](docs/architecture.md)。
 
@@ -190,7 +191,7 @@ Main / SessionLauncher → PromptLoader.loadBase
 
 **实现方式与边界**：直接发送 Markdown 原文，不转换 HTML。加载用资源流，不依赖运行时的源码目录；基础资源缺失或为空时在发请求前报错。所有 Profile 共用基础提示词，修改后重新打包即可。历史会话沿用创建时的快照，发现 hash 变化会提示。
 
-工具名称、描述与参数 schema 放在 `ToolDefinition`，后续经请求 `tools` 字段发送；基础提示词不维护另一份工具清单。标题生成的专用指令目前在 `SessionTitleGenerator` 内。项目 `AGENTS.md`、提示词组合和模式模板尚待接入，详见 [提示词设计](docs/architecture.md#prompt-design)。
+工具名称、描述与参数 schema 放在 `ToolDefinition`，已通过请求 `tools` 字段发送；基础提示词仅写使用指导、不维护另一份工具清单。工具输出按待分析的数据处理。标题生成的专用指令目前在 `SessionTitleGenerator` 内。项目 `AGENTS.md`、提示词组合和模式模板尚待接入，详见 [提示词设计](docs/architecture.md#prompt-design)。
 
 <a id="module-message"></a>
 
@@ -214,7 +215,7 @@ Main / SessionLauncher → PromptLoader.loadBase
 后续执行结果 → ToolResult.toMessage → Message.tool(原调用 ID, 结果正文)
 ```
 
-**实现方式与边界**：使用 Java record，复制传入列表。只有 assistant 可带工具调用，只有 tool 可带 `toolCallId`；同一 assistant 的调用 ID 不重复。纯工具请求允许没有文本，空工具输出允许为空字符串。消息类型已支持工具，但当前文本会话与磁盘快照只提交普通 user/assistant 轮次；完整工具消息组的历史校验与保存还需接 Agent 时扩展。
+**实现方式与边界**：使用 Java record，复制传入列表。只有 assistant 可带工具调用，只有 tool 可带 `toolCallId`；同一 assistant 的调用 ID 不重复。纯工具请求允许没有文本，空工具输出允许为空字符串。`MessageHistory` 进一步校验轮次顺序、同一任务 ID 唯一、所有结果配对以及最终回答；会话与磁盘快照已支持完整工具消息组。
 
 <a id="module-llm"></a>
 
@@ -228,22 +229,22 @@ Main / SessionLauncher → PromptLoader.loadBase
 |---|---|
 | [LlmClient.java](src/main/java/io/github/jackfeicoder/codey/llm/LlmClient.java) | 声明 `generate(LlmRequest)`，上层通过接口使用客户端 |
 | [ChatCompletionsClient.java](src/main/java/io/github/jackfeicoder/codey/llm/ChatCompletionsClient.java) | 当前 HTTP/JSON 实现，每个实例绑定一套模型配置 |
-| [LlmRequest.java](src/main/java/io/github/jackfeicoder/codey/llm/LlmRequest.java) | 保存不可修改的本轮消息列表 |
+| [LlmRequest.java](src/main/java/io/github/jackfeicoder/codey/llm/LlmRequest.java) | 保存不可修改的消息与工具定义列表，拒绝重复名称；单参数构造兼容无工具请求 |
 | [LlmResponse.java](src/main/java/io/github/jackfeicoder/codey/llm/LlmResponse.java) | 保存 assistant 消息、结束原因、TokenUsage，提供文本/工具/截断判断 |
 | [LlmException.java](src/main/java/io/github/jackfeicoder/codey/llm/LlmException.java) | 区分 HTTP、网络、超时、中断、请求/响应格式和模型拒绝等错误 |
 
 **调用流程**：
 
 ```text
-Main 单次入口 / ChatCli.answer / SessionTitleGenerator
+AgentLoop / SessionTitleGenerator
   → LlmRequest → LlmClient.generate
-  → encode：model/messages/stream=false → POST BASE_URL/chat/completions
+  → encode：model/messages/stream=false/可选 tools → POST BASE_URL/chat/completions
   → 检查 HTTP 状态 → decode：首个 assistant/finish_reason/usage → LlmResponse
 ```
 
 **实现方式与边界**：共享 JDK HttpClient，按认证模式添加 Bearer 头或不添加认证头；默认不跟随重定向。Jackson 显式映射消息与工具调用字段，拒绝重复 JSON 键、尾随内容和不完整工具参数。`sendAsync` 后限时等待完整响应，因此对调用者仍是同步非流式；超时取消 future，中断恢复线程标志。异常不附带原始服务商正文或可能泄露凭证的底层异常。
 
-兼容同一协议的服务使用配置选择，无需按厂商名称新建实现；协议差异出现时通过新 `LlmClient` 适配。当前请求只有 messages，`tools` schema、生成参数、SSE 和自动重试尚未接入；`isRetryable()` 只是分类提示。Token 用量解析后可通过响应读取，CLI 尚未统一展示或统计。
+兼容同一协议的服务使用配置选择，无需按厂商名称新建实现；协议差异出现时通过新 `LlmClient` 适配。工具定义显式编码为 `tools[].type/function.name/description/parameters`，无工具时省略字段，使用协议默认工具选择。生成参数、SSE 和自动重试尚未接入；`isRetryable()` 只是分类提示。Token 用量解析后可通过响应读取，CLI 尚未统一展示或统计。
 
 <a id="module-cli"></a>
 
@@ -257,7 +258,7 @@ Main 单次入口 / ChatCli.answer / SessionTitleGenerator
 |---|---|
 | [Main.java](src/main/java/io/github/jackfeicoder/codey/cli/Main.java) | 参数解析与组件装配，提供帮助、配置操作、单次请求和会话入口 |
 | [SessionLauncher.java](src/main/java/io/github/jackfeicoder/codey/cli/SessionLauncher.java) | 管理列表/聊天状态，选择工作区、延迟校验模型，协调会话切换和标题任务 |
-| [ChatCli.java](src/main/java/io/github/jackfeicoder/codey/cli/ChatCli.java) | `answer()` 处理一次文本轮次并展示结果；`run()` 保留给内存调用者，生产入口使用 Launcher |
+| [ChatCli.java](src/main/java/io/github/jackfeicoder/codey/cli/ChatCli.java) | `answer()` 调用 AgentLoop、展示状态并提交完整成功轮次；`run()` 保留给内存调用者，生产入口使用 Launcher |
 
 **调用流程**：
 
@@ -265,8 +266,8 @@ Main 单次入口 / ChatCli.answer / SessionTitleGenerator
 Main 解析参数
   ├─ --help/--version：直接展示
   ├─ --list-models/--check-config：只做本地配置操作
-  ├─ --prompt：构建 system/user，独立请求一次
-  └─ 无参数/--chat：SessionLauncher → 列表选择或新建 → ChatCli.answer
+  ├─ --prompt：临时 Session + 无工作区 → AgentLoop → 展示回答
+  └─ 无参数/--chat：注册 read_file → SessionLauncher → ChatCli.answer → AgentLoop
 ```
 
 **实现方式与边界**：列表模式的普通文本匹配序号、完整标题或唯一 ID 前缀；聊天模式的普通文本就是问题，切换用 `/resume`。最近每批 10 条，分页持有稳定列表快照，`/sessions` 才刷新；重名与前缀冲突展示候选项。查看列表和历史预览不要求模型凭证，准备继续时才校验。终端通过 Console 处理编码，重定向输入输出使用 UTF-8；未知斜杠命令不发模型请求。命令表和启动例子见 [构建与启动](#build-run)。
@@ -282,6 +283,7 @@ Main 解析参数
 | 文件 | 职责 |
 |---|---|
 | [Session.java](src/main/java/io/github/jackfeicoder/codey/session/Session.java) | 初始化 system、构建请求副本、提交成功轮次、清空内存和从快照恢复 |
+| [MessageHistory.java](src/main/java/io/github/jackfeicoder/codey/session/MessageHistory.java) | 校验完整 user/assistant/tool 顺序与调用结果配对；阻止残缺历史提交或恢复 |
 | [SessionSnapshot.java](src/main/java/io/github/jackfeicoder/codey/session/SessionSnapshot.java) | 版本化磁盘 DTO，保存元数据/基础提示词/消息，校验 UUID、标题、时间及轮次 |
 | [SessionService.java](src/main/java/io/github/jackfeicoder/codey/session/SessionService.java) | 协调 Session、快照、dirty 状态与持锁读写，保存失败保留待重试内容 |
 | [SessionStore.java](src/main/java/io/github/jackfeicoder/codey/session/SessionStore.java) | 存储接口，提供列表、加载和持锁 Lease；上层不绑定 JSON 文件实现 |
@@ -293,22 +295,22 @@ Main 解析参数
 
 ```text
 新建：Launcher → SessionService.create → Snapshot + 写锁 + 初始保存
-对话：Session.messagesFor(input) → LLM → completeTurn → captureTurn → save
+对话：Session.messagesFor(input) → AgentLoop → completeAgentTurn → captureTurn → save
 恢复：标题/ID → 预览 → 检查工作区/配置 → lock/load → Session.restore → 等待新输入
 标题：首轮保存摘要 → 保存已尝试标记 → 独立标题请求 → 校验/回退 → 保存
 ```
 
-**实现方式与边界**：当前问题只放请求副本，收到普通回答后才提交 user/assistant；调用失败和未执行工具请求不污染历史。UUID 是身份，标题可重复且可修改；system 单独保存在快照，恢复只注入一次。标题请求最多使用 2000 个首问码点，超时取模型配置与 5 秒中的较小值；手动标题优先，生成一次，重启不重复生成。
+**实现方式与边界**：当前任务只放请求副本，收到最终回答后提交 user、工具调用/结果及最终 assistant；模型失败、中断与预算耗尽不提交本轮。v2 快照支持工具轮次，旧 v1 文本记录可加载并在恢复保存时升级。UUID 是身份，标题可重复且可修改；system 单独保存在快照，恢复只注入一次。标题请求最多使用 2000 个首问码点，超时取模型配置与 5 秒中的较小值；手动标题优先，生成一次，重启不重复生成。
 
 默认使用用户目录 `.codey/sessions/<UUID>/session.json`。同一会话持独占文件锁，每次保存检查 revision，写同目录临时文件并 force，再原子替换；文件系统不支持时明确报错。单快照上限 16 MiB，损坏记录不会覆盖为空，也不阻断其他列表项。保存失败保持 dirty，下一轮或切换前先重试。快照只记录模型别名，不序列化配置对象或密钥。
 
-CLI 的 `/clear` 保存旧会话并创建新 ID，沿用工作区/模型，旧记录仍可恢复；不是调用 `Session.clear()` 删除持久化记录。当前恢复文本，不还原文件、重启旧进程或重放命令；长期记忆、工具事件与上下文压缩后续加入。更多边界见 [会话实现](docs/architecture.md#workspace-sessions)。
+CLI 的 `/clear` 保存旧会话并创建新 ID，沿用工作区/模型，旧记录仍可恢复；不是调用 `Session.clear()` 删除持久化记录。恢复完整文本/工具对话，但不重放历史工具调用、不恢复执行中的任务或还原文件；长期记忆、工具事件与上下文压缩后续加入。更多边界见 [会话实现](docs/architecture.md#workspace-sessions)。
 
 <a id="module-tool"></a>
 
-### 8. 工具模块：tool（骨架已实现）
+### 8. 工具模块：tool（基础结构与读文件已实现）
 
-**功能**：将模型可见定义与 Java 执行分开，统一注册、查找、参数校验入口、工作区检查、错误结果和输出上限。目前使用测试工具验证，CLI 未注册内置工具。
+**功能**：将模型可见定义与 Java 执行分开，统一注册、查找、参数校验入口、工作区检查、错误结果和输出上限。内置 `read_file` 可读取工作区内 UTF-8 文本并分页，已接入工作区会话的模型驱动工具循环。
 
 **涉及文件**：
 
@@ -322,7 +324,8 @@ CLI 的 `/clear` 保存旧会话并创建新 ID，沿用工作区/模型，旧�
 | [ToolExecutor.java](src/main/java/io/github/jackfeicoder/codey/tool/ToolExecutor.java) | 严格解析参数对象、执行校验与工具、归一化错误、测量耗时及截断 |
 | [ToolResult.java](src/main/java/io/github/jackfeicoder/codey/tool/ToolResult.java) | 成功/错误状态、输出、错误码、耗时与截断，转换为原调用 ID 的 tool 消息 |
 | [ToolException.java](src/main/java/io/github/jackfeicoder/codey/tool/ToolException.java) | 工具可预期的业务失败；未知 RuntimeException 使用通用说明 |
-| [builtin/package-info.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/package-info.java) | 内置工具包占位，read_file/list_files/search_text 等尚待实现 |
+| [builtin/ReadFileTool.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/ReadFileTool.java) | read_file 定义、参数/路径检查、UTF-8 有界分页读取及完整 JSON 输出 |
+| [builtin/package-info.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/package-info.java) | 内置工具包说明；list_files/search_text 等后续加入 |
 
 **调用流程**：
 
@@ -330,24 +333,52 @@ CLI 的 `/clear` 保存旧会话并创建新 ID，沿用工作区/模型，旧�
 宿主 register(Tool) → 固定 ToolDefinition 与 Java 实现
 ToolCall → Registry.find → Executor 解析 JSON / 检查工作区
   → Tool.validateArguments → Tool.execute → ToolResult → toMessage()
-后续模型接入：Registry.definitions(context) → LLM 请求 tools → AgentLoop 调度
+模型接入：Registry.definitions(context) → LLM 请求 tools → AgentLoop 调度与回填
 ```
 
-**实现方式与边界**：工具用途用自然语言 description，参数用 JSON Schema，后续由协议适配器编码为结构化 `tools`；MD 只适合额外行为指导。当前只验证 schema 顶层为 object，没有通用 schema 校验器，具体字段/类型/业务限制由工具的 `validateArguments()` 明确实现。
+**实现方式与边界**：工具用途用自然语言 description，参数用 JSON Schema，由协议适配器编码为结构化 `tools`；MD 只适合额外行为指导。当前只验证 schema 顶层为 object，没有通用 schema 校验器，具体字段/类型/业务限制由工具的 `validateArguments()` 明确实现。
 
-执行器拒绝重复键、尾随 JSON、非对象与超过 64 Ki 字符的参数；需要工作区的工具会检查 NONE/失效目录。默认输出最多 16000 个 Unicode 码点，截断状态单独记录；具体工具仍需限制实际读取量。保留中断标志，不吞 JVM Error，不自动重试。当前同步执行，耗时统计不代表超时控制；路径范围、审批、超时、并行调度、真实内置工具与 Agent 回填仍待接入。详见 [工具模块设计与示例](docs/architecture.md#tool-foundation)。
+执行器拒绝重复键、尾随 JSON、非对象与超过 64 Ki 字符的参数；需要工作区的工具会检查 NONE/失效目录。默认输出最多 16000 个 Unicode 码点，截断状态单独记录。保留中断标志，不吞 JVM Error，不自动重试。当前同步执行，耗时统计不代表超时控制；统一权限策略、审批、超时与并行调度仍待接入。详见 [工具模块设计与示例](docs/architecture.md#tool-foundation)。
+
+**读文件的参数与流程**：`path` 必填，使用工作区相对路径；`startLine` 从 1 开始，默认 1；`maxLines` 默认 200，最大 500。
+
+```text
+ToolCall("read_file", {path, startLine?, maxLines?})
+  → Executor 严格解析 / 检查工作区 → ReadFileTool 参数校验
+  → 工作区拼接相对路径 → 归一化和真实路径范围检查
+  → 检查普通文件、大小和可读性 → 严格 UTF-8 解码 / 跳过前文 / 读取完整行
+  → JSON {path, startLine, returnedLines, endLine, lines, hasMore, nextStartLine}
+  → ToolResult → 对应调用 ID 的 tool 消息（后续由 Agent 回填）
+```
+
+文件及实际字节读取最多 4 MiB，单行最多 16384 个 UTF-16 单元。兼容 LF/CRLF/CR，保留文本空白，移除开头 BOM；非法编码和 NUL 报错。输出预算包含 JSON 转义和元数据，超出时提前分页，完整行放不下则明确报错。`hasMore` 表示还有后续内容，`nextStartLine` 用于继续读取；成功 JSON 不经截断。绝对路径、越界路径和指向工作区外的符号链接被拒绝，路径检查不是完整操作系统沙箱。独立调用示例和错误码见 [读文件实现](docs/architecture.md#read-file)。
 
 <a id="module-agent"></a>
 
-### 9. Agent 执行模块：agent（待实现）
+### 9. Agent 执行模块：agent（基础循环已实现）
 
-**功能（目标）**：维护“模型决策 → 工具执行 → 结果回填 → 再决策”的循环，管理轮次、时间预算、取消与任务完成状态。
+**功能**：维护“模型决策 → 工具执行 → 结果回填 → 再决策”的 ReAct 风格循环，管理模型请求次数、单步工具数量、中断与完成状态；不要求模型输出内部思考过程。
 
-**涉及文件**：目前只有 [agent/package-info.java](src/main/java/io/github/jackfeicoder/codey/agent/package-info.java) 的职责声明，没有 AgentLoop 等业务类；实现后逐个补充真实文件说明。
+**涉及文件**：
 
-**调用流程（计划）**：CLI → AgentLoop → 上下文/LLM → ToolExecutor → assistant/tool 消息组 → 下一轮或完成。
+| 文件 | 职责 |
+|---|---|
+| [AgentLoop.java](src/main/java/io/github/jackfeicoder/codey/agent/AgentLoop.java) | `run(Session, input, context)` 在历史副本上请求模型、发送定义、校验工具组、顺序执行和回填 |
+| [AgentResult.java](src/main/java/io/github/jackfeicoder/codey/agent/AgentResult.java) | 保存状态、本轮消息、最终响应及模型/工具调用次数；结果列表不可修改 |
+| [agent/package-info.java](src/main/java/io/github/jackfeicoder/codey/agent/package-info.java) | 循环包的职责及提交边界 |
 
-**实现方式（计划）**：先单 Agent、串行工具、明确轮次上限；工具结果与调用 ID 配对，正常回答和执行证据分开判断。当前连续聊天循环不等同于已经实现工具 Agent 循环。
+**调用流程**：
+
+```text
+Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
+  → run：Session.messagesFor(input) 获取请求副本
+  → for 每个允许步骤：Registry.definitions(context) → LlmRequest → generate
+      ├─ 最终文本：COMPLETED → CLI 展示 / Session 提交 / Store 保存
+      └─ tool_calls：校验整组 → 追加 assistant → 执行各工具 / 追加各 tool → 下一步
+  → 预算结束：BUDGET_EXHAUSTED → 报告未完成，不提交残缺历史
+```
+
+**实现方式与边界**：默认最多请求模型 8 次，包含最终回答请求；每个响应最多执行 16 个工具。整组执行前检查结束原因与跨步骤 ID 重复，截断的工具请求不执行。未知工具、业务参数错误与读取失败均回填关联错误，允许模型修正；网络/协议错误和线程中断沿 `LlmException` 退出，原历史保持完整。文本长度截断可保存并显示提示。COMPLETED 表示模型返回最终文本，并不证明代码修改或测试验收已完成。暂无线程外工具超时、任务总时间/Token 预算、重复无进展检测、流式或执行中恢复。详见 [循环实现与验收](docs/architecture.md#agent-loop)。
 
 <a id="module-context"></a>
 
@@ -462,10 +493,10 @@ codeY/
 |---|---|---|
 | M0 | 工程、入口与设计文档 | 已完成 |
 | M1 | LLM 调用与 SSE 流式输出 | 进行中：配置、消息、非流式调用与连续对话已完成 |
-| M2 | Agent 循环与只读工具 | 工具基础结构已完成，内置工具与循环待实现 |
+| M2 | Agent 循环与只读工具 | read_file、tools 请求、基础循环与工具历史已完成；搜索/目录工具待实现 |
 | M3 | 修改代码、执行命令与验证闭环 | 待实现 |
 | M4 | 上下文预算与历史压缩 | 待实现 |
-| M5 | 会话恢复与项目记忆 | 文本会话保存/恢复已提前实现；工具状态与记忆待实现 |
+| M5 | 会话恢复与项目记忆 | 文本/工具对话保存恢复已实现；执行中恢复与长期记忆待实现 |
 | M6 | MCP 工具接入 | 待实现 |
 | M7 | 固定任务评估与项目展示 | 待实现 |
 
@@ -509,11 +540,19 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --resume "项目开发"
 | `/clear` | 保存旧会话，新建 ID，沿用工作区和模型；旧历史仍可恢复 |
 | `/exit` 或 EOF | 保存待写快照并退出 |
 
-每轮成功回答立即保存，失败调用和未执行工具请求不入历史。默认存储为 Java `user.home` 下的 `.codey/sessions/<UUID>/session.json`；可以在启动目录 `.env` 中设置 `CODEY_DATA_DIR=E:/codey-data`。标题可手动填写或 `/rename`；留空时首轮成功后额外调用模型生成一次，最多等待 5 秒，失败保留本地摘要。`CODEY_AUTO_TITLE=false` 可关闭额外调用。标题请求不加入对话历史。
+每条任务得到最终回答后保存完整文本/工具消息组；模型失败、中断或预算耗尽的任务不入历史。默认存储为 Java `user.home` 下的 `.codey/sessions/<UUID>/session.json`；可以在启动目录 `.env` 中设置 `CODEY_DATA_DIR=E:/codey-data`。标题可手动填写或 `/rename`；留空时首轮成功后额外调用模型生成一次，最多等待 5 秒，失败保留本地摘要。`CODEY_AUTO_TITLE=false` 可关闭额外调用。标题请求不加入对话历史。
 
 恢复使用原工作区和保存的 Profile 别名，`--profile` 可显式覆盖；目录失效仍可查看历史，模型配置缺失时提示另选别名。工作区选择不改变 `.env` 查找目录，不自动扫描项目或增加文件操作能力。会话文件不保存模型凭证；同一会话只允许一个进程写入。保存失败会明确提示并阻止下一轮模型调用，避免覆盖未保存结果。
 
-当前恢复的是成功文本会话，尚无工具执行状态恢复、长期记忆、Token 预算或历史压缩。全部历史仍随请求发送，较长时可用 `/clear` 开始新会话。`/model` 会话内切换后续实现。职责与流程见 [Session 与连续对话](docs/architecture.md#session-chat)。
+当前恢复完整文本/工具会话，不重放旧工具调用；尚无执行中任务恢复、长期记忆、Token 预算或历史压缩。全部历史仍随请求发送，较长时可用 `/clear` 开始新会话。`/model` 会话内切换后续实现。旧会话沿用保存的基础提示词，若要采用新版工具指导可 `/clear` 或 `/new`。
+
+读取工作区文件示例：
+
+```shell
+java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/codeY --title 了解项目
+```
+
+进入后输入“请读取 README.md，说明项目已实现哪些功能”。模型可通过 `read_file` 获取内容；当前只有读取工具，需要给出已知文件路径，自动目录探索与搜索后续加入。
 
 基础提示词位于 [src/main/resources/prompts/base.md](src/main/resources/prompts/base.md)。PromptLoader 从 classpath 按 UTF-8 读取全文，Main 将其作为 system 消息注入请求；所有模型 Profile 共用。修改提示词后执行 `mvn package` 更新 JAR。资源缺失或空白时会在发送请求前报告提示词错误。设计与后续扩展见 [Prompt 模块](docs/architecture.md#prompt-design)。
 
@@ -529,7 +568,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --resume "项目开发"
 
 ## 验证与文档维护
 
-最近一次完整构建 `mvn verify` 共 201 项测试通过，工具骨架新增 23 项。会话阶段另验证过 12 项 JAR 场景，包括重启恢复、分页、标题回退与跨进程写锁；这些验证使用临时目录和本地替身，不代表已完成真实厂商或生产内置工具验证。本次 README 更新只核对代码、文件链接与文档结构，不重新调用模型。
+最近一次完整构建 `mvn verify` 共 272 项测试通过，无失败或跳过。Agent 阶段新增 35 项，覆盖循环、工具错误修正、多调用配对、预算/中断、请求定义映射、工具历史与 v1 升级；此前读文件有 36 项、工具基础结构有 23 项。另通过本地模拟 HTTP 的 5 项 JAR 验证：读取/回填/保存闭环、跨进程工具对话恢复、无工作区聊天、单条任务兼容、预算退出且不保存残缺历史。会话阶段的 12 项 JAR 检查保留为历史记录。未调用真实厂商服务。
 
 后续每完成或调整模块，同步维护模块导航和对应章节的四项内容：
 

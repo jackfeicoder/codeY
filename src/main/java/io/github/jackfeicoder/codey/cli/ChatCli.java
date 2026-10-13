@@ -1,33 +1,45 @@
 package io.github.jackfeicoder.codey.cli;
 
+import io.github.jackfeicoder.codey.agent.AgentLoop;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
-import io.github.jackfeicoder.codey.llm.LlmRequest;
-import io.github.jackfeicoder.codey.llm.LlmResponse;
 import io.github.jackfeicoder.codey.session.Session;
+import io.github.jackfeicoder.codey.tool.ToolContext;
+import io.github.jackfeicoder.codey.tool.ToolRegistry;
+import io.github.jackfeicoder.codey.workspace.WorkspaceBinding;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.Objects;
 
-/** 文本对话入口：读取一行 → 请求全部历史 → 展示回答 → 保存成功轮次；不执行工具。 */
+/** 对话展示入口：读取用户任务 → AgentLoop 执行 → 展示最终回答 → 提交完整成功轮次。 */
 public final class ChatCli {
-    /** 启动时装配的模型客户端，本阶段会话中固定使用同一 Profile。 */
-    private final LlmClient client;
+    /** 宿主装配的单任务循环，不把模型与工具逻辑放进 CLI。 */
+    private final AgentLoop agent;
+    /** 当前会话的工作区与输出预算，不能由模型参数替换。 */
+    private final ToolContext context;
     /** 当前运行的会话记录。 */
     private final Session session;
     /** 可替换的输入流，既支持终端，也便于使用内存文本验证交互流程。 */
     private final BufferedReader input;
     /** 正常回答与交互提示的输出。 */
     private final PrintWriter output;
-    /** 调用错误、截断和暂未支持的工具请求提示。 */
+    /** 调用错误、截断和预算退出提示。 */
     private final PrintWriter errors;
 
     /** 接收已装配的组件与输入输出，不读取配置，也不关闭调用方提供的流。 */
     public ChatCli(LlmClient client, Session session, BufferedReader input,
                    PrintWriter output, PrintWriter errors) {
-        this.client = Objects.requireNonNull(client, "client");
+        this(new AgentLoop(client, new ToolRegistry()), session, new ToolContext(WorkspaceBinding.none()),
+                input, output, errors);
+    }
+
+    /** 完整装配入口；持久化启动器传入注册工具与真实会话工作区。 */
+    public ChatCli(AgentLoop agent, Session session, ToolContext context, BufferedReader input,
+                   PrintWriter output, PrintWriter errors) {
+        this.agent = Objects.requireNonNull(agent, "agent");
+        this.context = Objects.requireNonNull(context, "context");
         this.session = Objects.requireNonNull(session, "session");
         this.input = Objects.requireNonNull(input, "input");
         this.output = Objects.requireNonNull(output, "output");
@@ -78,22 +90,23 @@ public final class ChatCli {
         }
     }
 
-    /** 发送一轮并展示结果；true 表示已提交普通回答，由持久化入口随后保存。 */
+    /** 执行一条任务；true 表示完整消息组已提交，持久化入口随后保存。 */
     public boolean answer(String line) {
-        // 当前问题只放入请求副本，调用失败时无需回滚历史。
-        LlmResponse response = client.generate(new LlmRequest(session.messagesFor(line)));
-        boolean completed = response.toolCalls().isEmpty();
-        if (completed) {
-            session.completeTurn(line, response.message());
-        } else {
-            errors.println("Tool execution is not implemented yet. This turn was not saved.");
+        var result = agent.run(session, line, context); // 失败或预算退出不会污染已提交历史。
+        if (!result.completed()) {
+            errors.println("Agent stopped [BUDGET_EXHAUSTED] after " + result.modelCalls()
+                    + " model requests and " + result.toolCalls() + " tool calls. This turn was not saved.");
+            errors.flush();
+            return false;
         }
+        session.completeAgentTurn(result.turnMessages());
+        var response = result.response();
         output.println("CodeY> " + response.text());
         if (response.isTruncated()) {
             errors.println("Model output was truncated (finish_reason=length).");
         }
         output.flush();
         errors.flush();
-        return completed;
+        return true;
     }
 }

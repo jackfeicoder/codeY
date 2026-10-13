@@ -4,14 +4,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 单次运行中的文本会话：保存基础指令与成功完成的对话轮次。
+ * 单次运行中的会话：保存基础指令与成功完成的文本/工具对话轮次。
  * 请求快照包含当前问题，但只有收到可保存的回答后才提交本轮，失败不污染历史。
  * 当前由 CLI 单线程使用；持久化交给 SessionService/SessionStore，不负责长期记忆或压缩。
  */
 public final class Session {
     /** 清空会话时仍保留的基础系统消息。 */
     private final Message systemMessage;
-    /** 按 system、user、assistant 顺序保存的已提交历史，不直接暴露给调用方。 */
+    /** 保存 system 和完整轮次，可包含 assistant/tool 消息组，不直接暴露。 */
     private final List<Message> history = new ArrayList<>();
 
     /** 使用非空白基础提示词创建会话，系统消息始终位于第一项。 */
@@ -44,7 +44,7 @@ public final class Session {
         return List.copyOf(request);
     }
 
-    /** 成功调用后一次性保存用户问题和普通 assistant 回答；工具轮次后续由 Agent 接管。 */
+    /** 普通文本轮次的便捷入口；工具对话使用完整消息组提交。 */
     public void completeTurn(String input, Message answer) {
         // 所有校验都在修改历史之前完成，失败时原会话保持不变。
         Message user = userMessage(input);
@@ -53,6 +53,15 @@ public final class Session {
         }
         history.add(user);
         history.add(answer);
+    }
+
+    /** 原子提交 Agent 返回的完整一轮；缺少工具结果或最终回答时拒绝修改历史。 */
+    public void completeAgentTurn(List<Message> turn) {
+        MessageHistory.validate(turn);
+        if (turn.isEmpty() || turn.stream().filter(message -> message.role() == MessageRole.USER).count() != 1) {
+            throw new IllegalArgumentException("Agent commit requires exactly one complete user turn.");
+        }
+        history.addAll(List.copyOf(turn));
     }
 
     /** 丢弃所有对话轮次，保留原始基础提示词，不重新读取资源或发送请求。 */

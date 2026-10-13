@@ -1,5 +1,6 @@
 package io.github.jackfeicoder.codey.cli;
 
+import io.github.jackfeicoder.codey.agent.AgentLoop;
 import io.github.jackfeicoder.codey.config.ConfigException;
 import io.github.jackfeicoder.codey.config.SessionSettings;
 import io.github.jackfeicoder.codey.llm.LlmClient;
@@ -9,6 +10,8 @@ import io.github.jackfeicoder.codey.session.SessionService;
 import io.github.jackfeicoder.codey.session.SessionSnapshot;
 import io.github.jackfeicoder.codey.session.SessionStore;
 import io.github.jackfeicoder.codey.session.SessionTitleGenerator;
+import io.github.jackfeicoder.codey.tool.ToolContext;
+import io.github.jackfeicoder.codey.tool.ToolRegistry;
 import io.github.jackfeicoder.codey.workspace.WorkspaceBinding;
 import io.github.jackfeicoder.codey.workspace.WorkspaceResolver;
 
@@ -51,6 +54,8 @@ public final class SessionLauncher {
     private final PrintWriter errors;
     /** CLI 覆盖项，不包含密钥。 */
     private final Options options;
+    /** Main 注入的工具注册表，具体读取工具不会散落在会话业务中创建。 */
+    private final ToolRegistry tools;
     /** 已显示列表的稳定快照与数量，分页不会重新编号。 */
     private List<SessionSnapshot> listing = List.of();
     /** 本次列表已显示数量，序号不随着翻页重置。 */
@@ -68,6 +73,14 @@ public final class SessionLauncher {
     public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
                            Function<String, ModelChoice> models, Supplier<String> basePrompt,
                            BufferedReader input, PrintWriter output, PrintWriter errors, Options options) {
+        this(startup, settings, store, models, basePrompt, input, output, errors, options, new ToolRegistry());
+    }
+
+    /** 生产装配入口，工具列表由 Main 统一提供；旧入口默认没有注册工具。 */
+    public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
+                           Function<String, ModelChoice> models, Supplier<String> basePrompt,
+                           BufferedReader input, PrintWriter output, PrintWriter errors, Options options,
+                           ToolRegistry tools) {
         this.startup = startup.toAbsolutePath().normalize();
         this.settings = settings;
         this.store = store;
@@ -77,6 +90,7 @@ public final class SessionLauncher {
         this.output = output;
         this.errors = errors;
         this.options = options;
+        this.tools = java.util.Objects.requireNonNull(tools, "tools");
     }
 
     /** EOF 或 /exit 结束；错误保存会话返回 1，参数配置错误由 Main 分类。 */
@@ -309,13 +323,14 @@ public final class SessionLauncher {
         }
     }
 
-    /** 预览最近两轮，有界输出；完整历史保留在存储和 Session 中。 */
+    /** 预览最近四条消息，有界输出；纯工具调用没有文本时展示名称和调用 ID。 */
     private void preview(SessionSnapshot snapshot) {
         output.println("历史：" + snapshot.title() + " | " + snapshot.id() + " | " + snapshot.workspace().display());
         var messages = snapshot.messages();
         for (int index = Math.max(0, messages.size() - 4); index < messages.size(); index++) {
             var message = messages.get(index);
-            String content = message.content();
+            String content = message.content() == null ? "工具调用：" + message.toolCalls().stream()
+                    .map(call -> call.name() + " [" + call.id() + "]").toList() : message.content();
             if (content.length() > 500) content = content.substring(0, 500) + "…";
             output.println(message.role() + ": " + content);
         }
@@ -323,7 +338,8 @@ public final class SessionLauncher {
 
     /** 先保存成功回答，再执行一次有界标题任务；生成文本不会加入历史。 */
     private void answer(String line) {
-        ChatCli chat = new ChatCli(model.chat(), active.session(), input, output, errors);
+        ChatCli chat = new ChatCli(new AgentLoop(model.chat(), tools), active.session(),
+                new ToolContext(active.snapshot().workspace()), input, output, errors);
         if (chat.answer(line)) {
             active.captureTurn();
             active.save();
