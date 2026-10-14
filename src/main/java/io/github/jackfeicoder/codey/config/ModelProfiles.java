@@ -3,10 +3,12 @@ package io.github.jackfeicoder.codey.config;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.HashMap;
 
 /**
- * 保存别名、默认选择和原始配置的不可变快照；选中某套配置时才构建 LlmConfig。
- * 流程：校验别名 → 生成字段前缀 → 加载目标配置；切换返回新快照。
+ * 保存供应商别名、模型列表与选择的不可变快照；选中时构建单个模型的 LlmConfig。
+ * 流程：解析别名/ID → 生成字段前缀 → 校验 ID 属于列表 → 合并公共配置；切换返回新快照。
  */
 public final class ModelProfiles {
     /**
@@ -18,8 +20,10 @@ public final class ModelProfiles {
     public record ProfileInfo(String alias, String modelId, boolean configured) { }
     /** 已声明的别名列表，统一为小写且不可修改。 */
     private final List<String> profileNames;
-    /** 当前选中的配置别名，不是服务商的模型 ID。 */
+    /** 当前选中的供应商配置别名，与 activeModel 分开保存。 */
     private final String activeProfile;
+    /** 明确选择的模型 ID；null 表示使用该 Profile 的第一个模型。 */
+    private final String activeModel;
     /** 合并后的配置字符串，可能含密钥，因此不直接展示或打印。 */
     private final Map<String, String> values;
     /** true 使用 CODEY_PROFILE_* 前缀，false 兼容旧版 CODEY_LLM_*。 */
@@ -31,7 +35,9 @@ public final class ModelProfiles {
         this.profileNames = List.copyOf(profileNames);
         this.values = Map.copyOf(values);
         this.namedProfiles = namedProfiles;
-        this.activeProfile = requireKnownProfile(activeProfile);
+        ProfileSelection selected = ProfileSelection.parse(activeProfile);
+        this.activeProfile = requireKnownProfile(selected.alias());
+        this.activeModel = selected.modelId();
     }
 
     /** 获取可选别名，用于 CLI 列表展示。 */
@@ -41,14 +47,22 @@ public final class ModelProfiles {
 
     /** 列出全部已声明配置及模型 ID；坏配置标记而不阻止查看其他模型，不创建客户端。 */
     public List<ProfileInfo> listInfo() {
-        return profileNames.stream().map(name -> {
-            String prefix = namedProfiles ? "CODEY_PROFILE_" + name.toUpperCase(Locale.ROOT) + "_" : "CODEY_LLM_";
-            String modelId = values.getOrDefault(prefix + "MODEL", "未填写模型 ID");
-            boolean configured;
-            try { configFor(name); configured = true; }
-            catch (ConfigException invalid) { configured = false; }
-            return new ProfileInfo(name, modelId, configured);
-        }).toList();
+        List<ProfileInfo> result = new ArrayList<>();
+        for (String name : profileNames) {
+            List<String> ids;
+            try { ids = modelIdsFor(name); }
+            catch (ConfigException invalid) {
+                result.add(new ProfileInfo(name, "模型列表待完善", false));
+                continue;
+            }
+            for (String id : ids) {
+                boolean configured;
+                try { configFor(name + " " + id); configured = true; }
+                catch (ConfigException invalid) { configured = false; }
+                result.add(new ProfileInfo(name, id, configured));
+            }
+        }
+        return List.copyOf(result);
     }
 
     /** 获取当前别名；不会读取或校验其模型字段。 */
@@ -58,23 +72,56 @@ public final class ModelProfiles {
 
     /** 校验并返回当前选中配置，调用方可据此创建模型客户端。 */
     public LlmConfig activeConfig() {
-        return configFor(activeProfile);
+        return configFor(new ProfileSelection(activeProfile, activeModel).value());
     }
 
-    /** 读取指定别名的配置，不改变当前选择。 */
+    /** 返回完整选择值，用于会话和默认偏好；明确记录实际模型而非仅供应商。 */
+    public String activeSelection() {
+        return activeProfile + " " + activeConfig().model();
+    }
+
+    /** 读取“别名 [模型ID]”对应的单模型配置，不改变当前选择。 */
     public LlmConfig configFor(String name) {
-        String knownName = requireKnownProfile(name); // 已确认存在的规范化别名。
-        String prefix = namedProfiles // 决定要读取哪一组字段，避免不同配置串用凭证。
-                ? "CODEY_PROFILE_" + knownName.toUpperCase(Locale.ROOT) + "_"
-                : "CODEY_LLM_";
-        return ConfigLoader.buildConfig(values, prefix);
+        ProfileSelection selection = ProfileSelection.parse(name);
+        String knownName = requireKnownProfile(selection.alias());
+        List<String> ids = modelIdsFor(knownName);
+        String selectedId = selection.modelId() == null ? ids.get(0) : selection.modelId();
+        if (!ids.contains(selectedId)) {
+            throw new ConfigException("Selected model ID is not declared in this Profile's MODEL list. Use /list model.");
+        }
+        // 公共地址与密钥保持不变，仅把选定的单个模型传给原有 LlmConfig 构建流程。
+        Map<String, String> selectedValues = new HashMap<>(values);
+        String prefix = prefixFor(knownName);
+        selectedValues.put(prefix + "MODEL", selectedId);
+        return ConfigLoader.buildConfig(selectedValues, prefix);
+    }
+
+    /** 解析逗号分隔的模型 ID，保持配置顺序；空项、重复项明确报错。 */
+    public List<String> modelIdsFor(String alias) {
+        String key = prefixFor(requireKnownProfile(alias)) + "MODEL";
+        String raw = values.get(key);
+        if (raw == null || raw.isBlank()) throw new ConfigException(key + " is required.");
+        List<String> ids = new ArrayList<>();
+        for (String part : raw.split(",", -1)) {
+            String id;
+            try { id = ProfileSelection.requireModelId(part); }
+            catch (ConfigException invalid) { throw new ConfigException(key + " contains an invalid model ID."); }
+            if (ids.contains(id)) throw new ConfigException(key + " contains duplicate model IDs.");
+            ids.add(id);
+        }
+        return List.copyOf(ids);
+    }
+
+    /** Profile 别名只用于生成配置字段前缀，与模型 ID 分开处理。 */
+    private String prefixFor(String alias) {
+        return namedProfiles ? "CODEY_PROFILE_" + alias.toUpperCase(Locale.ROOT) + "_" : "CODEY_LLM_";
     }
 
     /** 先验证目标配置再返回新选择；验证失败时原快照保持不变。 */
     public ModelProfiles select(String name) {
-        String knownName = requireKnownProfile(name); // 新选择必须是已声明的别名。
-        configFor(knownName);
-        return new ModelProfiles(profileNames, knownName, values, namedProfiles);
+        ProfileSelection selection = ProfileSelection.parse(name);
+        configFor(selection.value());
+        return new ModelProfiles(profileNames, selection.value(), values, namedProfiles);
     }
 
     /** 限制别名格式并转小写，确保字段前缀可以稳定生成。 */

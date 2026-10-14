@@ -118,14 +118,14 @@ public final class Main {
             }
             ModelProfiles profiles = ConfigLoader.loadProfiles(startup, environment, preferred);
             if ("--list-models".equals(action)) {
-                System.out.println("Configured profiles (* = selected; credentials are validated on use):");
-                for (String name : profiles.profileNames()) {
-                    // name 是列表中的别名，星号标识当前选择，列表操作不校验凭证。
-                    System.out.println((name.equals(profiles.activeProfile()) ? "* " : "  ") + name);
+                System.out.println("Configured models (Profile | model ID | local configuration only):");
+                for (var entry : profiles.listInfo()) {
+                    System.out.println(entry.alias() + " | " + entry.modelId() + " | "
+                            + (entry.configured() ? "配置有效" : "配置待完善"));
                 }
             } else if ("--check-config".equals(action)) {
                 LlmConfig config = profiles.activeConfig(); // 只做本地字段校验，不发送 HTTP 请求。
-                System.out.println("LLM configuration is valid. Profile: " + profiles.activeProfile());
+                System.out.println("LLM configuration is valid. Profile: " + profiles.activeSelection());
                 System.out.println(config);
             } else {
                 // client 通过统一接口使用，实际 HTTP/JSON 逻辑位于 ChatCompletionsClient。
@@ -146,7 +146,7 @@ public final class Main {
                 }
                 var response = result.response();
                 System.out.println(response.text());
-                try { preferences.save(profiles.activeProfile()); }
+                try { preferences.save(profiles.activeSelection()); }
                 catch (ConfigException failed) { System.err.println("默认模型偏好未保存：" + failed.getMessage()); }
                 if (response.isTruncated()) {
                     System.err.println("Model output was truncated (finish_reason=length).");
@@ -191,17 +191,20 @@ public final class Main {
         PrintWriter errors = new PrintWriter(System.err, true,
                 console == null ? StandardCharsets.UTF_8 : console.charset());
         var debug = new DebugPrinter(output); // 只显示轮次、工具名称和涉及的文件。
-        return new SessionLauncher(startup, settings, new JsonSessionStore(settings.dataDirectory()), name -> {
-            // 历史浏览不执行此工厂；准备继续会话时才校验目标 Profile。
-            ModelProfiles profiles = ConfigLoader.loadProfiles(startup, environment, name);
-            LlmConfig config = profiles.activeConfig();
-            Duration timeout = config.timeout().compareTo(Duration.ofSeconds(5)) < 0
-                    ? config.timeout() : Duration.ofSeconds(5);
-            LlmConfig titleConfig = new LlmConfig(config.baseUrl(), config.apiKey(), config.model(), timeout, config.authMode());
-            return new SessionLauncher.ModelChoice(profiles.activeProfile(), new ChatCompletionsClient(config),
-                    new ChatCompletionsClient(titleConfig));
-        }, PromptLoader::loadBase, input, output, errors, options, createTools(), debug,
-                () -> ConfigLoader.loadModelCatalog(startup, environment)).run();
+        try (ConsoleInput consoleInput = ConsoleInput.open(input, output,
+                () -> ConfigLoader.loadModelCatalog(startup, environment))) {
+            return new SessionLauncher(startup, settings, new JsonSessionStore(settings.dataDirectory()), name -> {
+                // 历史浏览不执行此工厂；准备继续会话时才校验目标 Profile。
+                ModelProfiles profiles = ConfigLoader.loadProfiles(startup, environment, name);
+                LlmConfig config = profiles.activeConfig();
+                Duration timeout = config.timeout().compareTo(Duration.ofSeconds(5)) < 0
+                        ? config.timeout() : Duration.ofSeconds(5);
+                LlmConfig titleConfig = new LlmConfig(config.baseUrl(), config.apiKey(), config.model(), timeout, config.authMode());
+                return new SessionLauncher.ModelChoice(profiles.activeSelection(), new ChatCompletionsClient(config),
+                        new ChatCompletionsClient(titleConfig));
+            }, PromptLoader::loadBase, consoleInput, output, errors, options, createTools(), debug,
+                    () -> ConfigLoader.loadModelCatalog(startup, environment)).run();
+        }
     }
 
     /** 统一注册本阶段工具；是否向模型提供，由 Registry 按会话上下文筛选。 */
@@ -241,7 +244,10 @@ public final class Main {
                   /new creates; /more_session loads the next 10; /resume TITLE_OR_ID restores.
                   /sessions refreshes; /rename TITLE renames; /back returns to the active chat.
                   /help lists commands; /list model lists profile aliases and model IDs.
-                  /model ALIAS switches the active conversation model while preserving history.
+                  /model ALIAS [MODEL_ID] switches the active model while preserving history.
+                  Each CODEY_PROFILE_*_MODEL accepts comma-separated model IDs; the first is the fallback.
+                  Interactive terminals support Tab completion and arrow-key candidate selection.
+                  Use --profile "ALIAS MODEL_ID" to select a specific model at startup.
                   /clear saves the old chat and creates a new one; /exit saves and exits.
                   In chat, exit returns to session management; in the session list, exit quits.
                   CODEY_DATA_DIR defaults to user.home/.codey; CODEY_AUTO_TITLE defaults to true.

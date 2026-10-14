@@ -14,7 +14,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.Optional;
 
-/** 用户级模型偏好：只保存最后选择的 Profile 别名，不保存密钥或改变 .env。 */
+/** 用户级模型偏好：保存最后选择的 Profile 与模型 ID，兼容旧单别名记录，不保存凭证。 */
 public final class ModelPreferenceStore {
     /** 微小偏好文件的读取上限，拒绝异常内容。 */
     private static final int MAX_BYTES = 4096;
@@ -45,7 +45,7 @@ public final class ModelPreferenceStore {
                     || !body.path("schemaVersion").isIntegralNumber() || !body.path("schemaVersion").canConvertToInt()
                     || body.path("schemaVersion").asInt() != 1
                     || !body.path("lastUsedProfile").isTextual()) throw new IOException();
-            return Optional.of(ModelProfiles.normalizeName(body.path("lastUsedProfile").asText()));
+            return Optional.of(ProfileSelection.parse(body.path("lastUsedProfile").asText()).value());
         } catch (IOException | RuntimeException invalid) {
             throw new ConfigException("Failed to read model-preference.json; default preference was ignored.");
         }
@@ -53,7 +53,7 @@ public final class ModelPreferenceStore {
 
     /** 原子替换偏好；多进程选择时最后一次成功写入生效，不修改会话文件。 */
     public void save(String profile) {
-        String alias = ModelProfiles.normalizeName(profile);
+        String alias = ProfileSelection.parse(profile).value();
         Path temporary = null;
         try {
             Files.createDirectories(file.getParent());

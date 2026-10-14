@@ -22,7 +22,7 @@ public final class ChatCli {
     /** 当前运行的会话记录。 */
     private final Session session;
     /** 可替换的输入流，既支持终端，也便于使用内存文本验证交互流程。 */
-    private final BufferedReader input;
+    private final ConsoleInput input;
     /** 正常回答与交互提示的输出。 */
     private final PrintWriter output;
     /** 调用错误、截断和预算退出提示。 */
@@ -38,6 +38,12 @@ public final class ChatCli {
     /** 完整装配入口；持久化启动器传入注册工具与真实会话工作区。 */
     public ChatCli(AgentLoop agent, Session session, ToolContext context, BufferedReader input,
                    PrintWriter output, PrintWriter errors) {
+        this(agent, session, context, new ConsoleInput(input, output), output, errors);
+    }
+
+    /** 持久化启动器复用正在使用的终端输入，模型执行过程中不会另开 Reader。 */
+    public ChatCli(AgentLoop agent, Session session, ToolContext context, ConsoleInput input,
+                   PrintWriter output, PrintWriter errors) {
         this.agent = Objects.requireNonNull(agent, "agent");
         this.context = Objects.requireNonNull(context, "context");
         this.session = Objects.requireNonNull(session, "session");
@@ -50,10 +56,9 @@ public final class ChatCli {
     public void run() throws IOException {
         output.println("CodeY chat. Commands: /clear, /exit. History is kept only for this run.");
         while (!Thread.currentThread().isInterrupted()) {
-            output.print("You> ");
             output.flush();
             // null 表示 EOF，例如管道结束或终端关闭，不再次请求模型。
-            String line = input.readLine();
+            String line = input.readLine("You> ");
             if (line == null || "/exit".equals(line.strip()) || "exit".equalsIgnoreCase(line.strip())) {
                 output.println("Bye.");
                 output.flush();

@@ -5,6 +5,7 @@ import io.github.jackfeicoder.codey.config.ConfigException;
 import io.github.jackfeicoder.codey.config.SessionSettings;
 import io.github.jackfeicoder.codey.config.ModelPreferenceStore;
 import io.github.jackfeicoder.codey.config.ModelProfiles;
+import io.github.jackfeicoder.codey.config.ProfileSelection;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
 import io.github.jackfeicoder.codey.observability.DebugPrinter;
@@ -34,7 +35,7 @@ import java.util.function.Supplier;
 public final class SessionLauncher {
     /** 启动时的可选覆盖；无覆盖时显示历史列表。 */
     public record Options(String workspace, boolean noWorkspace, String title, String resume, String profile) { }
-    /** 模型组件在选择会话后才创建；标题客户端使用独立短超时。 */
+    /** profile 保存“供应商 模型ID”（兼容旧单别名）；标题客户端使用独立短超时。 */
     public record ModelChoice(String profile, LlmClient chat, LlmClient title) { }
 
     /** 每次展示/追加的记录数。 */
@@ -60,7 +61,7 @@ public final class SessionLauncher {
     /** 新会话加载当前基础提示词，历史会话使用自己的快照。 */
     private final Supplier<String> basePrompt;
     /** 调用方持有的逐行输入，不在启动器内关闭。 */
-    private final BufferedReader input;
+    private final ConsoleInput input;
     /** 正常列表、回答和操作提示。 */
     private final PrintWriter output;
     /** 可展示的配置、存储和调用错误。 */
@@ -112,6 +113,15 @@ public final class SessionLauncher {
                            Function<String, ModelChoice> models, Supplier<String> basePrompt,
                            BufferedReader input, PrintWriter output, PrintWriter errors, Options options,
                            ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog) {
+        this(startup, settings, store, models, basePrompt, new ConsoleInput(input, output), output, errors,
+                options, tools, debug, modelCatalog);
+    }
+
+    /** 终端输入实现支持补全；原 BufferedReader 构造入口保留，便于管道与测试。 */
+    public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
+                           Function<String, ModelChoice> models, Supplier<String> basePrompt,
+                           ConsoleInput input, PrintWriter output, PrintWriter errors, Options options,
+                           ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog) {
         this.startup = startup.toAbsolutePath().normalize();
         this.settings = settings;
         this.store = store;
@@ -161,7 +171,7 @@ public final class SessionLauncher {
                         listModels();
                     } else if ("/model".equals(command)) {
                         output.println("当前模型：" + (model == null ? "未选择" : model.profile())
-                                + "；用法：/model 配置别名，/list model 查看列表。");
+                                + "；用法：/model 供应商 [模型ID]，/list model 查看列表。");
                     } else if (command.matches("/model\\s+.*")) {
                         switchModel(unquote(command.substring(6).strip()));
                     } else if ("/new".equals(command)) {
@@ -350,7 +360,7 @@ public final class SessionLauncher {
             try { return models.apply(profile); }
             catch (ConfigException invalid) {
                 errors.println("Configuration error: " + invalid.getMessage());
-                String choice = read("输入可用的 Profile 别名（/back 返回）> ");
+                String choice = read("输入可用的供应商 [模型ID]（/back 返回）> ");
                 if (choice == null) { exiting = true; return null; }
                 if ("/back".equals(choice.strip())) return null;
                 profile = choice.strip();
@@ -381,35 +391,31 @@ public final class SessionLauncher {
 
     /** 统一列出交互命令；管理页和聊天中都可查看，不向模型发送。 */
     private void printCommands() {
-        output.println("""
-                CodeY 命令：
-                  /help                 查看全部交互命令
-                  /list model           查看已配置模型别名、模型 ID 和配置状态
-                  /model                查看当前模型
-                  /model 配置别名       切换当前会话模型，保留完整历史
-                  /new                  新建会话，选择工作区和标题
-                  /sessions             刷新全局会话列表
-                  /more_session         查看下一批会话
-                  /resume               打开会话列表
-                  /resume 标题或ID      恢复指定会话
-                  /rename 标题          修改当前会话标题
-                  /back                 返回活动会话；新建输入时取消
-                  /clear                新建同工作区/模型会话，旧会话保留
-                  exit                  聊天返回列表；列表中退出程序
-                  /exit                 保存并退出程序；EOF 同样退出
-                默认模型为最后一次成功选择的配置；首次没有记录时使用 .env 默认值。
-                """);
+        output.println("CodeY 命令：");
+        for (var command : CommandCatalog.commands()) {
+            output.println("  " + command.usage() + "  " + command.description());
+        }
+        output.println("  exit  聊天返回列表；列表中退出程序");
+        output.println("默认模型为最后一次成功选择的配置；首次没有记录时使用 .env 默认值。");
+        output.println("交互终端：Tab 补全命令/供应商/模型；多个候选可用上下键选择、Enter 确认。");
     }
 
     /** 列表不校验远端连通性、不切换选择、不写偏好，也不展示凭证。 */
     private void listModels() {
         List<ModelProfiles.ProfileInfo> entries = modelCatalog.get();
         String last = lastProfile();
-        output.println("模型目录（/model 使用配置别名；配置通过仅代表本地校验）：");
+        output.println("模型目录（/model 供应商 [模型ID]；配置通过仅代表本地校验）：");
         output.println("当前会话：" + (model == null ? "未选择" : model.profile())
                 + "；默认模型：" + (last == null ? "首次使用 .env 的 CODEY_ACTIVE_PROFILE" : last));
         for (var entry : entries) {
-            output.println((model != null && model.profile().equals(entry.alias()) ? "* " : "  ")
+            boolean selected = false;
+            if (model != null) {
+                ProfileSelection current = ProfileSelection.parse(model.profile());
+                selected = current.alias().equals(entry.alias()) && (current.modelId() == null
+                        ? entries.stream().filter(e -> e.alias().equals(entry.alias())).findFirst().orElseThrow().equals(entry)
+                        : current.modelId().equals(entry.modelId()));
+            }
+            output.println((selected ? "* " : "  ")
                     + entry.alias() + " | " + entry.modelId() + " | " + (entry.configured() ? "配置有效" : "配置待完善"));
         }
         if (entries.isEmpty()) output.println("暂无模型目录，请检查 CODEY_PROFILE_NAMES 配置。");
@@ -506,10 +512,9 @@ public final class SessionLauncher {
 
     /** 显示输入提示并处理所有输入阶段的 EOF 与 /exit。 */
     private String read(String prompt) throws IOException {
-        output.print(prompt);
         output.flush();
         errors.flush();
-        String line = input.readLine();
+        String line = input.readLine(prompt);
         if (line == null || "/exit".equals(line.strip())) {
             exiting = true;
             return null;
