@@ -8,6 +8,7 @@ import io.github.jackfeicoder.codey.config.LlmConfig;
 import io.github.jackfeicoder.codey.config.ModelProfiles;
 import io.github.jackfeicoder.codey.config.ModelPreferenceStore;
 import io.github.jackfeicoder.codey.config.SessionSettings;
+import io.github.jackfeicoder.codey.config.AgentSettings;
 import io.github.jackfeicoder.codey.llm.ChatCompletionsClient;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
@@ -19,6 +20,7 @@ import io.github.jackfeicoder.codey.session.SessionException;
 import io.github.jackfeicoder.codey.tool.ToolContext;
 import io.github.jackfeicoder.codey.tool.ToolRegistry;
 import io.github.jackfeicoder.codey.tool.builtin.ReadFileTool;
+import io.github.jackfeicoder.codey.tool.builtin.ListFilesTool;
 import io.github.jackfeicoder.codey.workspace.WorkspaceBinding;
 
 import java.io.BufferedReader;
@@ -124,10 +126,13 @@ public final class Main {
                             + (entry.configured() ? "配置有效" : "配置待完善"));
                 }
             } else if ("--check-config".equals(action)) {
+                AgentSettings agentSettings = AgentSettings.load(startup, environment);
                 LlmConfig config = profiles.activeConfig(); // 只做本地字段校验，不发送 HTTP 请求。
                 System.out.println("LLM configuration is valid. Profile: " + profiles.activeSelection());
                 System.out.println(config);
+                System.out.println(agentSettings);
             } else {
+                AgentSettings agentSettings = AgentSettings.load(startup, environment);
                 // client 通过统一接口使用，实际 HTTP/JSON 逻辑位于 ChatCompletionsClient。
                 Console console = System.console();
                 PrintWriter debugOutput = console == null ? new PrintWriter(System.out, true, StandardCharsets.UTF_8)
@@ -137,7 +142,7 @@ public final class Main {
                 // basePrompt 是内置 Markdown 原文，与模型厂商和启动目录无关。
                 String basePrompt = PromptLoader.loadBase();
                 // --prompt 没有工作区，read_file 不会列入可用定义；循环仍由同一 Agent 处理。
-                var result = new AgentLoop(client, createTools(), AgentLoop.DEFAULT_MAX_STEPS, debug).run(new Session(basePrompt), prompt,
+                var result = new AgentLoop(client, createTools(agentSettings), agentSettings.maxIterations(), debug).run(new Session(basePrompt), prompt,
                         new ToolContext(WorkspaceBinding.none()));
                 if (!result.completed()) {
                     System.err.println("Agent stopped [BUDGET_EXHAUSTED].");
@@ -146,6 +151,7 @@ public final class Main {
                 }
                 var response = result.response();
                 System.out.println(response.text());
+                if (result.budgetLimited()) System.err.println("本轮已到模型请求上限，回答基于当前已获得的信息。");
                 try { preferences.save(profiles.activeSelection()); }
                 catch (ConfigException failed) { System.err.println("默认模型偏好未保存：" + failed.getMessage()); }
                 if (response.isTruncated()) {
@@ -182,6 +188,7 @@ public final class Main {
         Path startup = Path.of("").toAbsolutePath().normalize(); // 配置查找始终使用启动目录。
         Map<String, String> environment = System.getenv(); // 凭证只传给配置加载器，不写入快照。
         SessionSettings settings = SessionSettings.load(startup, environment);
+        AgentSettings agentSettings = AgentSettings.load(startup, environment);
         // Console 可正确处理 Windows 终端字符编码；管道和测试进程没有 Console。
         Console console = System.console();
         BufferedReader input = new BufferedReader(console == null
@@ -202,14 +209,14 @@ public final class Main {
                 LlmConfig titleConfig = new LlmConfig(config.baseUrl(), config.apiKey(), config.model(), timeout, config.authMode());
                 return new SessionLauncher.ModelChoice(profiles.activeSelection(), new ChatCompletionsClient(config),
                         new ChatCompletionsClient(titleConfig));
-            }, PromptLoader::loadBase, consoleInput, output, errors, options, createTools(), debug,
-                    () -> ConfigLoader.loadModelCatalog(startup, environment)).run();
+            }, PromptLoader::loadBase, consoleInput, output, errors, options, createTools(agentSettings), debug,
+                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations()).run();
         }
     }
 
     /** 统一注册本阶段工具；是否向模型提供，由 Registry 按会话上下文筛选。 */
-    private static ToolRegistry createTools() {
-        return new ToolRegistry().register(new ReadFileTool());
+    private static ToolRegistry createTools(AgentSettings settings) {
+        return new ToolRegistry().register(new ReadFileTool()).register(new ListFilesTool(settings.listFilesDefaultDepth()));
     }
 
     /** 统一处理非法参数，不回显可能包含敏感内容的用户输入。 */
@@ -223,7 +230,7 @@ public final class Main {
         System.out.println("""
                 CodeY - A CLI coding agent built from scratch in Java.
 
-                Status: model profiles, persistent conversations and read_file Agent loops are available.
+                Status: model profiles, persistent conversations, list_files/read_file Agent loops are available.
 
                 Usage:
                   java -jar target/codey-0.1.0-SNAPSHOT.jar
@@ -255,11 +262,13 @@ public final class Main {
                   The built-in prompts/base.md is sent as the system message.
                   Initial selection: --profile > last-used profile > saved session profile > CODEY_ACTIVE_PROFILE.
                   Successful selections persist in CODEY_DATA_DIR/model-preference.json, without credentials.
-                  Workspace chats expose read_file through structured tools; Agent allows up to 8 requests per task.
+                  Workspace chats expose list_files and read_file; CODEY_MAX_ITERATIONS defaults to 20 (range 1..100).
+                  The final request disables tools and asks for an evidence-based answer; budget hints are not saved.
+                  CODEY_LIST_FILES_DEFAULT_DEPTH defaults to 10 (range 1..20); Agent settings load on startup.
                   Completed assistant/tool groups are saved; failed or exhausted tasks are not committed.
                   Progress shows numbered model requests, called tools and involved files.
                   Request/response bodies, prompts, history and tool output are not printed as debug logs.
-                  File search, writes and command execution will be added later.
+                  list_files explores bounded directory trees; content search, writes and commands will follow.
 
                 Start learning:
                   README.md

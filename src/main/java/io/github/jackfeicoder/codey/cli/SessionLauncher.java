@@ -72,6 +72,8 @@ public final class SessionLauncher {
     private final ToolRegistry tools;
     /** Agent 的简洁进度输出，不加入会话消息。 */
     private final DebugPrinter debug;
+    /** 每条用户任务的模型请求上限，已包含最后一次仅回答的收尾请求。 */
+    private final int maxIterations;
     /** 已显示列表的稳定快照与数量，分页不会重新编号。 */
     private List<SessionSnapshot> listing = List.of();
     /** 本次列表已显示数量，序号不随着翻页重置。 */
@@ -122,6 +124,18 @@ public final class SessionLauncher {
                            Function<String, ModelChoice> models, Supplier<String> basePrompt,
                            ConsoleInput input, PrintWriter output, PrintWriter errors, Options options,
                            ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog) {
+        this(startup, settings, store, models, basePrompt, input, output, errors, options, tools, debug,
+                modelCatalog, AgentLoop.DEFAULT_MAX_STEPS);
+    }
+
+    /** 生产入口注入 Agent 预算；旧构造入口保留，测试也可显式提供较小预算。 */
+    public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
+                           Function<String, ModelChoice> models, Supplier<String> basePrompt,
+                           ConsoleInput input, PrintWriter output, PrintWriter errors, Options options,
+                           ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog,
+                           int maxIterations) {
+        if (maxIterations < 1 || maxIterations > AgentLoop.MAX_STEPS) throw new IllegalArgumentException("Agent steps must be within 1..100.");
+        this.maxIterations = maxIterations;
         this.startup = startup.toAbsolutePath().normalize();
         this.settings = settings;
         this.store = store;
@@ -464,7 +478,7 @@ public final class SessionLauncher {
 
     /** 先保存成功回答，再执行一次有界标题任务；生成文本不会加入历史。 */
     private void answer(String line) {
-        ChatCli chat = new ChatCli(new AgentLoop(model.chat(), tools, AgentLoop.DEFAULT_MAX_STEPS, debug), active.session(),
+        ChatCli chat = new ChatCli(new AgentLoop(model.chat(), tools, maxIterations, debug), active.session(),
                 new ToolContext(active.snapshot().workspace()), input, output, errors);
         if (chat.answer(line)) {
             active.captureTurn();

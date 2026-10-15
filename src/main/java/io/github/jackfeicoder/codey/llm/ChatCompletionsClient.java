@@ -168,6 +168,7 @@ public final class ChatCompletionsClient implements LlmClient {
                 function.put("description", definition.description());
                 function.set("parameters", definition.parameters());
             }
+            if (!request.toolCallsAllowed()) root.put("tool_choice", "none");
         }
         try {
             return mapper.writeValueAsString(root);

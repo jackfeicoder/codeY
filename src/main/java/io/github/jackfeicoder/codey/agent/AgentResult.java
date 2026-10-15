@@ -7,15 +7,20 @@ import io.github.jackfeicoder.codey.session.MessageHistory;
 import java.util.List;
 
 /**
- * 一条用户任务的结果；只有 COMPLETED 可提交会话，预算耗尽的轨迹仅供当前运行查看。
+ * 一条用户任务的结果；有效收尾回答同样属于 COMPLETED。BUDGET_EXHAUSTED 表示仍无最终回答，仅供查看轨迹。
  * @param status 正常结束或模型请求次数耗尽
  * @param turnMessages 本轮 user、assistant/tool 与最终回答，不含旧历史和 system
  * @param response 最终模型响应；预算耗尽时为 null
  * @param modelCalls 本轮实际模型请求次数
  * @param toolCalls 本轮执行器调度次数，包括未知工具、校验失败和执行失败
+ * @param budgetLimited 是否进入预算收尾，CLI 显示提示；有效总结仍可保存完整轮次
  */
 public record AgentResult(Status status, List<Message> turnMessages, LlmResponse response,
-                          int modelCalls, int toolCalls) {
+                          int modelCalls, int toolCalls, boolean budgetLimited) {
+    /** 保留旧构造入口，预算退出默认标记受限。 */
+    public AgentResult(Status status, List<Message> turnMessages, LlmResponse response, int modelCalls, int toolCalls) {
+        this(status, turnMessages, response, modelCalls, toolCalls, status == Status.BUDGET_EXHAUSTED);
+    }
     /** 明确区分完成与预算退出，不把中间工具请求当最终回答。 */
     public enum Status { COMPLETED, BUDGET_EXHAUSTED }
 

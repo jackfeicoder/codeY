@@ -107,6 +107,9 @@ public final class ChatCli {
         session.completeAgentTurn(result.turnMessages());
         var response = result.response();
         output.println("CodeY> " + response.text());
+        if (result.budgetLimited()) {
+            errors.println("本轮已到模型请求上限，回答基于现有信息；需要进一步调查可继续追问。");
+        }
         if (response.isTruncated()) {
             errors.println("Model output was truncated (finish_reason=length).");
         }

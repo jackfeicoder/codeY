@@ -6,6 +6,7 @@ import io.github.jackfeicoder.codey.llm.LlmRequest;
 import io.github.jackfeicoder.codey.llm.LlmResponse;
 import io.github.jackfeicoder.codey.observability.DebugPrinter;
 import io.github.jackfeicoder.codey.session.Session;
+import io.github.jackfeicoder.codey.session.Message;
 import io.github.jackfeicoder.codey.tool.ToolContext;
 import io.github.jackfeicoder.codey.tool.ToolExecutor;
 import io.github.jackfeicoder.codey.tool.ToolRegistry;
@@ -17,8 +18,10 @@ import java.util.Set;
 
 /** 单任务的 ReAct 风格循环：请求模型 → 顺序执行工具 → 回填结果 → 再请求，直到回答或预算耗尽。 */
 public final class AgentLoop {
-    /** 包含最终回答请求在内，默认最多调用模型 8 次。 */
-    public static final int DEFAULT_MAX_STEPS = 8;
+    /** 包含最终回答请求在内，默认最多调用模型 20 次；最后一次只用于回答。 */
+    public static final int DEFAULT_MAX_STEPS = 20;
+    /** 配置和构造入口共用硬上限，避免用户参数绕过预算范围。 */
+    public static final int MAX_STEPS = 100;
     /** 单个模型响应最多调度 16 个工具，避免响应一次要求无界执行。 */
     public static final int MAX_TOOL_CALLS_PER_STEP = 16;
     /** 一次 generate 对应一次模型请求，HTTP 逻辑仍在 LLM 层。 */
@@ -44,7 +47,7 @@ public final class AgentLoop {
     public AgentLoop(LlmClient client, ToolRegistry registry, int maxSteps, DebugPrinter debug) {
         this.client = Objects.requireNonNull(client, "client");
         this.registry = Objects.requireNonNull(registry, "registry");
-        if (maxSteps < 1 || maxSteps > 100) throw new IllegalArgumentException("Agent steps must be within 1..100.");
+        if (maxSteps < 1 || maxSteps > MAX_STEPS) throw new IllegalArgumentException("Agent steps must be within 1..100.");
         this.maxSteps = maxSteps;
         this.executor = new ToolExecutor(registry);
         this.debug = Objects.requireNonNull(debug, "debug");
@@ -65,7 +68,19 @@ public final class AgentLoop {
         int executions = 0;
         for (int step = 1; step <= maxSteps; step++) {
             checkInterrupted();
-            LlmRequest request = new LlmRequest(messages, registry.definitions(context));
+            boolean finalRound = step == maxSteps;
+            // 预算提示只改本次请求中的 system 副本，既不伪造用户消息，也不写入会话快照。
+            var requestMessages = new ArrayList<>(messages);
+            int remaining = maxSteps - step + 1;
+            if (remaining <= 3) {
+                String instruction = finalRound
+                        ? "这是当前任务最后一次模型请求，工具调用已禁用。请依据已获得的信息直接回答，"
+                        + "明确尚未完成或尚未确认的部分，不要声称未执行的操作已完成，不要再请求工具。"
+                        : "当前任务最多允许 " + maxSteps + " 次模型请求，包括本次还剩 " + remaining
+                        + " 次。请优先使用已有证据，避免重复探索；信息足够时立即回答，最后一次请求将禁用工具并用于总结。";
+                requestMessages.set(0, Message.system(messages.get(0).content() + "\n\n[运行时任务预算]\n" + instruction));
+            }
+            LlmRequest request = new LlmRequest(requestMessages, registry.definitions(context), !finalRound);
             debug.round(step);
             LlmResponse response = client.generate(request);
             checkInterrupted();
@@ -76,8 +91,11 @@ public final class AgentLoop {
                 }
                 messages.add(response.message());
                 return new AgentResult(AgentResult.Status.COMPLETED,
-                        messages.subList(historySize, messages.size()), response, step, executions);
+                        messages.subList(historySize, messages.size()), response, step, executions, finalRound);
             }
+            // 即使服务商忽略 tool_choice=none，也不执行最后一轮提出的工具，更不提交残缺回答。
+            if (finalRound) return new AgentResult(AgentResult.Status.BUDGET_EXHAUSTED,
+                    messages.subList(historySize, messages.size()), null, step, executions, true);
             // 在执行任何工具前检查整组：截断或异常结束原因不触发工具副作用。
             if (!"tool_calls".equals(response.finishReason())
                     || response.toolCalls().size() > MAX_TOOL_CALLS_PER_STEP) {
