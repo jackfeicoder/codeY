@@ -89,6 +89,10 @@ public final class AgentLoop {
                 if (!"stop".equals(response.finishReason()) && !response.isTruncated()) {
                     throw invalid("Model did not return a supported final response.");
                 }
+                // stop/length 只说明服务端结束生成；没有正文也没有工具时，不能当作任务完成。
+                if (response.text().isBlank()) {
+                    throw invalid("Model returned an empty final answer (finish_reason=" + response.finishReason() + ").");
+                }
                 messages.add(response.message());
                 return new AgentResult(AgentResult.Status.COMPLETED,
                         messages.subList(historySize, messages.size()), response, step, executions, finalRound);

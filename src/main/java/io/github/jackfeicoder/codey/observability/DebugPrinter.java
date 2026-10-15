@@ -13,7 +13,7 @@ public final class DebugPrinter {
     public static final DebugPrinter NONE = new DebugPrinter();
     /** 输出由 Main 按终端编码创建；null 仅用于静默实例。 */
     private final PrintWriter output;
-    /** 仅提取工具参数中的 path 作为文件摘要，不打印整个参数对象。 */
+    /** 只提取 path；文件定位工具额外显示名称模式，不打印整个参数对象。 */
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /** 创建内部静默实例，不分配输出流。 */
@@ -28,7 +28,7 @@ public final class DebugPrinter {
     /** 只在实际进入执行器前显示工具名和文件，不展示模型尚未执行的调用组。 */
     public void tool(int step, ToolCall call) {
         if (output == null) return;
-        String path = path(call.arguments());
+        String path = location(call);
         line("  [第 " + step + " 轮] 调用 " + shortText(call.name())
                 + (path == null ? "" : " · " + shortText(path)));
     }
@@ -48,12 +48,18 @@ public final class DebugPrinter {
     }
 
     /** 非 JSON、非字符串路径和过大参数均不回显；业务校验仍由执行器负责。 */
-    private static String path(String arguments) {
+    private static String location(ToolCall call) {
+        String arguments = call.arguments();
         if (arguments.length() > 64 * 1024) return null;
         try {
             var tree = MAPPER.readTree(arguments);
             var path = tree == null ? null : tree.get("path");
-            return path != null && path.isTextual() && !path.asText().isBlank() ? path.asText() : null;
+            String location = path != null && path.isTextual() && !path.asText().isBlank() ? path.asText() : null;
+            var pattern = tree == null ? null : tree.get("pattern");
+            if ("search_file".equals(call.name()) && pattern != null && pattern.isTextual() && !pattern.asText().isBlank()) {
+                return location == null ? pattern.asText() : location + " · " + pattern.asText();
+            }
+            return location;
         } catch (java.io.IOException invalid) { return null; }
     }
 

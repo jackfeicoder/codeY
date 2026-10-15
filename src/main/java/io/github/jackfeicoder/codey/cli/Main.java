@@ -21,6 +21,7 @@ import io.github.jackfeicoder.codey.tool.ToolContext;
 import io.github.jackfeicoder.codey.tool.ToolRegistry;
 import io.github.jackfeicoder.codey.tool.builtin.ReadFileTool;
 import io.github.jackfeicoder.codey.tool.builtin.ListFilesTool;
+import io.github.jackfeicoder.codey.tool.builtin.SearchFileTool;
 import io.github.jackfeicoder.codey.workspace.WorkspaceBinding;
 
 import java.io.BufferedReader;
@@ -216,7 +217,8 @@ public final class Main {
 
     /** 统一注册本阶段工具；是否向模型提供，由 Registry 按会话上下文筛选。 */
     private static ToolRegistry createTools(AgentSettings settings) {
-        return new ToolRegistry().register(new ReadFileTool()).register(new ListFilesTool(settings.listFilesDefaultDepth()));
+        return new ToolRegistry().register(new ReadFileTool())
+                .register(new ListFilesTool(settings.listFilesDefaultDepth())).register(new SearchFileTool());
     }
 
     /** 统一处理非法参数，不回显可能包含敏感内容的用户输入。 */
@@ -230,7 +232,7 @@ public final class Main {
         System.out.println("""
                 CodeY - A CLI coding agent built from scratch in Java.
 
-                Status: model profiles, persistent conversations, list_files/read_file Agent loops are available.
+                Status: model profiles, persistent conversations, list_files/search_file/read_file Agent loops are available.
 
                 Usage:
                   java -jar target/codey-0.1.0-SNAPSHOT.jar
@@ -262,13 +264,14 @@ public final class Main {
                   The built-in prompts/base.md is sent as the system message.
                   Initial selection: --profile > last-used profile > saved session profile > CODEY_ACTIVE_PROFILE.
                   Successful selections persist in CODEY_DATA_DIR/model-preference.json, without credentials.
-                  Workspace chats expose list_files and read_file; CODEY_MAX_ITERATIONS defaults to 20 (range 1..100).
+                  Workspace chats expose list_files, search_file and read_file; CODEY_MAX_ITERATIONS defaults to 20 (range 1..100).
                   The final request disables tools and asks for an evidence-based answer; budget hints are not saved.
                   CODEY_LIST_FILES_DEFAULT_DEPTH defaults to 10 (range 1..20); Agent settings load on startup.
                   Completed assistant/tool groups are saved; failed or exhausted tasks are not committed.
                   Progress shows numbered model requests, called tools and involved files.
                   Request/response bodies, prompts, history and tool output are not printed as debug logs.
-                  list_files explores bounded directory trees; content search, writes and commands will follow.
+                  list_files explores directory trees; search_file finds file paths by name or glob without reading content.
+                  Content search, writes and commands will follow.
 
                 Start learning:
                   README.md

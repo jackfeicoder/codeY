@@ -9,19 +9,9 @@ import io.github.jackfeicoder.codey.tool.ToolContext;
 import io.github.jackfeicoder.codey.tool.ToolDefinition;
 import io.github.jackfeicoder.codey.tool.ToolException;
 import io.github.jackfeicoder.codey.tool.ToolResult;
-import io.github.jackfeicoder.codey.workspace.WorkspaceBinding;
+import io.github.jackfeicoder.codey.tool.filesystem.WorkspaceFiles;
 
-import java.io.IOException;
-import java.nio.file.AccessDeniedException;
-import java.nio.file.DirectoryIteratorException;
-import java.nio.file.Files;
-import java.nio.file.InvalidPathException;
-import java.nio.file.LinkOption;
-import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.nio.file.attribute.BasicFileAttributes;
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 
@@ -35,9 +25,9 @@ public final class ListFilesTool implements Tool {
     public static final int DEFAULT_MAX_ENTRIES = 200;
     public static final int MAX_ENTRIES = 1_000;
     /** 包括忽略目录在内的实际扫描上限，同时约束排序缓存和读取工作量。 */
-    public static final int MAX_SCANNED_ENTRIES = 10_000;
+    public static final int MAX_SCANNED_ENTRIES = WorkspaceFiles.MAX_SCANNED_ENTRIES;
     /** 只忽略遍历中遇到的这些目录；显式 path 指定它们时仍可列出内容。 */
-    private static final List<String> IGNORED_NAMES = List.of(".git", "target", "node_modules", ".gradle", "build", "dist");
+    private static final List<String> IGNORED_NAMES = WorkspaceFiles.IGNORED_DIRECTORY_NAMES;
     /** JSON 参数白名单，工作区与宿主预算不接受模型覆盖。 */
     private static final Set<String> ARGUMENT_NAMES = Set.of("path", "maxDepth", "maxEntries");
     /** 只用于 schema 与结果的 JSON 编码，不在运行中修改。 */
@@ -73,83 +63,15 @@ public final class ListFilesTool implements Tool {
     public String execute(JsonNode arguments, ToolContext context) throws InterruptedException {
         checkInterrupted();
         Options options = options(arguments);
-        if (context.workspace().mode() == WorkspaceBinding.Mode.NONE) {
-            throw error(ToolResult.ErrorCode.WORKSPACE_REQUIRED, "list_files requires a project workspace.");
-        }
-        if (!context.hasWorkspace()) {
-            throw error(ToolResult.ErrorCode.WORKSPACE_UNAVAILABLE, "list_files workspace is unavailable.");
-        }
-        Path root = Path.of(context.workspace().path());
-        Path requested = root.resolve(options.path()).normalize();
-        if (!requested.startsWith(root)) {
-            throw error(ToolResult.ErrorCode.PATH_OUTSIDE_WORKSPACE, "Directory path is outside the workspace.");
-        }
-        try {
-            Path start = requested.toRealPath();
-            if (!start.startsWith(root)) {
-                throw error(ToolResult.ErrorCode.PATH_OUTSIDE_WORKSPACE, "Directory resolves outside the workspace.");
-            }
-            if (!Files.isDirectory(start, LinkOption.NOFOLLOW_LINKS)) {
-                throw error(ToolResult.ErrorCode.NOT_A_DIRECTORY, "list_files requires a directory path.");
-            }
-            String display = relative(root, start);
-            Listing listing = new Listing(display, options, context.maxOutputChars());
-            listing.requireMetadataBudget();
-            walk(root, start, 0, listing);
-            return listing.output(false);
-        } catch (NoSuchFileException missing) {
-            throw error(ToolResult.ErrorCode.DIRECTORY_NOT_FOUND, "A directory or entry was not found; refresh the listing.");
-        } catch (AccessDeniedException denied) {
-            throw error(ToolResult.ErrorCode.DIRECTORY_NOT_READABLE, "Directory access was denied; retry a narrower path or depth.");
-        } catch (IOException | DirectoryIteratorException failed) {
-            checkInterrupted();
-            throw error(ToolResult.ErrorCode.DIRECTORY_READ_FAILED, "Failed to inspect the directory; retry a narrower path or depth.");
-        }
-    }
-
-    /** 每层先关闭目录流再递归；不会同时持有整棵树的流，也不会跟随发现的链接目录。 */
-    private static void walk(Path root, Path directory, int parentDepth, Listing listing)
-            throws IOException, InterruptedException {
-        checkInterrupted();
-        Path real = directory.toRealPath();
-        if (!real.startsWith(root) || !real.equals(directory)) {
-            throw error(ToolResult.ErrorCode.PATH_OUTSIDE_WORKSPACE, "Directory changed or resolves outside the workspace.");
-        }
-        if (!Files.isReadable(real)) {
-            throw error(ToolResult.ErrorCode.DIRECTORY_NOT_READABLE, "Directory is not readable.");
-        }
-        List<Path> children = new ArrayList<>();
-        try (var stream = Files.newDirectoryStream(real)) {
-            for (Path child : stream) {
-                checkInterrupted();
-                if (listing.scanned >= MAX_SCANNED_ENTRIES) {
-                    listing.scanLimited = true;
-                    break;
-                }
-                listing.scanned++;
-                children.add(child);
-            }
-        }
-        children.sort(Comparator.comparing(path -> path.getFileName().toString()));
-        int depth = parentDepth + 1;
-        for (Path child : children) {
-            checkInterrupted();
-            BasicFileAttributes attributes = Files.readAttributes(child, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            if (attributes.isDirectory() && IGNORED_NAMES.contains(child.getFileName().toString())) continue;
-            String type;
-            if (attributes.isSymbolicLink()) type = "symlink";
-            else if (attributes.isDirectory()) {
-                // Windows junction 等重解析目录未必标为 symbolicLink；真实路径不同也只列出、不进入。
-                type = child.toRealPath().equals(child) ? "directory" : "symlink";
-            } else type = attributes.isRegularFile() ? "file" : "other";
-            ObjectNode entry = MAPPER.createObjectNode().put("path", relative(root, child))
-                    .put("type", type).put("depth", depth);
-            if (!listing.add(entry)) return;
-            if ("directory".equals(type) && depth < listing.options.maxDepth() && !listing.scanLimited) {
-                walk(root, child, depth, listing);
-                if (listing.stopReason != null) return;
-            }
-        }
+        var directory = WorkspaceFiles.directory(context, options.path());
+        Listing listing = new Listing(WorkspaceFiles.relative(directory.root(), directory.start()), options, context.maxOutputChars());
+        listing.requireMetadataBudget();
+        var scan = WorkspaceFiles.scan(directory, options.maxDepth(), entry -> listing.add(MAPPER.createObjectNode()
+                .put("path", WorkspaceFiles.relative(directory.root(), entry.path()))
+                .put("type", entry.type()).put("depth", entry.depth())));
+        listing.scanned = scan.scannedEntries();
+        listing.scanLimited = scan.scanLimited();
+        return listing.output(false);
     }
 
     /** 完整工具说明放在结构化 schema 中，提示词只说明先列目录再读文件的使用顺序。 */
@@ -186,14 +108,7 @@ public final class ListFilesTool implements Tool {
         if (value != null && (!value.isTextual() || value.asText().isBlank())) {
             throw error(ToolResult.ErrorCode.INVALID_ARGUMENTS, "path must be a nonblank string.");
         }
-        Path path;
-        try { path = Path.of(value == null ? "." : value.asText()); }
-        catch (InvalidPathException invalid) {
-            throw error(ToolResult.ErrorCode.INVALID_ARGUMENTS, "Directory path has invalid syntax.");
-        }
-        if (path.isAbsolute() || path.getRoot() != null) {
-            throw error(ToolResult.ErrorCode.PATH_OUTSIDE_WORKSPACE, "Use a path relative to the workspace.");
-        }
+        Path path = WorkspaceFiles.relativePath(value == null ? "." : value.asText());
         return new Options(path, integer(arguments, "maxDepth", defaultDepth, MAX_DEPTH),
                 integer(arguments, "maxEntries", DEFAULT_MAX_ENTRIES, MAX_ENTRIES));
     }
@@ -206,12 +121,6 @@ public final class ListFilesTool implements Tool {
             throw error(ToolResult.ErrorCode.INVALID_ARGUMENTS, name + " must be an integer within its allowed range.");
         }
         return node.intValue();
-    }
-
-    /** 显示路径不泄露工作区绝对位置，分隔符统一为 /；根目录显示 .。 */
-    private static String relative(Path root, Path path) {
-        String result = root.relativize(path).toString().replace('\\', '/');
-        return result.isEmpty() ? "." : result;
     }
 
     private static void checkInterrupted() throws InterruptedException {
