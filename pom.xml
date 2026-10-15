@@ -14,8 +14,20 @@
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <jline.version>3.30.17</jline.version>
     </properties>
     <dependencies>
+        <!-- 终端输入：命令补全、候选菜单和 Windows 原生控制台支持。 -->
+        <dependency>
+            <groupId>org.jline</groupId>
+            <artifactId>jline-reader</artifactId>
+            <version>${jline.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jline</groupId>
+            <artifactId>jline-terminal-jni</artifactId>
+            <version>${jline.version}</version>
+        </dependency>
         <!-- 运行依赖：把内部消息转换为请求 JSON，并解析模型返回的数据。 -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>

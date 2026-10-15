@@ -123,6 +123,22 @@ class ChatCompletionsClientTest {
         assertEquals(request().messages().get(0).content(), body.at("/messages/0/content").asText());
     }
 
+    /** 收尾请求通过协议禁用工具，仍携带定义以兼容已有工具历史。 */
+    @Test
+    void closingRequestExplicitlyDisablesToolCalls() {
+        client().generate(new LlmRequest(request().messages(), List.of(new ReadFileTool().definition()), false));
+        assertEquals("none", capturedBody.get().path("tool_choice").asText());
+        assertEquals("read_file", capturedBody.get().at("/tools/0/function/name").asText());
+    }
+
+    /** 无工具会话不发送孤立的 tool_choice，避免服务商校验失败。 */
+    @Test
+    void closingPlainChatOmitsToolsAndChoice() {
+        client().generate(new LlmRequest(request().messages(), List.of(), false));
+        assertFalse(capturedBody.get().has("tools"));
+        assertFalse(capturedBody.get().has("tool_choice"));
+    }
+
     /** 无工具聊天和标题生成保持原请求结构，避免空 tools 的服务商兼容问题。 */
     @Test
     void omitsToolsFieldWhenNoToolsAreAvailable() {

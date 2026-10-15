@@ -22,6 +22,28 @@ class ConfigLoaderTest {
     @TempDir
     Path directory;
 
+    /** 脚本启动时配置目录固定，但调用者的工作目录和启动目录配置不会被改动。 */
+    @Test
+    void explicitConfigurationDirectoryLoadsSharedEnvAndPreservesWorkingDirectory() throws Exception {
+        Path config = Files.createDirectory(directory.resolve("shared config"));
+        Path workspace = Files.createDirectory(directory.resolve("workspace"));
+        Files.writeString(config.resolve(".env"), "CODEY_LLM_BASE_URL=http://127.0.0.1:8000/v1\n"
+                + "CODEY_LLM_AUTH=none\nCODEY_LLM_MODEL=shared-model\n");
+        Files.writeString(workspace.resolve(".env"), "CODEY_LLM_MODEL=workspace-model\n");
+        assertEquals("shared-model", ConfigLoader.load(workspace, Map.of("CODEY_CONFIG_DIR", config.toString())).model());
+        assertEquals("override-model", ConfigLoader.load(workspace, Map.of("CODEY_CONFIG_DIR", "../shared config",
+                "CODEY_LLM_MODEL", "override-model")).model());
+        assertEquals("CODEY_LLM_MODEL=workspace-model\n", Files.readString(workspace.resolve(".env")));
+    }
+
+    /** 显式配置路径无效时展示字段名，不回显路径文本或继续读取错误目录。 */
+    @Test
+    void invalidExplicitConfigurationDirectoryIsRejected() {
+        for (String value : new String[]{"", "missing", "invalid\0path"}) {
+            assertThrows(ConfigException.class, () -> ConfigLoader.load(directory, Map.of("CODEY_CONFIG_DIR", value)));
+        }
+    }
+
     /** 验证文件字段能够加载，并使用缺省超时和规范化基础地址。 */
     @Test
     void loadsFileAndUsesDefaultTimeout() throws IOException {

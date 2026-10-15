@@ -1,6 +1,6 @@
 # CodeY 架构设计
 
-> 版本：0.1，日期：2026-10-13。当前已实现配置、消息、基础提示词、非流式调用、可选工作区、本地会话管理、read_file、结构化 tools 请求与基础 AgentLoop。完成的工具消息组可保存和恢复；执行中恢复、SSE、搜索/写入/命令工具仍待实现。验证使用本地替身与临时文件，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
+> 版本：0.1，日期：2026-10-15。当前已实现配置、消息、基础提示词、非流式调用、可选工作区、本地会话管理、list_files、search_file、read_file、结构化 tools 请求与基础 AgentLoop。完成的工具消息组可保存和恢复；执行中恢复、SSE、内容搜索/写入/命令工具仍待实现。验证使用本地替身与临时文件，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
 
 ## 阅读导航
 
@@ -10,6 +10,9 @@
 - [工具模块骨架与工具描述](#tool-foundation)
 - [读文件工具实现与独立调用](#read-file)
 - [Agent 循环与工具请求接入](#agent-loop)
+- [简洁控制台进度与 exit 返回列表](#console-debug)
+- [模型切换、目录、帮助与最后使用默认](#model-commands)
+- [Windows CMD 全局启动](#global-cmd)
 - [已实现的非流式 LLM 调用](#llm)
 - [已实现的 Session 与连续对话](#session-chat)
 - [代码阅读顺序与当前调用流程](#code-guide)
@@ -36,7 +39,7 @@ Harness 在本项目中指运行核心及其策略：Agent 循环、上下文构
 |---|---|---|
 | 语言 | Java 17 | M0；本机可用，records 等能力足够支持首版 |
 | 工程 | Maven 单模块 | M0；按包组织，降低初期装配成本 |
-| CLI | JDK 标准输入输出 | M0/M1；后续有输入编辑需求再接 JLine |
+| CLI | JLine 3.30.17 + JDK 标准输入输出 | 原生终端补全、候选选择；管道/测试保留逐行输入 |
 | HTTP | JDK HttpClient | M1 已实现非流式请求；共享连接客户端，单次配置绑定 |
 | JSON | Jackson 2.18.2 | M1 已实现消息映射与响应解析 |
 | 日志 | 初期标准输出；后续 SLF4J | M1/M3；模型内容与日志分流，避免输出密钥 |
@@ -141,7 +144,7 @@ CLI 是装配入口，负责创建组件和展示事件。AgentLoop 面向接口
 6. 接收输入，启动 run，展示流式事件和最终 AgentResult。
 7. 退出时关闭响应流、执行器、MCP 进程和会话存储。
 
-已实现配置来源优先级：系统环境变量 > 启动目录 `.env` > 默认值。多 Profile 默认选择由 CODEY_ACTIVE_PROFILE 指定，--profile 可临时覆盖。`.env.example` 是字段模板，不作为有效配置加载。--list-models 列出别名，--check-config 只校验选中配置；旧版 CODEY_LLM_* 兼容为 default。其他启动装配步骤按阶段实现。解析范围与 YAML 的关系见 [配置说明](#configuration)。
+配置字段来源为系统环境变量 > 启动目录 `.env` > 默认值。模型首次选择为 --profile > 用户最后选择 > 恢复会话保存别名 > CODEY_ACTIVE_PROFILE；后续 /new 采用最后选择。`.env.example` 是模板，旧 CODEY_LLM_* 兼容为 default。--check-config 只校验配置；/list model 展示目录，/model 切换会话模型。详见 [模型命令](#model-commands)。
 
 ## 6. 一次任务的执行流程
 
@@ -214,7 +217,7 @@ sequenceDiagram
 
 ### 工具
 
-首版 read_file、list_files、search_text、write_file、execute_command。read_file 默认分页，返回路径、行号、截断信息。工具输出保留执行元数据，与发给模型的截断文本分开。
+工具按职责分为 read_file（内容阅读）、list_files（目录浏览）、search_file（名称/路径定位），后续 grep_code（内容搜索）、write_file、execute_command。read_file 默认分页，返回路径、行号、截断信息。工具输出保留执行元数据，与发给模型的截断文本分开。
 
 工具定义、注册与执行分开。当前 ToolResult 保存调用 ID、工具名称、status、errorCode、output、durationMillis 与 truncated；exitCode、artifacts、路径策略及命令审批随具体工具接入。基础执行器只解析 JSON 对象，并调用工具的显式校验方法。
 
@@ -333,7 +336,7 @@ Chat Completions 适配器已显式映射 role.wireValue()、tool_calls、tool_c
 
 ### 已实现的工具模块骨架与描述
 
-> 基础模块与 read_file 已支持独立调用，并已在工作区 CLI 会话通过 tools 字段和 AgentLoop 接通。普通聊天筛掉工作区工具；模型客户端只编解码协议，执行由 Agent 层调度。
+> 基础模块与 list_files/search_file/read_file 已支持独立调用，并已在工作区 CLI 会话通过 tools 字段和 AgentLoop 接通。普通聊天筛掉工作区工具；模型客户端只编解码协议，执行由 Agent 层调度。
 
 ```text
 tool/
@@ -404,9 +407,9 @@ ToolResult 的基础失败类别包括 UNKNOWN_TOOL、INVALID_ARGUMENTS、WORKSP
 
 当前没有通用 JSON Schema 校验器：Tool 必须显式实现 validateArguments，schema 用于声明和发送，不能假设定义 schema 就自动完成业务校验。执行器为同步串行调用，durationMillis 只是测量值；工具超时、审批、取消令牌、并行调度与审计事件尚未实现。接 MCP 的复杂 schema 时再引入完整校验能力。
 
-ReadFileTool 已实现定义、参数/路径校验与有界读取；LlmRequest 与协议适配器已发送 tools，AgentLoop 回填 assistant/tool 后继续请求，v2 SessionSnapshot 保存完整成功工具轮次。搜索和目录工具、统一权限策略后续加入。
+ReadFileTool 已实现定义、参数/路径校验与有界读取；LlmRequest 与协议适配器已发送 tools，AgentLoop 回填 assistant/tool 后继续请求，v2 SessionSnapshot 保存完整成功工具轮次。list_files 已接入目录探索，search_file 已接入文件名/路径定位；grep_code 内容搜索、统一权限策略后续加入。
 
-验证：工具基础结构有 23 项、读文件有 36 项测试；Agent 阶段再新增 35 项，当前完整 mvn verify 共 272 项通过，无失败或跳过。仅使用本地模型替身与临时测试文件，Agent 的 5 项 JAR 验证见 [循环实现](#agent-loop)。
+验证：工具基础结构有 23 项、读文件有 36 项、Agent 首版新增 35 项；进度/exit 3 项、模型切换/默认偏好 19 项、共享配置目录 3 项，当前完整 mvn verify 共 415 项通过，无失败或跳过。仅使用本地模型替身与临时测试文件。
 
 <a id="read-file"></a>
 
@@ -483,6 +486,130 @@ System.out.println(result.output());
 
 测试：[ReadFileToolTest.java](../src/test/java/io/github/jackfeicoder/codey/tool/builtin/ReadFileToolTest.java)，36 项使用临时真实文件，覆盖编码、换行、默认参数、分页、空文件、输出预算、非法参数、路径/链接范围、大小边界与中断。当前环境符号链接专项已执行，无跳过。独立运行：`mvn -Dtest=ReadFileToolTest test`；完整构建：`mvn verify`。
 
+<a id="list-files"></a>
+
+### 已实现的目录工具：list_files
+
+实现文件：[ListFilesTool.java](../src/main/java/io/github/jackfeicoder/codey/tool/builtin/ListFilesTool.java)。在 Main.createTools 注册，复用 ToolRegistry / ToolExecutor / AgentLoop，LLM 只接收结构化工具说明，不新增目录专用客户端。
+
+| 参数 | 默认值 | 约束 |
+|---|---|---|
+| path | `.` | 相对工作区的目录路径；拒绝空白、绝对/带根和越界路径 |
+| maxDepth | 10（可由 CODEY_LIST_FILES_DEFAULT_DEPTH 配置） | 整数 1–20；直接子项算第一层，所选目录本身不算结果条目 |
+| maxEntries | 200 | 整数 1–1000，文件/目录/链接都占一条 |
+
+执行流程：校验字段类型与范围 → 检查真实工作区及目标目录 → 打开目录流，收集扫描预算内的子项并关闭流 → 按文件名自然顺序排序 → 深度优先返回并递归下一层 → 在加入每个条目时验证完整 JSON 输出预算 → 用原 callId 回填 tool 结果。扫描总量上限 10000，限制单目录排序缓存及全次遍历工作量；线程中断在目录枚举和条目处理期间检查。
+
+工具输出是 ToolResult.output 中的 JSON 字符串，例如对 path=`src`、maxDepth=2 的结果：
+
+```json
+{
+  "path": "src",
+  "maxDepth": 2,
+  "maxEntries": 200,
+  "returnedEntries": 2,
+  "entries": [
+    {"path": "src/main", "type": "directory", "depth": 1},
+    {"path": "src/main/java", "type": "directory", "depth": 2}
+  ],
+  "truncated": false,
+  "limitReason": null,
+  "scannedEntries": 2,
+  "ignoredDirectoryNames": [".git", "target", "node_modules", ".gradle", "build", "dist"]
+}
+```
+
+每个 entry.path 相对工作区，而不是相对参数 path，可直接用于 read_file。条目类型为 file/directory/symlink/other，不包含正文、链接目标或工作区绝对路径。scannedEntries 包括被忽略项，不是整个工作区文件总数；truncated=false 只表示指定深度及默认过滤范围内未因预算提前终止，不能据此声称查看了整个项目。
+
+达到 maxEntries、输出预算、扫描上限时，内部 JSON 的 truncated=true，limitReason 分别为 maxEntries/outputLimit/scanLimit。工具预留扫描计数及最长原因的元数据空间，保证成功结果没有被 ToolExecutor 切成残缺 JSON；外层 ToolResult.truncated 因此为 false，与内部“目录结果不完整”不同。若一个条目或元数据都放不下，返回 OUTPUT_LIMIT_TOO_SMALL。第一版无分页游标，模型应选择具体子目录、适度调整深度/条数继续探索；巨大平坦目录不保证可通过多次调用遍历全部内容。
+
+默认跳过遍历中遇到的 .git、target、node_modules、.gradle、build、dist 目录；同名普通文件仍列出，显式以这些目录为起点也可查看其内部。这是减少噪声的固定规则，不代表 .gitignore 解析、敏感文件保护或权限策略。
+
+发现的符号链接（含损坏/循环/外部链接）只按 symlink 列出，不跟随或输出目标；真实路径发生变化的 junction 等目录也不进入。显式 path 会先解析真实位置：工作区内链接目录可作为起点，指向工作区外则拒绝。目录与子项读取失败返回明确错误，当前不返回局部成功及 warning 列表。目录并发变化可能触发失败；路径检查到打开之间仍有竞争窗口，不是操作系统沙箱。
+
+| 错误码 | 含义 |
+|---|---|
+| INVALID_ARGUMENTS | 未知字段、类型/范围错误或非法路径语法 |
+| WORKSPACE_REQUIRED / WORKSPACE_UNAVAILABLE | 无工作区或绑定已失效 |
+| PATH_OUTSIDE_WORKSPACE | 带根/绝对/越界路径、外部链接目标或遍历目录被替换 |
+| DIRECTORY_NOT_FOUND / NOT_A_DIRECTORY | 目录/条目已不存在，或传入普通文件 |
+| DIRECTORY_NOT_READABLE / DIRECTORY_READ_FAILED | 无读取权限或其他目录 I/O 失败 |
+| OUTPUT_LIMIT_TOO_SMALL / INTERRUPTED | 输出容不下完整数据或线程中断 |
+
+提示词 base.md 增加“未知路径时先 list_files，再 read_file；结果截断时选择更具体目录”的行为指导，参数说明仍以工具 schema 为准。新建会话使用新版提示词；恢复旧会话继续使用原快照，但请求 tools 仍按实际工作区动态提供当前注册的三个工具。
+
+测试：[ListFilesToolTest.java](../src/test/java/io/github/jackfeicoder/codey/tool/builtin/ListFilesToolTest.java) 使用真实临时目录覆盖默认/显式参数、顺序/深度/相对路径、忽略规则、空目录/恰好达到条数、Unicode/输出预算、非法参数、路径/链接边界、扫描上限与中断；AgentLoopTest 验证列目录 → 读取发现的文件 → 最终回答的三次模型请求及历史完整性。
+
+验证结果：ListFilesToolTest 29 项、Agent 组合 1 项，该阶段新增 30 项；当时完整 mvn verify 共 343 项通过，无失败或跳过，符号链接测试已执行。6 项本地 HTTP JAR 场景验证生产入口注册两个 tools、目录结果用于读文件、工具历史保存/恢复不重放、无工作区的 --prompt/会话隐藏两个工具、越界错误回填和条数限制。未读取项目真实 .env，也未调用真实模型厂商。
+
+<a id="search-file"></a>
+
+### 已实现的文件定位工具：search_file
+
+职责是按文件名或路径模式找到文件位置，不读取正文、不匹配代码内容。它采用之前讨论的 glob 文件定位语义，统一命名为 `search_file`，不另建同义的 `glob_files`、`search_files` 或 `search_code`。后续 `grep_code` 独立负责文件内容搜索。
+
+| 工具 | 解决的问题 | 结果 |
+|---|---|---|
+| list_files | 项目目录是什么结构 | 文件/目录条目、类型、层级 |
+| search_file | 某个名称或路径模式对应哪些文件 | 匹配的工作区相对文件路径 |
+| read_file | 已知文件的具体内容是什么 | 连续文本行、行号与分页信息 |
+| grep_code（待实现） | 某段文本在哪些代码位置出现 | 路径、行号和匹配行 |
+
+实现文件与依赖：
+
+| 文件 | 职责 |
+|---|---|
+| [SearchFileTool.java](../src/main/java/io/github/jackfeicoder/codey/tool/builtin/SearchFileTool.java) | 工具定义/参数校验，筛选普通文件，生成有界路径结果 |
+| [WorkspaceFiles.java](../src/main/java/io/github/jackfeicoder/codey/tool/filesystem/WorkspaceFiles.java) | 与 ListFilesTool 共用的工作区目录校验、忽略/链接规则、有界排序和深度优先遍历 |
+| [FileGlob.java](../src/main/java/io/github/jackfeicoder/codey/tool/filesystem/FileGlob.java) | 跨平台通配符校验与匹配，按 Unicode 码点处理，不使用模型输入构造正则 |
+| [SearchFileToolTest.java](../src/test/java/io/github/jackfeicoder/codey/tool/builtin/SearchFileToolTest.java) | 文件名/路径模式、范围、大小写、Unicode、无正文读取、链接和预算测试 |
+
+工具互不调用：SearchFileTool 不调用 ListFilesTool 或 ReadFileTool；ListFilesTool 与 SearchFileTool 依赖同一个 WorkspaceFiles。目录遍历器只提供 entry 与扫描统计，由各工具决定返回结构或匹配条件。ReadFileTool 继续独立负责 UTF-8 文本读取。ToolRegistry/ToolExecutor/AgentLoop 沿用原接口，无需每加一个工具就新增循环分支。
+
+| 参数 | 默认 / 范围 | 规则 |
+|---|---|---|
+| pattern | 必填，最多 256 个 Unicode 字符 | 精确文件名或相对 path 的通配符模式 |
+| path | `.` | 工作区相对目录，作为本次匹配起点 |
+| maxResults | 100 / 1–1000 | 返回文件路径条数，不是扫描文件数 |
+| caseSensitive | false | 明确控制大小写，跨平台一致；结果保留实际名称 |
+
+匹配约定：
+
+- `AgentLoop.java`：递归查找任意层的精确同名文件。`Config` 不会自动匹配 ConfigLoader.java，需要 `*Config*`。
+- `*Config*.java`：按文件名匹配，星号可匹配零个或多个字符；问号匹配一个 Unicode 字符。
+- `src/*.java`：只匹配搜索起点的 src 目录下直接 Java 文件，单星不跨越目录。
+- `**/prompts/*.md`：独立的双星目录段匹配零层或多层，包括搜索起点直接存在 prompts 的情况。末尾双星表示所选目录下的文件，例如 `src/**` 不会命中名为 src 的普通文件。
+- 模式包含 `/` 时相对 path 匹配，不相对工作区根目录；结果却始终相对工作区，可直接交给 read_file。
+- 模式中的 Windows 反斜杠统一为 `/`。不支持正则、字符类或花括号分组，`[]`、`{}` 和其他普通字符按字面匹配。拒绝绝对模式、`.`/`..` 段、空段、控制字符及不独立占段的双星。
+- FileGlob 分别对路径段与 Unicode 字符执行动态规划，避免依赖操作系统 glob 大小写规则或产生正则回溯。模式长度及扫描量有上限；文件定位不设置人为目录深度限制。
+
+调用示例及流程：
+
+```json
+{"pattern":"*Config*.java","path":"src","maxResults":50}
+```
+
+```text
+模型返回 search_file 调用
+  → AgentLoop → ToolExecutor：解析 JSON、检查工作区、校验参数
+  → SearchFileTool：构造 FileGlob，调用 WorkspaceFiles.directory/scan
+  → 遍历 entry：只保留普通文件，按相对搜索起点的名称/路径匹配
+  → 生成 {pattern, path, caseSensitive, maxResults, returnedFiles, files,
+           truncated, limitReason, scannedEntries, ignoredDirectoryNames}
+  → ToolResult 关联原调用 ID → 下一次模型请求
+  → 模型可直接回答文件位置，或按需调用 read_file 阅读
+```
+
+不要求先 list_files；知道命名特征时可直接定位。结果只包含路径和搜索元数据，二进制文件也能按名称定位，不尝试解码正文。发现的符号链接、junction、目录和特殊文件不作为命中；显式搜索起点可通过指向工作区内的链接解析到真实目录，越界链接拒绝。忽略目录为 `.git`、`target`、`node_modules`、`.gradle`、`build`、`dist`；显式指定这些目录为 path 时允许检查。
+
+限制与错误：扫描最多 10000 个条目，包含目录与忽略项；每层关闭目录流后按名称排序，通过显式栈执行深度优先遍历，不依赖 Java 方法递归层数。search_file 遍历到目录末端，不接受 maxDepth 参数，schema 与结果均移除该字段；list_files 继续通过有深度参数的遍历入口控制展示范围。结果还受 maxResults 与宿主 16000 码点输出预算限制。条数、输出、扫描未覆盖全部区域时返回 `truncated=true`，limitReason 分别为 maxResults/outputLimit/scanLimit。空 files 仅表示已检查范围内无命中。没有分页游标或 `.gitignore` 解析，截断后优先缩小 path。刚好达到条数上限且无额外命中不误报截断。
+
+成功输出预留最坏扫描统计和截断字段，始终保持完整 JSON；元数据或第一条完整路径放不下时返回 OUTPUT_LIMIT_TOO_SMALL。非法模式/参数使用 INVALID_ARGUMENTS；工作区、目录越界、缺失、非目录与读取错误复用现有错误码。共享遍历器保留线程中断，权限/读取失败不伪装为空结果。路径检查仍不等于完整操作系统沙箱。
+
+Main 注册三个工具，NONE 工作区全部隐藏。工具说明仍由 SearchFileTool.definition → Registry → LlmRequest.tools → ChatCompletionsClient 编码，无需增加工具说明 Markdown。base.md 仅补充“按名称定位优先 search_file，阅读正文用 read_file”的行为指导；旧会话继续使用提示词快照，`/new` 或 `/clear` 采用新版指导。控制台只增加搜索范围和模式摘要，例如 `[第 1 轮] 调用 search_file · src · *Config*.java`，不打印搜索结果正文。
+
+验证：SearchFileToolTest 现有 42 项，AgentLoopTest 新增 1 项“按名称定位 → 读取 → 回答及进度/历史”组合测试；原 ListFilesToolTest 30 项全部通过共享遍历回归。完整 `mvn verify` 共 408 项通过，无失败、错误或跳过。另通过 7 组本地 HTTP JAR 验证：生产工具注册与模型驱动搜索/读取/保存、跨进程恢复不重放、无工作区的单次/会话隐藏工具、越界错误回填、条数截断结果、真实仓库十层 Java 文件定位与目录工具资源发现、超过二十层查找与目录展示深度回归。配置/会话隔离，使用本地模型替身；真实仓库只读取路径元数据，不读取真实 .env，也不调用真实厂商。
+
 <a id="agent-loop"></a>
 
 ### 已实现的 AgentLoop 与结构化工具请求
@@ -492,38 +619,58 @@ System.out.println(result.output());
 | 文件 | 职责 |
 |---|---|
 | [AgentLoop.java](../src/main/java/io/github/jackfeicoder/codey/agent/AgentLoop.java) | 一条用户任务的请求、工具执行、结果回填、中断与预算退出 |
-| [AgentResult.java](../src/main/java/io/github/jackfeicoder/codey/agent/AgentResult.java) | COMPLETED/BUDGET_EXHAUSTED、本轮不可变消息、最终响应、模型/工具次数 |
-| [LlmRequest.java](../src/main/java/io/github/jackfeicoder/codey/llm/LlmRequest.java) | messages/tools 两份不可变列表，工具名称唯一；普通聊天构造兼容 |
+| [AgentResult.java](../src/main/java/io/github/jackfeicoder/codey/agent/AgentResult.java) | COMPLETED/BUDGET_EXHAUSTED、本轮不可变消息、最终响应、模型/工具次数、budgetLimited 收尾标记 |
+| [LlmRequest.java](../src/main/java/io/github/jackfeicoder/codey/llm/LlmRequest.java) | messages/tools 两份不可变列表，工具名称唯一；toolCallsAllowed 控制收尾禁用工具，保留原构造方式 |
 | [ChatCompletionsClient.java](../src/main/java/io/github/jackfeicoder/codey/llm/ChatCompletionsClient.java) | 显式编码 tools 的 function 包装，不执行工具 |
 | [MessageHistory.java](../src/main/java/io/github/jackfeicoder/codey/session/MessageHistory.java) | 完整轮次与调用 ID/结果配对校验，供提交和磁盘恢复共用 |
 
-实际装配入口是 `Main.main()` 与 `startChat()`，Main 当前没有 run 方法。`Main.createTools()` 注册 ReadFileTool，传给 SessionLauncher；后者为当前会话装配 AgentLoop 和 ToolContext，ChatCli 调用它并处理最终展示/提交。Main 不实现工具循环。
+实际装配入口是 `Main.main()` 与 `startChat()`，Main 当前没有 run 方法。`Main.createTools(AgentSettings)` 注册 ReadFileTool、ListFilesTool 与 SearchFileTool，传给 SessionLauncher；后者为当前会话装配 AgentLoop 和 ToolContext，ChatCli 调用它并处理最终展示/提交。Main 不实现工具循环。
 
 ```text
 AgentLoop.run(session, input, context)
   → messages = Session.messagesFor(input) 的可变副本
   → 每步检查线程中断
   → registry.definitions(context) 筛选本次可用工具
-  → client.generate(new LlmRequest(messages, definitions))
-      ├─ 无工具调用且 finish_reason=stop/length
+  → 剩余 3/2 次时在 system 副本提醒预算；最后一次 toolCallsAllowed=false
+  → client.generate(new LlmRequest(requestMessages, definitions, !finalRound))
+      ├─ 无工具调用、正文非空白且 finish_reason=stop/length
       │    → 追加最终 assistant → 返回 COMPLETED
       └─ 工具调用且 finish_reason=tool_calls
            → 整组检查：最多 16 个、同一任务 ID 不重复
            → 追加原始 assistant（含所有 tool_calls）
            → 顺序执行全部调用，每个结果生成对应 tool 消息
            → 下一次 generate 携带观察结果和工具定义
-  → 默认 8 次请求用尽仍无最终回答 → 返回 BUDGET_EXHAUSTED
+  → 最后一次请求使用 tool_choice=none，只生成基于已有证据的回答
+      ├─ 有效文本 → COMPLETED，budgetLimited=true，提示预算受限并保存完整消息组
+      └─ 仍返回工具调用 → 不执行、不追加该调用，返回 BUDGET_EXHAUSTED
 ```
 
-工具定义传输的职责分工：具体 Tool 声明自身 name/description/parameters，ToolRegistry 汇总并筛选，AgentLoop 放入 LlmRequest，ChatCompletionsClient 编码成 `tools[].type="function"` 与 `function.name/description/parameters`。`base.md` 的工具使用指导作为 system 消息发送，两者不拼成一份字符串。无工具时省略 tools 字段；不强制 tool_choice，不额外注入未实现能力。
+工具定义传输的职责分工：具体 Tool 声明自身 name/description/parameters，ToolRegistry 汇总并筛选，AgentLoop 放入 LlmRequest，ChatCompletionsClient 编码成 `tools[].type="function"` 与 `function.name/description/parameters`。`base.md` 的工具使用指导作为 system 消息发送，两者不拼成一份字符串。无工具时省略 tools 字段；普通轮次不强制 tool_choice；最后一次存在工具定义时显式发送 tool_choice="none"，程序也拦截该轮工具。无工具定义时省略 tools 和 tool_choice。
 
-AgentLoop 本身不修改 Session。COMPLETED 返回仅本轮的 user、所有 assistant/tool 与最终 assistant；ChatCli 调用 `completeAgentTurn()` 完整校验后提交，Launcher 再 capture/save。达到次数上限、网络/协议失败或中断，不提交本轮；预算结果中可查看本次只读轨迹。当前工具只有读取，所以失败任务不存在文件修改；引入写入工具前要增加执行事件和未完成任务管理。
+AgentLoop 本身不修改 Session。COMPLETED 返回仅本轮的 user、所有 assistant/tool 与最终 assistant；ChatCli 调用 `completeAgentTurn()` 完整校验后提交，Launcher 再 capture/save。最后一次获得有效文本时，仍提交完整消息组并提示预算受限，未确认部分由模型在回答中说明；若服务商仍请求工具或网络/协议失败、中断，则不提交残缺本轮。预算提醒只附加到当次 system 消息副本，不进入历史或磁盘，下一用户任务重新计数；强制执行由代码保证，提示词仅用于引导。当前工具只有读取，所以失败任务不存在文件修改；引入写入工具前要增加执行事件和未完成任务管理。
+
+空最终回答校验：finish_reason=stop/length 只表示服务端结束生成，不代表任务已经完成。AgentLoop 在没有工具调用时要求正文非空、非纯空白，否则抛 INVALID_RESPONSE，CLI 明确报错并继续等待用户输入，不打印空 CodeY 回答，也不把本轮工具轨迹与空回答保存为成功轮次。不会自动请求下一轮或重放工具；已有历史不自动改写。HTTP 429 属于独立的服务端请求限制错误，当前仅分类为可重试，不自动重试；频率、并发或额度原因需结合厂商信息确认。失败任务不提交，随后输入“继续”只会携带已成功保存的历史。
+
+验证：新增 7 项 Agent/CLI 测试，完整 mvn verify 共 415 项通过；本地 HTTP JAR 另验证工具后空正文报错且不保存、后续问题可继续、429 单次失败且保留旧成功历史、预算末轮 length 空正文不保存。
 
 工具业务失败、未知工具等转换为 tool 错误结果，可以让模型下一轮纠正。LLM 适配器拒绝语法错误的 arguments JSON；这种协议错误直接终止任务。工具调用组结束原因异常、过多调用或跨步骤重复 ID 在整组执行前拒绝；纯文本 length 响应仍保存并提示截断。线程中断传播，不继续下一工具或模型请求。
 
 v2 磁盘格式支持 `user → (assistant tool_calls → 全部 tool 结果)* → assistant 最终回答`。调用 ID 在一条用户任务内唯一；每组结果可按不同顺序保存，但必须全部匹配且每个仅一次。历史不能夹入 system、额外 tool、下一用户问题或缺失最终回答。v1 仅允许旧文本轮次，恢复并保存时升级 v2。恢复只是加载原始工具结果进入上下文，不重放旧调用。
 
-边界：最多 8 次模型请求包含最终回答请求；显式 Java 构造可设置 1～100 次。每次最多 16 个工具，因此单任务调度次数有界；toolCalls 计入未知工具和校验失败等执行器调用。但尚无总时间/Token 预算、重复无进展检测、工具超时或完整审计日志。COMPLETED 只表示最终文本响应，不代表修改/测试验收已通过。中间步骤暂不实时展示；未来接事件回调和 SSE。
+边界：默认最多 20 次模型请求，包含最后一次仅文本请求；AgentSettings 从同一配置目录的 .env 和环境加载 CODEY_MAX_ITERATIONS，范围 1～100，Main 同时接入交互与 --prompt 入口。最大值为 20 时最多 19 轮可执行工具；设为 1 时只回答。运行设置启动时固定，修改后需重启。每次最多 16 个工具，因此单任务调度次数有界；toolCalls 计入未知工具和校验失败等执行器调用。但尚无总时间/Token 预算、重复无进展检测、工具超时或完整审计日志。COMPLETED 只表示最终文本响应，不代表修改/测试验收已通过。中间步骤显示轮次、工具与文件摘要，事件回调和 SSE 后续加入。
+
+运行配置与收尾实现（已实现）：
+
+| 字段 | 默认 / 范围 | 用途 |
+|---|---|---|
+| CODEY_MAX_ITERATIONS | 20 / 1–100 | 每条用户任务的模型请求上限，包含最后一次仅文本收尾；不限制会话用户输入总数 |
+| CODEY_LIST_FILES_DEFAULT_DEPTH | 10 / 1–20 | 模型省略 list_files.maxDepth 时使用；模型显式传参仍受硬上限校验 |
+
+[AgentSettings.java](../src/main/java/io/github/jackfeicoder/codey/config/AgentSettings.java) 从同一配置目录的 `.env` 读取，进程环境覆盖，缺字段使用默认；显式空值、非整数与越界值报 ConfigException，不回显原值。Main 将 maxIterations 注入 SessionLauncher/AgentLoop，将 defaultDepth 注入 ListFilesTool。工具动态生成 schema，保证展示的默认值与执行一致。修改后重启；`/model` 不重载这两项运行设置。
+
+当前仓库从 `.` 开始计数，最深 Java 文件为第 10 层，`src/main/resources/prompts/base.md` 为第 5 层。默认深度可覆盖这些路径，仍受 200 条返回条数、16000 码点输出预算与 10000 扫描条数限制；大项目需根据 truncated/limitReason 选择子目录继续，深度不保证整棵树一次返回。新版 base.md 指导复用已有目录结果、沿关键调用链阅读和批量读取独立文件；旧会话沿用提示词快照，需 `/new` 或 `/clear` 采用新版基础指导，程序预算限制则启动后对所有会话生效。
+
+轮次配置阶段验证：新增 22 项测试，当时完整 `mvn verify` 共 365 项通过，无失败/错误/跳过；6 组打包 JAR 本地 HTTP 验证覆盖真实仓库目录深度与默认配置、三次预算/自定义深度/收尾保存/下一任务重置、跨进程恢复不重放、服务商忽略 none 的程序拦截、无工作区单次入口、非法运行配置在网络请求前报错。HTTP 使用隔离配置和本地模型替身，真实仓库验证只列路径，不读取文件正文，未请求真实厂商。
 
 可运行示例（CMD/PowerShell 都可用）：
 
@@ -531,11 +678,45 @@ v2 磁盘格式支持 `user → (assistant tool_calls → 全部 tool 结果)* �
 java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/codeY --title 了解项目
 ```
 
-输入“请读取 README.md，说明已实现的模块”。没有工作区的聊天及 `--prompt` 不展示 read_file。只有读取能力，模型需要已知相对文件路径；目录探索和搜索待接入。旧会话保留旧基础提示词，会显示摘要变化提示；`/new` 或 `/clear` 可采用新版工具指导。
+输入“请读取 README.md，说明已实现的模块”。没有工作区的聊天及 `--prompt` 不展示 list_files/search_file/read_file。模型可用 list_files 浏览或 search_file 按名称定位，再用 read_file 阅读具体文件；内容搜索仍待接入。旧会话保留旧基础提示词，会显示摘要变化提示；`/new` 或 `/clear` 可采用新版工具指导。
 
-验证：AgentLoopTest 15 项；工具请求对象/HTTP 映射 4 项；完整历史校验 12 项；工具快照/旧版本迁移 3 项；CLI 预算退出 1 项，合计新增 35 项。旧的“工具请求只提示”测试已更新为“未知工具反馈并提交完整轮次”。完整 `mvn verify` 为 272 项，无失败或跳过。
+首版验证记录：AgentLoopTest 15 项；工具请求对象/HTTP 映射 4 项；完整历史校验 12 项；工具快照/旧版本迁移 3 项；CLI 预算退出 1 项，合计新增 35 项。旧的“工具请求只提示”测试已更新为“未知工具反馈并提交完整轮次”。当时完整 `mvn verify` 为 272 项，调试阶段最新记录见下一节。
 
 另以临时目录、假配置和本地 HTTP 替身执行 5 项 JAR 场景：read_file 定义发送/真实读取/回填/保存；关闭进程后恢复纯工具 assistant 与关联结果再继续；无工作区不发送 tools；--prompt 兼容；8 次预算退出不保存残缺任务。没有使用项目真实 .env 或真实模型服务。
+
+<a id="console-debug"></a>
+
+### 简洁控制台进度与 exit 返回列表
+
+采用直接打印：AgentLoop 在请求和工具执行位置调用 [DebugPrinter.java](../src/main/java/io/github/jackfeicoder/codey/observability/DebugPrinter.java)。只显示轮次、工具名称、相关文件以及工具失败类别，不增加事件观察接口、日志框架或消息类型。ChatCompletionsClient 不打印请求/响应正文。
+
+Main 在 --chat 和 --prompt 默认启用进度；旧 AgentLoop 构造器默认 DebugPrinter.NONE。终端沿用 Console 编码，重定向输出为 UTF-8。每条任务的输出例如：
+
+```text
+[第 1 轮] 请求模型
+  [第 1 轮] 调用 read_file · missing.txt
+  [第 1 轮] read_file 失败 · FILE_NOT_FOUND
+[第 2 轮] 请求模型
+  [第 2 轮] 调用 read_file · src/main/java/.../ConfigLoader.java
+[第 3 轮] 请求模型
+CodeY> 配置加载流程是……
+```
+
+工具参数只提取字符串 path 作为涉及文件，不打印 arguments、调用 ID、工具定义或执行结果正文；缺失或非法参数没有文件摘要，错误仍由执行器正常处理。长名称/路径按码点限制显示到 240 个，控制字符替换为空格，保持一行摘要；实际模型参数不裁剪。
+
+系统提示词、历史、HTTP 请求/响应和工具文件内容不作为日志显示；最终回答由 CLI 正常输出，仍可能根据任务引用文件内容。完整上下文和工具结果继续发送模型并按原逻辑保存，简化显示不影响推理与恢复。打印不进入 Session、不保存额外日志。自动标题不显示请求正文、不算作 ReAct 步骤；新用户输入从第 1 轮重新计数。
+
+会话管理导航：
+
+| 输入位置 | 命令 | 行为 |
+|---|---|---|
+| 聊天中 | exit（忽略大小写、两侧空白） | 先重试待保存数据，再刷新全局最近列表；保留活动会话，可 /back 继续 |
+| 管理列表中 | exit | 保存待写数据并退出程序 |
+| 任意输入阶段 | /exit 或 EOF | 保留原行为：保存待写数据并退出程序 |
+
+exit 不发送给模型，不新增消息或会话；返回列表后可 /new、选择其他标题/ID 或 /back。保存失败时停留在原状态并提示重试，避免丢失结果。旧的独立 ChatCli.run 内存入口没有管理页面，exit 与 /exit 都结束该内存入口；实际程序的导航由 SessionLauncher 实现。
+
+当前进度/exit 有 3 项：简洁轮次/工具/文件与上下文隔离、exit/back 保持同一会话、exit 后新建与列表退出。移除旧完整 HTTP 打印的 2 项专用检查，完整 mvn verify 为 275 项，无失败或跳过。另通过本地 HTTP 的 3 项 JAR 检查：文件失败修正的摘要与完整结果持久化/exit/back；--prompt 仅一行进度和最终文本；HTTP 错误只展示业务错误、无原始响应正文。没有调用真实模型服务。
 
 <a id="llm"></a>
 
@@ -545,7 +726,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/c
 |---|---|
 | LlmClient.java | 定义 generate(LlmRequest)，供 Agent 和标题生成使用 |
 | ChatCompletionsClient.java | HTTP 传输、显式 JSON 映射、完整响应解析 |
-| LlmRequest.java | 防御性复制非空消息列表与可用 tools 定义；配置由客户端提供 |
+| LlmRequest.java | 防御性复制非空消息与 tools 定义；toolCallsAllowed=false 时禁用工具，模型配置由客户端提供 |
 | LlmResponse.java | assistant 消息、结束原因和可空 TokenUsage |
 | LlmException.java | HTTP、网络、超时、中断、请求/响应错误与模型拒绝结果分类 |
 
@@ -582,7 +763,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --prompt "解释 Java record" --profil
 
 每次 --prompt 是独立的一次请求，不恢复历史。help/version/list/check 不发起模型调用。参数或配置错误退出码为 2，模型调用错误为 1；获得响应时输出文本，截断时另外提示，工具调用暂不执行。
 
-测试使用本地 HTTP 服务与假密钥，覆盖配置、协议、错误、超时及中断。工具前阶段为 178 项并完成 12 项 JAR 检查；工具基础加入 23 项、读文件 36 项、Agent 35 项，当前总计 272 项通过，见 [Agent 实现](#agent-loop)。没有发送真实服务商请求。
+测试使用本地 HTTP 服务与假密钥，覆盖配置、协议、错误、超时及中断。工具前阶段为 178 项，工具基础 23 项、读文件 36 项、Agent 35 项、进度/exit 3 项、模型命令/偏好 19 项、共享配置目录 3 项，加上运行配置与收尾新增 22 项、文件定位与取消深度限制共新增 43 项，再加空回答处理 7 项，当前总计 415 项通过。没有发送真实服务商请求。
 
 <a id="session-chat"></a>
 
@@ -606,12 +787,13 @@ Main（无参数或 --chat）
   → 创建或恢复 SessionService，获得会话写锁
   → SessionLauncher 读取一行
       ├─ /exit 或 EOF：保存待写内容并退出
+      ├─ 聊天 exit：保存并返回列表；列表 exit：退出程序
       ├─ /clear：保存旧会话，新建 ID，保留旧记录
       ├─ 会话命令：分页、改名、切换；不作为普通问题发送
       └─ 普通问题：ChatCli.answer → AgentLoop → Session.messagesFor → LlmRequest → generate
           ├─ 工具请求：执行各工具、回填关联结果、继续 generate
           ├─ 最终回答：completeAgentTurn → 显示 → captureTurn/save → 首轮标题任务
-          └─ 模型失败/中断/预算耗尽：提示，不提交本轮
+          └─ 模型失败/中断/预算结束仍无文本：提示，不提交残缺本轮
 ```
 
 第二轮请求为 system → 第一问 → 第一答 → 第二问。请求快照和已保存历史独立，失败无需删除尾部消息；校验非法提交时历史也保持不变。截断回答保存已收到文本，同时提示 length，用户可继续追问。请求中断时结束交互，不再阻塞等待输入。
@@ -623,7 +805,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat
 java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --profile qwen
 ```
 
-每行一个问题，同一活动会话的 Profile 固定；恢复时可 --profile 覆盖，/model 后续增加。终端使用 Console，重定向输入输出使用 UTF-8。正常退出或 EOF 返回 0；非法参数/单次入口配置错误返回 2；存储、提示词、输入错误返回 1。交互模型错误可继续，交互配置无效时要求选择别名，未保存结果先重试再开始下一轮。
+每行一个问题，/model 可在任务输入边界切换客户端并保留历史。默认采用最后选择，首次 --profile 可覆盖。终端使用 Console，重定向使用 UTF-8。正常退出返回 0；非法参数/单次入口配置错误返回 2；存储、提示词、输入错误返回 1。交互模型错误可继续，配置无效时保留原模型，未保存结果先重试。
 
 Session 保存完整文本/工具对话，并非完整执行审计日志；不保存模型失败、中断或预算耗尽的轮次。SessionService/JsonSessionStore 已提供跨进程恢复，不重放旧工具调用。当前仍发送全部历史，没有 Token 预算、裁剪或摘要；超长时可 /clear，新会话不删除旧历史。
 
@@ -753,7 +935,7 @@ interface SessionStore {
 | 工具参数/路径错误 | ToolResult 失败回填，可供模型修正 |
 | 写入或命令完成后结果丢失 | 先核对副作用，不自动重放 |
 | 用户取消 | 每轮与工具前检查，传播到 HTTP 和进程 |
-| 预算耗尽 | 返回 BUDGET_EXHAUSTED，保留已完成步骤 |
+| 预算接近上限 | 提醒剩余次数，最后一次禁用工具；有效总结可保存，仍请求工具则返回 BUDGET_EXHAUSTED 且不提交残缺本轮 |
 
 错误通过类型与状态传递，不仅返回一条包含“失败”的字符串。重试策略区分模型请求与有副作用的工具调用。
 
@@ -829,7 +1011,7 @@ llm:
 
 ### 多 Profile 配置与选择
 
-Profile 是一套地址、认证、模型和超时的配置别名，不要求与服务商名字一致。同一平台的两个模型可以命名为 gateway_fast 与 gateway_code。
+Profile 是一套地址、认证和超时的配置别名，不要求与服务商名字一致。MODEL 支持英文逗号分隔的多个模型 ID，同一 Profile 的模型共用连接配置。
 
 ```dotenv
 CODEY_PROFILE_NAMES=deepseek,qwen,local
@@ -856,17 +1038,18 @@ CODEY_PROFILE_LOCAL_TIMEOUT_SECONDS=60
 规则：
 
 - CODEY_PROFILE_NAMES 声明别名，英文逗号分隔。别名以字母开头，只包含字母、数字和下划线，忽略大小写，重复报错。
-- CODEY_ACTIVE_PROFILE 指定默认别名；多 Profile 模式中必填，除非 --profile 已指定。
+- CODEY_ACTIVE_PROFILE 指定首次无偏好时的候选默认；无最后选择/保存别名/--profile 时，多 Profile 模式需填写。
 - 字段前缀是 CODEY_PROFILE_ 加大写别名及下划线，例如 qwen 对应 CODEY_PROFILE_QWEN_。
 - 支持 BASE_URL、MODEL、API_KEY、AUTH、TIMEOUT_SECONDS 五个后缀。
 - AUTH 默认 bearer，必须有密钥；none 忽略密钥，LlmConfig 中不保留它，后续 HTTP 客户端应不发送认证头。
-- 配置选择优先级：--profile > 环境变量 CODEY_ACTIVE_PROFILE > .env CODEY_ACTIVE_PROFILE。
+- 选择优先级：首次 --profile > 最后使用 > 恢复会话保存别名 > CODEY_ACTIVE_PROFILE；同名环境字段仍覆盖 .env。
 - 有 CODEY_PROFILE_NAMES 就进入命名模式，缺失字段不会回退到旧版 CODEY_LLM_*，避免串用凭证；只有公共超时可共享。
-- --list-models 只显示已声明的别名和当前选择，不读取校验所有模型凭证；它不表示服务商模型目录或可达性检查。
+- MODEL 可填多个 ID，英文逗号分隔；省略具体 ID 选择第一个，明确 ID 必须在该 Profile 列表内。
+- --list-models 每个已配置模型显示一行，并标记本地配置校验状态；它不表示远端目录或可达性检查。
 
 ConfigLoader.loadProfiles() 返回不可变配置快照。profileNames() 列出别名，activeConfig() 校验并返回当前配置，configFor(name) 读取指定配置。select(name) 校验目标后返回新快照，失败时原快照保持不变。
 
-活动会话的模型客户端不会自动热更新。新建或恢复时重新从启动目录解析配置；--profile 优先于保存的别名，别名失效时要求明确选择。会话内 /model 后续实现，不修改正在进行的请求。
+模型客户端不自动热更新；新建、恢复和 /model 明确切换时重新从启动目录解析配置。最后使用的模型作为默认，选择无效时要求明确输入别名。切换在两条用户任务之间生效，不改变正在进行的请求。
 
 ### 旧版单模型兼容
 
@@ -883,6 +1066,114 @@ ConfigLoader.loadProfiles() 返回不可变配置快照。profileNames() 列出�
 BASE_URL 填服务商基础路径，例如 https://api.example.com/v1，不包含 /chat/completions。当前仅验证 URL 格式，不测试网络可达性。
 
 模型名原样用于后续请求，不代表 CodeY 已确认该模型存在。例子中的 example.com 和占位 Key 仅说明格式。
+
+<a id="model-commands"></a>
+
+### 模型切换、目录、帮助与最后使用默认
+
+交互入口位于 cli/SessionLauncher，仍用直接命令分发，无需新建命令框架：
+
+| 命令 | 行为 |
+|---|---|
+| /help | 查看全部交互命令，管理页和聊天均可用 |
+| /list model | 列出配置别名、实际模型 ID、本地配置状态，标记当前会话模型 |
+| /model | 查看当前模型和切换用法 |
+| /model qwen | 校验并切换到别名 qwen，保留当前会话的全部历史 |
+| /model qwen MODEL_ID | 校验 MODEL_ID 属于 qwen 的 MODEL 列表，再切换到指定模型 |
+
+第一个参数填写左列的 Profile 别名，第二个参数填写该供应商的真实模型 ID；省略第二个参数使用列表第一个模型。同一真实模型 ID 可出现在不同 Profile 下，由别名明确选择凭证与地址。未知别名、未登记的 ID 或未填齐配置会报告错误并保留原选择。目录通过 ConfigLoader.loadModelCatalog / ModelProfiles.listInfo 构造，每个模型单独一行，只展示非敏感字段，本地配置有效不表示远端一定连通。
+
+配置例子（模型名称为占位示例，替换为平台提供的实际 ID）：
+
+```dotenv
+CODEY_PROFILE_QWEN_MODEL=model-a,model-b
+CODEY_PROFILE_SENSENOVA_MODEL=nova-a,nova-b
+```
+
+```text
+/model qwen model-b
+/model sensenova nova-a
+```
+
+[ProfileSelection.java](../src/main/java/io/github/jackfeicoder/codey/config/ProfileSelection.java) 统一解析 `别名 [模型ID]`，最多两个参数；别名忽略大小写，模型 ID 大小写原样保存，支持斜杠/冒号/连字符。ModelProfiles.modelIdsFor 拆分逗号、去除首尾空白，拒绝空项和重复项；configFor 确认指定 ID 在列表内，再复制配置并用单个 MODEL 值构建原来的 LlmConfig。ChatCompletionsClient、AgentLoop 和消息组织不感知列表，不会把逗号串发给模型。--profile "qwen model-b" 和 CODEY_ACTIVE_PROFILE="qwen model-b" 也能指定模型；原来的单别名、单模型配置继续有效。
+
+```text
+/model 别名
+  → 模型工厂重新加载启动目录配置，校验目标并创建聊天/标题客户端
+  → SessionService.switchProfile：持锁保存新别名，成功后才改内存快照
+  → 替换当前 ModelChoice（Session、ID、标题、工作区、提示词和历史不变）
+  → ModelPreferenceStore 保存最后选择
+下一条问题 → AgentLoop → 同一 Session 的 system/文本/完整工具消息组 → 新模型
+```
+
+新模型可以获得原会话上下文，因为宿主程序每次都发送完整历史，不是服务商内部记住了先前请求。模型切换本身不调用远端、不重放旧工具调用、不自动生成第二次标题；下一任务才使用新客户端。不同模型的上下文容量与工具协议兼容性可能不同，当前没有 Token 裁剪或转换为其他协议。
+
+默认规则：首次显式 --profile > 用户最后选择 > 旧会话保存别名（恢复时）> .env CODEY_ACTIVE_PROFILE。启动覆盖只用于本次运行第一次选择；用户随后 /model 改选后，/new 使用新选择。新建、恢复、成功 /model 会记住选择，成功 --prompt 也更新默认；帮助、目录和 --check-config 不修改默认。新配置验证失败或会话别名保存失败保持旧客户端/默认；不存在用户偏好时才回退至会话/配置候选。
+
+实现文件：[ModelPreferenceStore.java](../src/main/java/io/github/jackfeicoder/codey/config/ModelPreferenceStore.java)，位置为 CODEY_DATA_DIR/model-preference.json（默认 user.home/.codey）：
+
+```json
+{"schemaVersion":1,"lastUsedProfile":"qwen model-b"}
+```
+
+偏好只保存供应商别名与实际模型 ID，不保存密钥、地址或完整配置，不改 .env。会话的 profileAlias 字段同样保存 `供应商 模型ID`，保持快照版本兼容；旧单别名记录仍读取为该供应商的第一个模型。明确 ID 的记录不受 MODEL 列表重排影响；已保存模型被移除时报告错误并要求选择，不静默换模型。读取最多 4 KiB，校验版本、选择格式、重复键和尾随数据；保存到同目录临时文件、force 后原子替换，多进程最后成功写入生效。偏好损坏会提示并忽略；默认保存失败会报告重启默认未保存，但不撤销已经持锁保存成功的会话切换。偏好缓存属于当前进程，不实时监视其他进程或 .env。
+
+SessionService.switchProfile 不重建内存 Session；会话快照只更新别名和 revision，不清空 user/assistant/tool。未保存的对话必须先保存；别名写入失败时不更新内存快照或客户端，可继续使用旧模型。切换在用户任务之间进行，当前 CLI 为单线程，不会在一轮工具执行途中改变客户端。
+
+验证新增 19 项：CLI 模型命令 6 项、偏好存储 11 项、目录 1 项、工具历史保留 1 项。完整 mvn verify 为 294 项，无失败或跳过。最初一项既有快照测试遇到原子写入 I/O 失败，单独检查与随后完整重跑均通过，未调整原存储逻辑。另通过 8 项本地 HTTP JAR 场景，确认真实请求的 model ID 改变且历史保留、错误配置保持原选择、跨进程默认、--prompt 默认、启动覆盖、旧会话默认、浏览页命令无 HTTP、配置检查/模型列表；未向真实厂商发请求。
+
+<a id="command-completion"></a>
+
+### 命令与模型参数补全
+
+使用 [JLine 的补全 API](https://jline.org/docs/tab-completion/)，版本 3.30.17，依赖 jline-reader、jline-terminal-jni；JNI provider 支持 Java 17 的 Windows 原生终端，Maven Shade 合并服务发现与原生资源。
+
+| 文件 | 职责 |
+|---|---|
+| [ConsoleInput.java](../src/main/java/io/github/jackfeicoder/codey/cli/ConsoleInput.java) | 选择原生终端或逐行输入，配置编辑器与按键，关闭恢复终端状态 |
+| [CommandCatalog.java](../src/main/java/io/github/jackfeicoder/codey/cli/CommandCatalog.java) | /help 与命令候选共用名称、参数格式、说明 |
+| [CommandCompleter.java](../src/main/java/io/github/jackfeicoder/codey/cli/CommandCompleter.java) | 根据当前位置生成前缀匹配候选，按供应商筛选模型 ID |
+
+流程：Main 打开 ConsoleInput → JLine 读取按键 → Tab 调用 CommandCompleter → 返回 Candidate → 唯一匹配直接补全，多个匹配在输入下方显示菜单 → 上下/Tab 选择、Enter 确认 → 再 Enter 提交完整命令 → SessionLauncher 分派。补全时不执行命令、不创建 LLM 客户端、不请求远端、不写模型偏好。
+
+`/h` 补全 `/help`；`/model q` 补全供应商；`/model qwen ` 提示该供应商的模型；`/list m` 补全 `model`。第一词之后只补全约定的参数位置，普通聊天、标题和路径不提供命令候选。辅助输入关闭补全；Ctrl+C 取消当前行，EOF 沿用保存退出行为。JLine 只保留进程内编辑历史，没有新增命令历史文件。
+
+DefaultParser 关闭引号/反斜杠解析和事件展开，外层引号仍由原 CLI unquote 处理，Windows 路径保持原样。移除部分终端的字面量鼠标前缀 `\\E[M`，并重建按键映射，避免反斜杠后接中文时被前缀匹配吞掉。无原生控制台的管道/IDE或终端初始化失败沿用 BufferedReader，不提供 Tab 菜单。命令执行仍在 SessionLauncher，CommandCatalog 只是说明目录，新增命令要同步实现分派。
+
+TERM=dumb 或没有原生 Console 的输入继续逐行读取；窗口太小（不足 4 行或 20 列）时 Tab 只补全文字，不打开菜单，尺寸恢复后恢复菜单。
+
+本次新增 16 项测试：多模型列表/隔离/指定选择/非法值/偏好与重启、命令候选与供应商筛选、虚拟终端实际 Tab/方向键/中文路径/小终端输入。完整 mvn verify 共 313 项通过，无失败或跳过。
+
+打包验证：7 项本地 HTTP 场景确认单 ID 请求、历史保留、无效切换保持原模型、重启恢复、跨供应商认证隔离和 list/check 不发 HTTP；Windows 终端（xterm-256color，80×24）验证 `/h` + Tab、`/model qwen M` 候选菜单、下键选 Model-B、Enter 确认、再次 Enter 切换，以及 `/model` 显示确切选择。使用临时 .env 与数据目录，未修改用户实际凭证。
+
+<a id="global-cmd"></a>
+
+### Windows CMD 全局启动
+
+入口文件：[bin/codey.cmd](../bin/codey.cmd)。当前开发安装将仓库 bin 目录加入用户 PATH，命令名称为 codey；系统 PATH 不需要修改。重新打开 CMD 即可从任意目录调用，无参数仍进入会话管理页面。
+
+```text
+CMD 当前目录 → PATH 查找 codey.cmd
+  → %~dp0 定位脚本和 ../target/codey-0.1.0-SNAPSHOT.jar
+  → 未显式设置时：CODEY_CONFIG_DIR = 仓库根目录
+  → java -jar JAR %*：转发原参数，保留调用者当前目录
+  → 返回 Java 原退出码；setlocal 不改变调用者配置变量
+```
+
+配置目录与工作区分开：ConfigLoader.configurationDirectory 从进程环境 CODEY_CONFIG_DIR 读取显式目录，缺失时保持原启动目录语义。指定值应是存在的目录，可相对启动目录解析；变量来自进程环境，不从 .env 自引用。模型和会话设置都从该目录 .env 加载，字段仍由进程环境覆盖。
+
+SessionSettings 的相对 CODEY_DATA_DIR 以配置目录为基准；默认 user.home/.codey 是绝对路径，保持不变。Launcher 的启动目录和工作区相对路径仍来自原 CMD 目录，所以 `codey --chat --workspace .` 可操作当前项目而不丢失共享配置。脚本不会自动把本仓库当工作区，也不会扫描项目。
+
+```cmd
+codey
+codey --help
+codey --chat --workspace .
+codey --chat --no-workspace
+```
+
+缺少 JAR 时提示在仓库执行 mvn package 并返回 1；脚本不隐式构建。需要 Java 17+ 位于 PATH，更新代码后重新构建；开发版脚本固定当前 JAR 版本，升级版本号时同步更新。首次安装可在 Windows 用户环境变量 Path 中添加仓库 bin 目录；当前窗口临时运行可用 `set "PATH=E:\Desktop\github\codeY\bin;%PATH%"`。
+
+验证：新增 3 项共享配置目录测试，完整 mvn verify 共 297 项通过，无失败或跳过；5 项 CMD 场景验证解析命令、版本/帮助、带空格参数和当前工作区、共享配置/数据、跨目录历史、退出码及缺包提示。使用临时配置和本地 HTTP 模型替身，没有读取用户项目真实密钥或调用真实厂商。
 
 ### .env 支持范围
 
@@ -928,7 +1219,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --check-config --profile local
 
 成功时输出配置已通过本地校验，并用 apiKey=<redacted> 隐藏密钥。失败时退出码为 2。help/version 不加载配置；无参数会话列表不要求模型凭证，但会读取会话设置与存储。
 
---profile 不修改文件，当前必须配合 --check-config、--list-models、--prompt 或 --chat。每次只指定一种操作。/model 当前尚未实现。
+--profile 不修改 .env，必须配合 --check-config、--list-models、--prompt 或 --chat。每次只指定一种操作。/model 切换当前会话并更新最后选择，/help 和 /list model 已实现。
 
 环境变量覆盖示例（PowerShell）：
 
@@ -960,7 +1251,7 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 
 ## 12. 开发路线与验收标准
 
-> 当前：非流式对话、read_file Agent 循环、完整工具对话保存/恢复、工作区选择和标题已完成。SSE、搜索/目录工具与执行中恢复继续按路线推进。
+> 当前：非流式对话、list_files/search_file/read_file Agent 循环、完整工具对话保存/恢复、工作区选择和标题已完成。SSE、内容搜索工具与执行中恢复继续按路线推进。
 
 ### M0：工程骨架
 
@@ -988,7 +1279,7 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 - [x] 可选工作区、文本快照、写锁、dirty 重试与一次独立自动标题请求。
 - [x] 连续两轮保持历史顺序，使用本地接口验证交互 JAR。
 - [ ] 使用真实平台配置验证非流式调用与提供商实际兼容性。
-- [ ] 支持 /model，切换在任务边界生效。
+- [x] 支持 /model、/help、/list model 与最后选择默认，切换在任务输入边界生效。
 - [ ] 流式输出接通后验证最终文本与流式展示一致。
 - [ ] 测试多行 SSE、拆分参数、正常结束、提前 EOF，并补充流式错误和超时场景。
 - [ ] 支持取消并关闭响应流；日志不输出 API Key。
@@ -998,7 +1289,7 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 
 ### M2：Agent 循环与只读工具
 
-实现 AgentLoop、ToolRegistry、ToolExecutor、read_file/list_files/search_text，使用结构化工具结果与运行状态。
+实现 AgentLoop、ToolRegistry、ToolExecutor、read_file/list_files/search_file/grep_code，使用结构化工具结果与运行状态。
 
 - [x] 工具定义/接口、宿主上下文、注册表、基础同步执行器、结果与异常类型。
 - [x] 校验完整 JSON 对象、调用具体参数校验、工作区可用性检查、有界输出与关联 tool 消息。
@@ -1006,9 +1297,12 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 - [x] 工具请求 tools 字段与 CLI 装配接入。
 - [ ] 输入“找到项目入口并解释”，模型自动搜索和读取文件。
 - [x] assistant tool_calls 与全部 tool 结果配对，未知工具也有结果。
+- [x] list_files 支持工作区目录探索，深度/条数/扫描量/输出预算有界；不跟随发现的链接。
+- [x] search_file 按名称/路径通配符定位文件；与 list_files 共用路径/遍历基础能力，不读取正文。
+- [ ] grep_code 按关键词/正则搜索文件内容，返回路径、行号和匹配行。
 - [x] read_file 默认分页，大文件读取与输出有上限。
 - [x] read_file 路径越界、符号链接等边界有明确处理；统一策略和强隔离后续完善。
-- [x] 达到轮次上限返回 BUDGET_EXHAUSTED，工具失败允许下一轮修正。
+- [x] 轮次与目录默认深度支持启动配置；临近上限提醒，最后一次仅回答；服务商仍请求工具时返回 BUDGET_EXHAUSTED。工具失败可在剩余预算内修正。
 - [x] 用可控 LLM 替身验证完整循环，无真实 API 依赖。
 
 产出证据：一份任务轨迹、工具参数与失败反馈。面试：ReAct、Function Calling、Harness。
@@ -1185,7 +1479,7 @@ CodeY 实现：类/方法、输入输出与关键控制点。
 
 ### M1：LLM 与流式调用
 
-已完成的配置部分可先准备：为什么将文件读取、配置合并、配置对象分开？如何定义多来源优先级？如何隔离多个 Profile 的凭证？如何在切换失败时保持原状态？相关实现与测试见 config 包；当前 /model 交互命令仍待实现。
+配置面试问题：为什么分开读取、合并、对象转换与用户默认偏好？如何隔离 Profile 凭证、保证切换失败保持原状态？为什么新模型能收到旧历史？相关实现见 config 包、SessionService.switchProfile 与 SessionLauncher 的模型命令。
 
 已完成的消息部分可准备：为什么工具调用请求属于 assistant，而执行结果属于 tool？为什么 tool 消息需要 toolCallId？为什么只读消息仍需复制传入的 List？为什么有工具调用的 assistant 可以没有文本？代码和边界见 [消息模型](#messages)。
 
@@ -1351,7 +1645,7 @@ ReAct 依赖 AgentLoop 实现“请求模型 → 校验工具调用 → 执行 �
 
 ## 16. 工作区选择、历史列表与会话恢复方案
 
-> 实现状态：首版及工具对话扩展已完成。全局最近列表、分页、新建、标题/ID 恢复、可选工作区、手动/自动标题、本地 JSON 快照与单写者锁已接入；完整工具消息组可恢复。/model、执行中任务恢复与云端同步仍待实现。
+> 实现状态：会话、完整工具对话与模型切换已完成；支持全局列表、分页、标题/ID 恢复、工作区、自动标题、JSON 快照、单写者锁和最后选择默认。执行中任务恢复与云端同步仍待实现。
 
 ### 参考依据与 CodeY 的取舍
 
@@ -1391,7 +1685,7 @@ CodeY
 
 选择规则：序号只针对当前已显示列表；标题按完整标题精确匹配，ID 支持完整 UUID 或唯一前缀，标题/ID 搜索整个会话库，不只搜索最近一页。短 ID 默认展示前 8 位，冲突时增加展示长度；前缀匹配多个会话时显示候选项，不任意选择。标题允许重复，重名或不同选择方式产生歧义时同样列出候选项，要求按序号或完整 ID 指定。
 
-启动器中的普通输入用于选择会话；进入对话后的普通输入始终视为用户问题，即使与某个会话标题相同。会话内使用 /resume 标题或ID 切换，避免标题和问题混淆。纯数字标题与序号冲突时可用 /resume 标题 明确指定。首版不自动用模糊匹配结果恢复，拼写不匹配时提示并展示可选项。
+启动器中的普通输入用于选择会话；进入对话后的普通输入视为用户问题，即使与某个会话标题相同，但保留 exit 作为返回列表命令。会话内使用 /resume 标题或ID 切换，避免标题和问题混淆。纯数字标题或标题 exit 可用 /resume 标题 明确指定。首版不自动用模糊匹配结果恢复，拼写不匹配时提示并展示可选项。
 
 已提供直接入口，避免重复选择：
 
@@ -1426,9 +1720,9 @@ WorkspaceBinding 明确区分 DIRECTORY 与 NONE：DIRECTORY 保存绝对真实�
 - 相对路径相对启动目录解析；接受带空格的路径，使用 Path.toRealPath 校验存在且为目录，不要求必须是 Git 仓库，也不要求目录一定可写。
 - 启动参数优先；没有参数时通过菜单明确选择。CODEY_WORKSPACE 提供“配置建议目录”菜单项，进程环境覆盖启动目录 .env；模板中的点号不自动跳过选择，也不覆盖历史会话的绑定。
 - 配置建议目录作为额外选项展示，即使与当前目录相同也不会自动选定；失效建议不阻止选择其他目录。显式 --workspace 无效时报告参数错误。
-- Main 注册 read_file，按会话工作区筛选是否展示；NONE 不展示且拒绝执行工作区工具。搜索/命令和项目指令后续接入。选目录本身不扫描整个项目或把全项目注入模型。
+- Main 注册 list_files、search_file 与 read_file，按会话工作区筛选是否展示；NONE 不展示且拒绝执行工作区工具。内容搜索/命令和项目指令后续接入。选目录本身不扫描整个项目或把全项目注入模型。
 
-工作区是文件和命令的定位依据；read_file 已按真实工作区检查路径，审批与进程隔离后续由策略模块处理。选定目录后模型可请求读取已知文件，但当前没有写入或命令能力。
+工作区是文件和命令的定位依据；read_file 已按真实工作区检查路径，审批与进程隔离后续由策略模块处理。选定目录后模型可浏览目录、按名称定位文件并读取其内容，但当前没有按内容搜索、写入或命令能力。
 
 ### 会话数据结构与保存内容
 
@@ -1452,7 +1746,7 @@ systemPrompt 单独存储，恢复时仅生成一条 system 消息，再追加�
 
 文件中不序列化 LlmConfig、完整环境变量或 API Key；Profile 的当前凭证只在启动时重新解析。消息是用户与模型产生的原文，因此仍可能含用户主动粘贴的敏感内容。恢复旧会话首版沿用其基础提示词快照，若与当前 base.md 摘要不同则显示提示；后续项目规则与真实工具能力需重新加载，不恢复过期权限。
 
-当前保存有最终回答的完整文本/工具轮次；工具业务失败可作为结果随完成轮次保存，模型失败、中断和预算耗尽的任务不提交。执行状态和事件日志后续增加，不承诺恢复正在执行的任务。
+当前保存有最终回答的完整文本/工具轮次；工具业务失败可作为结果随完成轮次保存，模型失败、中断或预算结束仍无文本时不提交残缺本轮；有效收尾总结可保存并提示预算受限。执行状态和事件日志后续增加，不承诺恢复正在执行的任务。
 
 ### 本地存储与写入策略
 
@@ -1476,7 +1770,7 @@ SessionStore 提供 create/save/load/list；实现使用已引入的 Jackson，�
 
 恢复顺序：加载并校验快照 → 检查工作区 → 选择并校验模型配置 → 获得会话写锁后复核 revision → 重建 Session → 显示近期历史 → 等待输入。列表和历史查看不依赖有效 API Key，准备继续对话时才要求可用配置。
 
-Profile 选择顺序为 --profile > 历史保存的别名；原别名缺失或配置无效时报告字段错误并要求输入已配置的别名（或 /back），不静默换厂商。明确选择另一模型后保留消息并保存别名，不复制旧凭证。
+首次 Profile 选择为 --profile > 用户最后选择 > 历史保存别名 > .env 默认；最后选择失效时报告并要求明确选择，不静默换厂商。成功进入/切换后保存最后选择，旧会话恢复也采用该默认；只有缺少用户偏好时才参考旧会话别名。不复制旧凭证或清空消息。
 
 原工作区存在则沿用；原目录失效仍可查看历史，但不自动使用启动目录。首版提供返回菜单、新建普通聊天或新建另一工作区会话；保留原会话绑定与记录。目录迁移、复制历史后换工作区属于后续显式迁移/分支功能。
 
@@ -1487,15 +1781,18 @@ Profile 选择顺序为 --profile > 历史保存的别名；原别名缺失或�
 | 命令 | 持久化阶段计划行为 |
 |---|---|
 | /exit | 保存待写快照后退出，保存失败报告错误退出码 |
+| exit | 聊天返回列表，列表中退出；不发模型，保留可 /back 的活动会话 |
 | /new | 保留当前记录，进入新会话工作区选择 |
 | /sessions | 保留当前记录，显示所有工作区最近 10 条会话，重置分页快照 |
 | /more_session | 在列表中追加下一批 10 条；会话内先打开历史列表，展示最近一批 |
 | /resume [标题或ID] | 无参数打开历史选择器，有参数按精确标题或唯一 ID 解析后恢复 |
 | /rename 新标题 | 只修改当前会话标题和标题来源，不改变 ID 与消息历史 |
 | /clear | 保存当前会话，创建新 ID，沿用工作区与当前 Profile，使用当前 base.md；不删除原历史 |
-| /model | 后续在轮次边界切换配置，沿用已有历史 |
+| /model [配置别名] | 查看当前模型或切换会话模型，保留历史并保存最后选择 |
+| /list model | 模型配置目录：别名、模型 ID、配置状态；不探测远端 |
+| /help | 列出全部交互命令，不调用模型 |
 
-上表除 /model 外均已实现。/clear 新建无手动标题的会话，首轮按标题流程处理；原会话仍可恢复。菜单、分页、切换、改名本身都不调用模型，只有首轮成功后的自动标题任务可能额外调用。删除会话后续另设功能。
+上表均已实现。/clear 新建无手动标题的会话，原会话仍可恢复。菜单、模型目录、模型切换、分页、改名本身不调用模型，只有首轮成功后的标题任务可能额外调用。删除会话后续另设功能。
 
 ### 模块职责与实施顺序
 
@@ -1510,7 +1807,7 @@ Profile 选择顺序为 --profile > 历史保存的别名；原别名缺失或�
 | cli/SessionLauncher | 全局最近列表、稳定分页、标题/ID 选择与工作区输入；ChatCli 继续负责对话输入 |
 | config | 解析存储位置与建议工作区，保持模型凭证来源不变 |
 
-这些步骤已接通。SessionService 维持 dirty 快照，失败时下一次输入先重试保存；JsonSessionStore 限制单个快照 16 MiB，校验重复字段/尾随数据/版本，force 后原子替换，不使用非原子覆盖回退。/model、项目规则、上下文预算、工具执行恢复后续增加；云端存储以后通过接口扩展。
+这些步骤已接通。SessionService 维持 dirty 快照，失败时先重试保存；switchProfile 先保存成功再更新属性。JsonSessionStore 限制快照 16 MiB，严格校验并原子替换。/model 和用户默认已实现，项目规则、上下文预算、执行中恢复和云端接口后续增加。
 
 实现调用流程：
 

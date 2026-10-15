@@ -17,6 +17,67 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** 多模型配置测试：验证别名选择、配置隔离、认证方式、超时继承和不可变切换。 */
 class ModelProfilesTest {
+    /** 同一供应商共用凭证与超时，实际配置只含明确选择的一个模型。 */
+    @Test
+    void commaSeparatedModelsShareProviderSettingsAndSelectExactId() {
+        var values = settings();
+        values.put("CODEY_PROFILE_CLOUD_MODEL", "first, second, Vendor/Model:v2");
+        var profiles = load(values);
+        assertEquals(List.of("first", "second", "Vendor/Model:v2"), profiles.modelIdsFor("CLOUD"));
+        assertEquals("first", profiles.activeConfig().model());
+        var selected = profiles.select(" CLOUD   Vendor/Model:v2 ");
+        assertEquals("cloud", selected.activeProfile());
+        assertEquals("cloud Vendor/Model:v2", selected.activeSelection());
+        assertEquals("Vendor/Model:v2", selected.activeConfig().model());
+        assertEquals(profiles.activeConfig().baseUrl(), selected.activeConfig().baseUrl());
+        assertEquals(profiles.activeConfig().apiKey(), selected.activeConfig().apiKey());
+        assertEquals(profiles.activeConfig().timeout(), selected.activeConfig().timeout());
+        assertEquals("first", profiles.activeConfig().model());
+        assertThrows(ConfigException.class, () -> profiles.select("cloud missing"));
+        assertThrows(ConfigException.class, () -> profiles.select("cloud vendor/model:v2"));
+        assertThrows(ConfigException.class, () -> profiles.select("cloud first second"));
+    }
+
+    /** 目录每个模型独立一行，选择第一个占位模型失败时仍可选择后面的已配置模型。 */
+    @Test
+    void catalogListsEachModelAndReorderingDoesNotChangeExplicitSelection() {
+        var values = settings();
+        values.put("CODEY_PROFILE_CLOUD_MODEL", "YOUR_MODEL,second");
+        var catalog = ConfigLoader.loadModelCatalog(directory, values);
+        assertEquals(new ModelProfiles.ProfileInfo("cloud", "YOUR_MODEL", false), catalog.get(0));
+        assertEquals(new ModelProfiles.ProfileInfo("cloud", "second", true), catalog.get(1));
+        assertEquals("second", load(values).configFor("cloud second").model());
+        values.put("CODEY_PROFILE_CLOUD_MODEL", "second,first");
+        assertEquals("first", ConfigLoader.loadProfiles(directory, values, "cloud first").activeConfig().model());
+    }
+
+    /** 空项、重复项、含空格 ID 都报告模型字段，不回显完整原始配置。 */
+    @ParameterizedTest
+    @ValueSource(strings = {"first,", ",first", "first,,second", "first,first", "first,two words"})
+    void rejectsMalformedModelListsOnUse(String ids) {
+        var values = settings();
+        values.put("CODEY_PROFILE_CLOUD_MODEL", ids);
+        var profiles = load(values);
+        assertTrue(assertThrows(ConfigException.class, profiles::activeConfig).getMessage().contains("CODEY_PROFILE_CLOUD_MODEL"));
+        assertEquals("local-model", profiles.configFor("local").model());
+        assertFalse(profiles.listInfo().get(0).configured());
+    }
+
+    /** 目录独立于默认别名是否存在，配置不完整标记而非隐藏；目录 DTO 没有密钥。 */
+    @Test
+    void catalogListsProfilesWithoutValidDefaultOrExposingCredentials() {
+        Map<String, String> values = new java.util.HashMap<>();
+        values.put("CODEY_PROFILE_NAMES", "ready,unfinished");
+        values.put("CODEY_ACTIVE_PROFILE", "removed");
+        values.put("CODEY_PROFILE_READY_BASE_URL", "http://127.0.0.1:8000/v1");
+        values.put("CODEY_PROFILE_READY_MODEL", "ready-model");
+        values.put("CODEY_PROFILE_READY_API_KEY", "fixture-secret");
+        values.put("CODEY_PROFILE_UNFINISHED_MODEL", "pending-model");
+        var entries = ConfigLoader.loadModelCatalog(directory, values);
+        assertEquals(List.of(new ModelProfiles.ProfileInfo("ready", "ready-model", true),
+                new ModelProfiles.ProfileInfo("unfinished", "pending-model", false)), entries);
+        assertFalse(entries.toString().contains("fixture-secret"));
+    }
     /** JUnit 为本次测试创建的临时目录，与真实项目配置隔离。 */
     @TempDir
     Path directory;

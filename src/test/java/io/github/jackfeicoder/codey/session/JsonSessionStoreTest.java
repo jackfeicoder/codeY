@@ -15,6 +15,27 @@ import static org.junit.jupiter.api.Assertions.*;
 class JsonSessionStoreTest {
     @TempDir Path directory;
 
+    /** 切换只更新配置引用，原内存会话、提示词、完整工具消息与标题全部保持。 */
+    @Test
+    void switchingProfilePreservesToolHistoryAndPersistsAlias() {
+        JsonSessionStore store = new JsonSessionStore(directory);
+        try (SessionService service = SessionService.create(store, WorkspaceBinding.none(), "old", "base", "same-title")) {
+            var turn = List.of(Message.user("read"), Message.assistantToolCalls(
+                    List.of(new ToolCall("read-id", "read_file", "{\"path\":\"README.md\"}"))),
+                    Message.tool("read-id", "observed content"), Message.assistant("summary"));
+            service.session().completeAgentTurn(turn);
+            service.captureTurn(); service.save();
+            var original = service.session();
+            service.switchProfile("other");
+            assertSame(original, service.session());
+            assertEquals(turn, store.load(service.snapshot().id()).messages());
+            assertEquals("other", store.load(service.snapshot().id()).profileAlias());
+            assertEquals("same-title", service.snapshot().title());
+            assertEquals(6, service.session().messagesFor("continue").size());
+            assertFalse(service.dirty());
+        }
+    }
+
     /** v2 工具消息、原始调用参数和结果 ID 完整往返，恢复后可继续下一用户轮次。 */
     @Test
     void toolConversationSurvivesRestartWithMatchingIds() {

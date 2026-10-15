@@ -1,5 +1,6 @@
 package io.github.jackfeicoder.codey.cli;
 
+import io.github.jackfeicoder.codey.agent.AgentLoop;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
 import io.github.jackfeicoder.codey.llm.LlmRequest;
@@ -72,6 +73,26 @@ class ChatCliTest {
         assertTrue(harness.errors.toString().contains("This turn was not saved"));
     }
 
+    /** 空回答明确报错，控制台不打印空 CodeY 提示；下一条输入仍可正常完成。 */
+    @Test
+    void emptyAnswerIsReportedAndNextInputContinuesWithoutBlankHistory() throws IOException {
+        var requests = new ArrayList<LlmRequest>();
+        Harness harness = new Harness(request -> {
+            requests.add(request);
+            if (requests.size() == 1) return reply("");
+            assertEquals(List.of(Message.system("base"), Message.user("next")), request.messages());
+            return reply("done");
+        });
+        harness.run("empty\nnext\n/exit\n");
+        assertEquals(2, requests.size());
+        assertTrue(harness.errors.toString().contains("INVALID_RESPONSE"));
+        assertTrue(harness.errors.toString().contains("empty final answer"));
+        assertTrue(harness.errors.toString().contains("This turn was not saved"));
+        assertEquals(List.of("CodeY> done"), harness.output.toString().lines()
+                .filter(line -> line.contains("CodeY> ")).map(line -> line.substring(line.indexOf("CodeY> "))).toList());
+        assertEquals(List.of(Message.system("base"), Message.user("next"), Message.assistant("done")), harness.session.messages());
+    }
+
     /** 未注册工具也回填错误，随后最终回答和完整消息组一并提交。 */
     @Test
     void unknownToolIsReturnedToModelAndCompletedGroupIsCommitted() throws IOException {
@@ -108,15 +129,39 @@ class ChatCliTest {
     void budgetExhaustionIsReportedAndNextInputUsesOnlyCommittedHistory() throws IOException {
         int[] count = {0};
         Harness harness = new Harness(request -> {
-            if (++count[0] <= 8) return new LlmResponse(Message.assistantToolCalls(
+            if (++count[0] <= AgentLoop.DEFAULT_MAX_STEPS) return new LlmResponse(Message.assistantToolCalls(
                     List.of(new ToolCall("call-" + count[0], "unknown", "{}"))), "tool_calls", null);
             assertEquals(List.of(Message.system("base"), Message.user("next")), request.messages());
             return reply("done");
         });
         harness.run("loop\nnext\n/exit\n");
-        assertEquals(9, count[0]);
+        assertEquals(AgentLoop.DEFAULT_MAX_STEPS + 1, count[0]);
         assertEquals(3, harness.session.messages().size());
         assertTrue(harness.errors.toString().contains("BUDGET_EXHAUSTED"));
+    }
+
+    /** 收尾回答保留完整工具消息，下一个问题沿用历史并重置预算，控制台给出预算提示。 */
+    @Test
+    void budgetSummaryIsCommittedAndNextQuestionContinuesHistory() throws IOException {
+        int[] count = {0};
+        Harness harness = new Harness(request -> {
+            int current = ++count[0];
+            if (current < AgentLoop.DEFAULT_MAX_STEPS) return new LlmResponse(Message.assistantToolCalls(
+                    List.of(new ToolCall("call-" + current, "unknown", "{}"))), "tool_calls", null);
+            if (current == AgentLoop.DEFAULT_MAX_STEPS) {
+                assertFalse(request.toolCallsAllowed());
+                return reply("已获取部分信息，尚有分支待确认");
+            }
+            assertTrue(request.toolCallsAllowed());
+            assertEquals("base", request.messages().get(0).content());
+            assertEquals("已获取部分信息，尚有分支待确认", request.messages().get(request.messages().size() - 2).content());
+            return reply("continued");
+        });
+        harness.run("investigate\nnext\n/exit\n");
+        assertEquals(AgentLoop.DEFAULT_MAX_STEPS + 1, count[0]);
+        assertEquals(2 * AgentLoop.DEFAULT_MAX_STEPS + 3, harness.session.messages().size());
+        assertTrue(harness.errors.toString().contains("本轮已到模型请求上限"));
+        assertFalse(harness.errors.toString().contains("This turn was not saved"));
     }
 
     /** EOF 正常结束且不发送空请求。 */
