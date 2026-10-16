@@ -222,6 +222,9 @@ public final class SessionLauncher {
                 } catch (LlmException failed) {
                     errors.println("LLM error [" + failed.kind() + "]: " + failed.getMessage()
                             + " This turn was not saved.");
+                    if (active != null && active.snapshot().workspace().mode() == WorkspaceBinding.Mode.DIRECTORY) {
+                        errors.println("工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
+                    }
                     if (failed.kind() == LlmException.Kind.INTERRUPTED) return 1;
                 }
                 output.flush();

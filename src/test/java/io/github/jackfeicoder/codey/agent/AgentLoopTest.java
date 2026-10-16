@@ -14,6 +14,8 @@ import io.github.jackfeicoder.codey.tool.builtin.ReadFileTool;
 import io.github.jackfeicoder.codey.tool.builtin.ListFilesTool;
 import io.github.jackfeicoder.codey.tool.builtin.SearchFileTool;
 import io.github.jackfeicoder.codey.tool.builtin.GrepCodeTool;
+import io.github.jackfeicoder.codey.tool.builtin.WriteFileTool;
+import io.github.jackfeicoder.codey.tool.builtin.EditFileTool;
 import io.github.jackfeicoder.codey.workspace.WorkspaceBinding;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -37,6 +39,73 @@ class AgentLoopTest {
     @TempDir Path directory;
     /** 解析工具观察结果。 */
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /** 模型发起新建→读取→局部修改；同组依赖工具按顺序执行，观察关联与历史保持完整。 */
+    @Test
+    void createsReadsAndEditsThroughModelDrivenToolsWithoutDumpingContent() throws Exception {
+        var registry = new ToolRegistry().register(new WriteFileTool()).register(new ReadFileTool()).register(new EditFileTool());
+        var requests = new ArrayList<LlmRequest>();
+        var output = new StringWriter();
+        LlmClient model = request -> {
+            requests.add(request);
+            if (requests.size() == 1) return calls(
+                    new ToolCall("create", "write_file", "{\"path\":\"src/A.txt\",\"content\":\"fixture private body old\"}"),
+                    new ToolCall("read", "read_file", "{\"path\":\"src/A.txt\"}"));
+            if (requests.size() == 2) {
+                assertTrue(request.messages().get(request.messages().size() - 1).content().contains("fixture private body old"));
+                return calls(new ToolCall("edit", "edit_file", "{\"path\":\"src/A.txt\",\"oldText\":\"old\",\"newText\":\"new\"}"));
+            }
+            var observed = request.messages().get(request.messages().size() - 1);
+            assertEquals("edit", observed.toolCallId());
+            assertTrue(observed.content().contains("replacements"));
+            return answer("Created and edited src/A.txt.");
+        };
+        var session = new Session("base");
+        var result = new AgentLoop(model, registry, 20, new DebugPrinter(new PrintWriter(output)))
+                .run(session, "Create and edit a file", workspace());
+        assertTrue(result.completed());
+        assertEquals(3, result.modelCalls());
+        assertEquals(3, result.toolCalls());
+        assertEquals("fixture private body new", Files.readString(directory.resolve("src/A.txt")));
+        assertTrue(output.toString().contains("调用 write_file · src/A.txt"));
+        assertTrue(output.toString().contains("调用 edit_file · src/A.txt"));
+        assertFalse(output.toString().contains("fixture private body"));
+        session.completeAgentTurn(result.turnMessages());
+        assertEquals(8, session.messages().size());
+    }
+
+    /** 工具返回错误可交给模型纠正，失败写入没有副作用。 */
+    @Test
+    void modelCanRecoverFromAmbiguousEditByProvidingMoreContext() throws Exception {
+        Files.writeString(directory.resolve("a.txt"), "left old\nright old\n");
+        var count = new AtomicInteger();
+        LlmClient model = request -> {
+            int round = count.incrementAndGet();
+            if (round == 1) return calls(new ToolCall("bad", "edit_file", "{\"path\":\"a.txt\",\"oldText\":\"old\",\"newText\":\"new\"}"));
+            if (round == 2) {
+                assertTrue(request.messages().get(request.messages().size() - 1).content().contains("AMBIGUOUS_MATCH"));
+                return calls(new ToolCall("fixed", "edit_file", "{\"path\":\"a.txt\",\"oldText\":\"left old\",\"newText\":\"left new\"}"));
+            }
+            return answer("Edited left occurrence.");
+        };
+        assertTrue(new AgentLoop(model, new ToolRegistry().register(new EditFileTool())).run(new Session("base"), "Edit left", workspace()).completed());
+        assertEquals("left new\nright old\n", Files.readString(directory.resolve("a.txt")));
+    }
+
+    /** 文件副作用与会话提交不同：后续模型失败不自动撤回已经成功执行的写入。 */
+    @Test
+    void modelFailureAfterWriteLeavesFileButDoesNotCommitConversation() throws Exception {
+        var count = new AtomicInteger();
+        var session = new Session("base");
+        LlmClient model = request -> {
+            if (count.incrementAndGet() == 1) return calls(new ToolCall("create", "write_file", "{\"path\":\"a.txt\",\"content\":\"written\"}"));
+            throw new LlmException(LlmException.Kind.HTTP, 429, "Fixture rate limit.");
+        };
+        assertThrows(LlmException.class, () -> new AgentLoop(model, new ToolRegistry().register(new WriteFileTool()))
+                .run(session, "Create a.txt", workspace()));
+        assertEquals("written", Files.readString(directory.resolve("a.txt")));
+        assertEquals(1, session.messages().size());
+    }
 
     /** 模型先列出未知位置的文件，再使用返回路径读取；观察与调用 ID 完整回填。 */
     @Test

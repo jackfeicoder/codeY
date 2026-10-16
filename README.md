@@ -6,9 +6,11 @@
 
 ## 当前进度
 
-当前已完成多模型 Profile 配置、消息模型、基础提示词、非流式模型调用、本地会话保存/恢复，以及基础 Agent 工具循环。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。SSE、写入/命令工具、长期记忆和 MCP 尚待实现；已使用本地模拟模型验证，真实厂商兼容性需另行验证。
+当前已完成多模型 Profile 配置、消息模型、基础提示词、非流式模型调用、本地会话保存/恢复、文件读写，以及基础 Agent 工具循环。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。SSE、命令工具、交互审批、长期记忆和 MCP 尚待实现；已使用本地模拟模型验证，真实厂商兼容性需另行验证。
 
 工作区会话已注册 `list_files`、`search_file`、`grep_code` 与 `read_file`：模型可浏览目录、按名称定位或按正文关键词搜索，再读取内容。工具描述通过结构化 `tools` 字段发送，由 AgentLoop 执行并回填结果，继续请求最终回答。默认每个任务最多请求模型 20 次，最后一次禁用工具用于收尾；完成的工具消息组随会话保存，恢复时不自动重放。说明见 [正文搜索](docs/architecture.md#grep-code)、[文件定位](docs/architecture.md#search-file)、[目录工具](docs/architecture.md#list-files)、[读文件工具](docs/architecture.md#read-file) 和 [Agent 循环](docs/architecture.md#agent-loop)。
+
+另已注册 `write_file`（新建/完整覆盖）和 `edit_file`（精确局部替换）。当前写入直接执行，没有交互审批；默认拒绝覆盖，显式 `overwrite=true` 请求整份覆盖，局部修改优先 `edit_file`。一次工具写入成功后，后续模型失败或消息未保存不会自动回滚文件。实现与参数见 [写入和编辑](#file-writes)。
 
 控制台显示简洁执行进度：调用轮次、工具名称和涉及的文件，最后展示模型回答；工具失败时补充错误码。聊天中输入 `exit` 返回会话列表，列表中 `exit` 退出；`/exit` 随时退出程序。
 
@@ -334,7 +336,7 @@ CLI 的 `/clear` 保存旧会话并创建新 ID，沿用工作区/模型，旧�
 
 ### 8. 工具模块：tool（目录浏览、文件定位、正文搜索与读取已实现）
 
-**功能**：将模型可见定义与 Java 执行分开，统一注册、查找、参数校验入口、工作区检查、错误结果和输出上限。`list_files` 浏览目录结构，`search_file` 按名称/路径模式定位文件，`grep_code` 按正文关键词定位匹配行，`read_file` 阅读已知文件内容。四个工具各自实现 Tool，互不调用，由模型按任务选择，均已接入工作区会话的工具循环。
+**功能**：将模型可见定义与 Java 执行分开，统一注册、查找、参数校验入口、工作区检查、错误结果和输出上限。`list_files` 浏览目录，`search_file` 定位路径，`grep_code` 搜正文，`read_file` 阅读，`write_file` 完整写入，`edit_file` 局部编辑。六个工具各自实现 Tool，互不调用，由模型按任务选择，均已接入工作区会话的工具循环。
 
 **涉及文件**：
 
@@ -352,10 +354,13 @@ CLI 的 `/clear` 保存旧会话并创建新 ID，沿用工作区/模型，旧�
 | [builtin/ListFilesTool.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/ListFilesTool.java) | list_files 参数与目录条目输出，调用共享遍历器浏览目录结构 |
 | [builtin/SearchFileTool.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/SearchFileTool.java) | search_file 参数、名称/路径匹配和有界路径结果，不读取正文 |
 | [builtin/GrepCodeTool.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/GrepCodeTool.java) | grep_code 参数、逐行字面匹配、文件跳过/预算统计和完整匹配结果 |
+| [builtin/WriteFileTool.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/WriteFileTool.java) | 完整内容写入、默认覆盖保护、创建/覆盖/未变化结果 |
+| [builtin/EditFileTool.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/EditFileTool.java) | 精确匹配计数、唯一匹配校验、替换/插入/删除与替换全部 |
+| [filesystem/WorkspaceTextFiles.java](src/main/java/io/github/jackfeicoder/codey/tool/filesystem/WorkspaceTextFiles.java) | 两个写工具共用的路径/链接检查、严格 UTF-8、快照冲突检查和临时文件提交 |
 | [filesystem/WorkspaceFiles.java](src/main/java/io/github/jackfeicoder/codey/tool/filesystem/WorkspaceFiles.java) | 目录工具共用的工作区路径校验、有界排序/遍历、忽略和链接规则 |
 | [filesystem/FileGlob.java](src/main/java/io/github/jackfeicoder/codey/tool/filesystem/FileGlob.java) | 跨平台名称/路径模式匹配，支持 *、? 和独立的 ** 目录段 |
 | [filesystem/Utf8TextReader.java](src/main/java/io/github/jackfeicoder/codey/tool/filesystem/Utf8TextReader.java) | read_file 与 grep_code 共用严格 UTF-8/BOM/换行、有界行读取和实际字节预算 |
-| [builtin/package-info.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/package-info.java) | 内置工具包说明；修改和命令工具后续加入 |
+| [builtin/package-info.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/package-info.java) | 六个内置文件工具的职责说明；命令工具后续加入 |
 
 **调用流程**：
 
@@ -427,6 +432,33 @@ ToolCall("grep_code", {query, path?, filePattern?, caseSensitive?, maxResults?})
 每次最多扫描 10000 个目录项、检查 1000 个候选文件、实际读取 32 MiB；单文件最多 4 MiB、单行最多 16384 个 UTF-16 单元，输出预算默认 16000 个 Unicode 码点。`scannedFiles` 是开始检查的候选文件数，`searchedFiles` 是完整成功扫描的文本文件数，`partialFiles` 是预算提前停止的文件数；被文件模式排除或忽略目录内的文件不计入候选统计。`readBytes` 包含 UTF-8 解码器预读，精确耗尽总预算时停止，不额外探测 EOF。
 
 非法 UTF-8、NUL、超大/超长行及读取问题按文件跳过，计入 `skippedFiles/skippedReasons`；发生文件错误时撤回该文件此前暂存的匹配。`truncated` 仅表示预算导致提前停止，`limitReason` 为 maxResults/outputLimit/fileLimit/byteLimit/scanLimit；`complete=false` 表示有截断或候选文件跳过。空匹配只说明已检查区域未命中。成功输出始终保持完整 JSON，第一条完整匹配行放不下时明确报错。匹配与预算边界见 [正文搜索工具](docs/architecture.md#grep-code)。
+
+<a id="file-writes"></a>
+
+**文件写入与局部编辑的参数及流程**：工具定义和 JSON Schema 在各自 Java 类中维护，由 ToolRegistry → LlmRequest → ChatCompletionsClient 注入 `tools`；`base.md` 只指导何时使用。
+
+```json
+{"path":"notes/demo.txt","content":"第一行\n第二行\n"}
+```
+
+`write_file` 必填 `path/content`，可选 `overwrite` 默认为 false。目标不存在时创建文件及缺失父目录；存在时返回 `FILE_ALREADY_EXISTS`，显式 true 才请求完整覆盖。`content` 可为空，表示创建空文件或清空；没有追加模式。内容相同且允许覆盖时返回 `changed=false`，不重写。
+
+```json
+{"path":"notes/demo.txt","oldText":"第二行","newText":"修改后的第二行"}
+```
+
+`edit_file` 必填 `path/oldText/newText`，可选 `replaceAll` 默认 false。大小写、空白、换行精确匹配；旧片段非空且必须与新片段不同。零处匹配报 `TEXT_NOT_FOUND`，多处匹配报 `AMBIGUOUS_MATCH`；显式 true 才替换所有非重叠匹配。插入时把原锚点保留在新片段，删除时 `newText` 为空。只操作已有文件，不自动新建。
+
+```text
+模型 tools 调用 → AgentLoop → ToolExecutor 严格解析/工作区检查
+  → WriteFileTool / EditFileTool 校验参数并构造目标内容
+  → WorkspaceTextFiles 路径/编码/大小检查 → 提交前检查原文件快照
+  → 同目录临时文件提交 → JSON 元数据 → 原调用 ID 的 tool 消息 → 模型继续
+```
+
+共用边界：仅工作区相对路径，拒绝路径中的符号链接/junction（包括内部链接）及 Windows ADS。每段模型输入最多 64 KiB UTF-8，完整参数仍受执行器 64 Ki UTF-16 单元上限约束；已有及编辑后文件最多 4 MiB。拒绝 NUL、非法 UTF-8 和无效 Unicode；局部编辑保留未改动的 BOM、空白、换行。底层 Java NIO，无 Shell、正则或模糊编辑。
+
+写前检查输出预算，成功 JSON 不截断、不回传完整正文，字段包括 `path/operation/changed/bytesWritten/fileBytes/sha256`，编辑另有 `replacements`。新文件以同目录临时文件硬链接发布，文件系统需支持硬链接；已有文件原子替换，不支持时失败并保留原文件，失败后清理临时文件。父目录已创建时可能留下空目录；当前不保证保留所有原 ACL/扩展属性。提交前对比文件身份、mtime 和完整字节，捕获本次读取后的常规修改；检查至提交仍有竞态窗口，也未验证跨工具 `read_file` 后文件是否变化。这不是文件系统事务或完整沙箱。权限审批、持久化操作日志和失败自动回滚后续实现。详见 [写入模块设计](docs/architecture.md#file-writes)。
 
 <a id="module-agent"></a>
 
@@ -577,7 +609,7 @@ codeY/
 | M0 | 工程、入口与设计文档 | 已完成 |
 | M1 | LLM 调用与 SSE 流式输出 | 进行中：配置、消息、非流式调用与连续对话已完成 |
 | M2 | Agent 循环与只读工具 | list_files、search_file、grep_code、read_file、tools 请求、基础循环与工具历史已完成；正则与语义检索后续扩展 |
-| M3 | 修改代码、执行命令与验证闭环 | 待实现 |
+| M3 | 修改代码、执行命令与验证闭环 | write_file/edit_file 已完成；命令、审批、验证证据与失败恢复待实现 |
 | M4 | 上下文预算与历史压缩 | 待实现 |
 | M5 | 会话恢复与项目记忆 | 文本/工具对话保存恢复已实现；执行中恢复与长期记忆待实现 |
 | M6 | MCP 工具接入 | 待实现 |
@@ -632,7 +664,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --no-workspace
 java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --resume "项目开发"
 ```
 
-构建生成的 JAR 已包含 Jackson 与 JLine 运行依赖，直接使用 `java -jar` 即可。`--prompt` 执行无工作区任务；`--chat` 每轮发送基础提示词、成功历史和当前问题，工作区会话提供 list_files/search_file/grep_code/read_file。两种入口展示简洁调用进度，都会向选中平台发送真实请求；输出被截断时提示 `finish_reason=length`。
+构建生成的 JAR 已包含 Jackson 与 JLine 运行依赖，直接使用 `java -jar` 即可。`--prompt` 执行无工作区任务；`--chat` 每轮发送基础提示词、成功历史和当前问题，工作区会话提供六个文件工具。两种入口展示简洁调用进度，都会向选中平台发送真实请求；输出被截断时提示 `finish_reason=length`。
 
 启动列表接受已显示序号、完整标题或唯一 ID 前缀（至少 8 位）。进入会话后普通文本就是问题；重名/前缀冲突会显示候选项。每行一个问题，终端使用 Console 编码，重定向输入输出使用 UTF-8。
 
@@ -663,7 +695,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --resume "项目开发"
 java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/codeY --title 了解项目
 ```
 
-进入后输入“请看看配置功能是怎么实现的”。模型可用 `list_files` 了解结构，或用 `search_file` 按名称、`grep_code` 按正文定位，再用 `read_file` 阅读；目录探索有深度、扫描量与输出限制，需要时继续查看具体子目录。当前支持字面内容搜索，尚无修改文件或执行命令的工具。旧会话保留旧系统提示词，`/new` 或 `/clear` 可加载最新工具使用指导。
+进入后输入“请看看配置功能是怎么实现的”。模型可用 `list_files` 了解结构，或用 `search_file` 按名称、`grep_code` 按正文定位，再用 `read_file` 阅读；目录探索有深度、扫描量与输出限制，需要时继续查看具体子目录。可在临时工作区继续输入“创建 notes/demo.txt，内容为 hello”，再输入“读取后仅把 hello 改成你好，保留其他内容”，验证 write_file/read_file/edit_file；实际工具选择由模型决定，控制台显示真实调用。当前尚无执行命令工具。旧会话保留旧系统提示词，`/new` 或 `/clear` 可加载最新工具使用指导。
 
 基础提示词位于 [src/main/resources/prompts/base.md](src/main/resources/prompts/base.md)。PromptLoader 从 classpath 按 UTF-8 读取全文，Main 将其作为 system 消息注入请求；所有模型 Profile 共用。修改提示词后执行 `mvn package` 更新 JAR。资源缺失或空白时会在发送请求前报告提示词错误。设计与后续扩展见 [Prompt 模块](docs/architecture.md#prompt-design)。
 
@@ -679,7 +711,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/c
 
 ## 验证与文档维护
 
-最近一次完整构建 `mvn verify` 共 458 项测试通过，无失败、错误或跳过。正文搜索新增 42 项临时文件测试与 1 项 Agent 组合测试，覆盖字面/大小写/Unicode 匹配、目录与单文件、范围过滤、编码/BOM/换行、坏文件匹配撤回、超过 20 层目录、扫描/候选文件/总字节/结果/输出预算及路径/链接/中断边界；共享读取与范围重构通过既有读文件 36 项、目录工具 30 项、名称定位 42 项回归。另通过 9 组本地 HTTP JAR 验证：生产注册与 grep→按行读取→回答/保存、跨进程恢复不重放、单文件范围、无工作区单次/会话隐藏工具、跳过统计、条数截断、越界错误、真实 src 文件搜索和深层目录正文搜索。配置与会话隔离，未读取真实 .env 或调用真实厂商。此前功能和构建验证记录保留在设计文档。
+最近一次完整构建 `mvn verify` 共 506 项测试通过，无失败、错误或跳过。写入/编辑新增 45 项临时文件测试与 3 项 Agent 组合测试，覆盖创建/覆盖保护、精确替换/插入/删除、歧义及错误修正、编码/BOM/换行、输入/输出/文件大小预算、路径/链接边界、文件冲突、中断与临时文件清理。另通过 6 组本地 HTTP JAR 验证：生产六工具注册与新建→读取→编辑→回答/保存、跨进程恢复不重放、覆盖/歧义/不存在/越界错误回填及修正、无工作区的两个入口隐藏工具、写入后 429 不回滚文件且不提交失败消息、最终预算轮次禁止写入。配置、会话与工作区全部隔离，未读取真实 .env 或调用真实厂商。此前正文搜索等功能的验证记录保留在设计文档。
 
 后续每完成或调整模块，同步维护模块导航和对应章节的四项内容：
 

@@ -83,6 +83,7 @@ public final class ChatCli {
             } catch (LlmException failed) {
                 errors.println("LLM error [" + failed.kind() + "]: " + failed.getMessage()
                         + " This turn was not saved.");
+                if (context.hasWorkspace()) errors.println("工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
                 if (failed.kind() == LlmException.Kind.INTERRUPTED) {
                     // 中断请求后结束交互，避免继续阻塞在终端输入。
                     output.flush();
@@ -101,6 +102,7 @@ public final class ChatCli {
         if (!result.completed()) {
             errors.println("Agent stopped [BUDGET_EXHAUSTED] after " + result.modelCalls()
                     + " model requests and " + result.toolCalls() + " tool calls. This turn was not saved.");
+            if (context.hasWorkspace()) errors.println("工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
             errors.flush();
             return false;
         }
