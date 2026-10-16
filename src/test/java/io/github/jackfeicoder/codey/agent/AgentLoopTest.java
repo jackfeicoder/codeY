@@ -13,6 +13,7 @@ import io.github.jackfeicoder.codey.tool.*;
 import io.github.jackfeicoder.codey.tool.builtin.ReadFileTool;
 import io.github.jackfeicoder.codey.tool.builtin.ListFilesTool;
 import io.github.jackfeicoder.codey.tool.builtin.SearchFileTool;
+import io.github.jackfeicoder.codey.tool.builtin.GrepCodeTool;
 import io.github.jackfeicoder.codey.workspace.WorkspaceBinding;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -106,6 +107,46 @@ class AgentLoopTest {
         assertTrue(output.toString().contains("调用 search_file · src · *Config*.java"));
         assertFalse(output.toString().contains("调用 list_files"));
         assertFalse(output.toString().contains("fixture-body"));
+        session.completeAgentTurn(result.turnMessages());
+        assertEquals(7, session.messages().size());
+    }
+
+    /** 模型直接按内容定位，再用路径与行号阅读；不要求先列目录或搜名称。 */
+    @Test
+    void grepsUnknownFileThenReadsMatchedLocationThroughExistingLoop() throws Exception {
+        Files.createDirectories(directory.resolve("src/auth"));
+        Files.writeString(directory.resolve("src/auth/Account.java"), "class Account {\n  void login() {\n    verifyCredentials();\n  }\n}\n");
+        var requests = new ArrayList<LlmRequest>();
+        var output = new StringWriter();
+        var registry = new ToolRegistry().register(new ListFilesTool()).register(new SearchFileTool())
+                .register(new GrepCodeTool()).register(new ReadFileTool());
+        LlmClient model = request -> {
+            requests.add(request);
+            if (requests.size() == 1) return calls(new ToolCall("grep", "grep_code", "{\"query\":\"login\",\"path\":\"src\",\"filePattern\":\"*.java\"}"));
+            if (requests.size() == 2) {
+                var tool = request.messages().get(request.messages().size() - 1);
+                assertEquals("grep", tool.toolCallId());
+                try {
+                    var body = MAPPER.readTree(MAPPER.readTree(tool.content()).path("output").asText());
+                    var found = body.path("matches").get(0);
+                    assertEquals("src/auth/Account.java", found.path("path").asText());
+                    assertEquals(2, found.path("line").asInt());
+                    return calls(new ToolCall("read", "read_file", MAPPER.createObjectNode().put("path", found.path("path").asText())
+                            .put("startLine", found.path("line").asInt()).put("maxLines", 3).toString()));
+                } catch (java.io.IOException malformed) { throw new AssertionError(malformed); }
+            }
+            assertTrue(request.messages().get(request.messages().size() - 1).content().contains("verifyCredentials"));
+            return answer("Login verifies credentials in Account.login.");
+        };
+        var session = new Session("base");
+        var result = new AgentLoop(model, registry, 20, new DebugPrinter(new PrintWriter(output))).run(session, "分析登录功能", workspace());
+        assertTrue(result.completed());
+        assertEquals(3, result.modelCalls());
+        assertEquals(2, result.toolCalls());
+        assertEquals(4, requests.get(0).tools().size());
+        assertTrue(output.toString().contains("调用 grep_code · src"));
+        assertFalse(output.toString().contains("verifyCredentials"));
+        assertFalse(output.toString().contains("调用 search_file"));
         session.completeAgentTurn(result.turnMessages());
         assertEquals(7, session.messages().size());
     }

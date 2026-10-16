@@ -32,6 +32,8 @@ public final class WorkspaceFiles {
 
     /** 已验证的真实工作区与搜索起点，路径不来自工具的输出。 */
     public record Directory(Path root, Path start) { }
+    /** 内容搜索支持目录或单个普通文件，起点已解析到真实工作区内。 */
+    public record Scope(Path root, Path start, boolean directory) { }
     /** 发现的单个条目；depth 相对起点，直接子项为第一层。 */
     public record Entry(Path path, String type, int depth) { }
     /** false 表示调用方已达到结果或输出上限，立即停止遍历。 */
@@ -55,6 +57,33 @@ public final class WorkspaceFiles {
 
     /** 统一检查 NONE、失效工作区、规范化路径和真实链接目标，不回显绝对位置。 */
     public static Directory directory(ToolContext context, Path path) {
+        Path start = resolve(context, path, ToolResult.ErrorCode.DIRECTORY_NOT_FOUND);
+        if (!Files.isDirectory(start, LinkOption.NOFOLLOW_LINKS)) {
+            throw error(ToolResult.ErrorCode.NOT_A_DIRECTORY, "The search path must be a directory.");
+        }
+        return new Directory(Path.of(context.workspace().path()), start);
+    }
+
+    /** 与目录工具共享范围校验，允许内容搜索缩小到一个已知文件。 */
+    public static Scope scope(ToolContext context, Path path) {
+        Path start = resolve(context, path, ToolResult.ErrorCode.FILE_NOT_FOUND);
+        try {
+            BasicFileAttributes attributes = Files.readAttributes(start, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (!attributes.isDirectory() && !attributes.isRegularFile()) {
+                throw error(ToolResult.ErrorCode.NOT_A_FILE, "Search path must be a directory or regular file.");
+            }
+            return new Scope(Path.of(context.workspace().path()), start, attributes.isDirectory());
+        } catch (NoSuchFileException missing) {
+            throw error(ToolResult.ErrorCode.FILE_NOT_FOUND, "Search path was not found.");
+        } catch (AccessDeniedException denied) {
+            throw error(ToolResult.ErrorCode.FILE_NOT_READABLE, "Search path access was denied.");
+        } catch (IOException failed) {
+            throw error(ToolResult.ErrorCode.FILE_READ_FAILED, "Failed to inspect search path.");
+        }
+    }
+
+    /** 解析起点；不同工具可以保留各自“路径不存在”的错误分类。 */
+    private static Path resolve(ToolContext context, Path path, ToolResult.ErrorCode missingCode) {
         if (context.workspace().mode() == WorkspaceBinding.Mode.NONE) {
             throw error(ToolResult.ErrorCode.WORKSPACE_REQUIRED, "This tool requires a project workspace.");
         }
@@ -71,16 +100,15 @@ public final class WorkspaceFiles {
             if (!start.startsWith(root)) {
                 throw error(ToolResult.ErrorCode.PATH_OUTSIDE_WORKSPACE, "Directory resolves outside the workspace.");
             }
-            if (!Files.isDirectory(start, LinkOption.NOFOLLOW_LINKS)) {
-                throw error(ToolResult.ErrorCode.NOT_A_DIRECTORY, "The search path must be a directory.");
-            }
-            return new Directory(root, start);
+            return start;
         } catch (NoSuchFileException missing) {
-            throw error(ToolResult.ErrorCode.DIRECTORY_NOT_FOUND, "The directory was not found.");
+            throw error(missingCode, "Search path was not found.");
         } catch (AccessDeniedException denied) {
-            throw error(ToolResult.ErrorCode.DIRECTORY_NOT_READABLE, "Directory access was denied.");
+            throw error(missingCode == ToolResult.ErrorCode.FILE_NOT_FOUND ? ToolResult.ErrorCode.FILE_NOT_READABLE
+                    : ToolResult.ErrorCode.DIRECTORY_NOT_READABLE, "Search path access was denied.");
         } catch (IOException failed) {
-            throw error(ToolResult.ErrorCode.DIRECTORY_READ_FAILED, "Failed to inspect the directory.");
+            throw error(missingCode == ToolResult.ErrorCode.FILE_NOT_FOUND ? ToolResult.ErrorCode.FILE_READ_FAILED
+                    : ToolResult.ErrorCode.DIRECTORY_READ_FAILED, "Failed to inspect search path.");
         }
     }
 

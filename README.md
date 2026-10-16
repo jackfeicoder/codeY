@@ -6,9 +6,9 @@
 
 ## 当前进度
 
-当前已完成多模型 Profile 配置、消息模型、基础提示词、非流式模型调用、本地会话保存/恢复，以及基础 Agent 工具循环。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。SSE、内容搜索/写入/命令工具、长期记忆和 MCP 尚待实现；已使用本地模拟模型验证，真实厂商兼容性需另行验证。
+当前已完成多模型 Profile 配置、消息模型、基础提示词、非流式模型调用、本地会话保存/恢复，以及基础 Agent 工具循环。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。SSE、写入/命令工具、长期记忆和 MCP 尚待实现；已使用本地模拟模型验证，真实厂商兼容性需另行验证。
 
-工作区会话已注册 `list_files`、`search_file` 与 `read_file`：模型可浏览目录，或按文件名/路径模式直接定位文件，再读取内容。工具描述通过结构化 `tools` 字段发送，由 AgentLoop 执行并回填结果，继续请求最终回答。默认每个任务最多请求模型 20 次，最后一次禁用工具用于收尾；完成的工具消息组随会话保存，恢复时不自动重放。说明见 [文件定位](docs/architecture.md#search-file)、[目录工具](docs/architecture.md#list-files)、[读文件工具](docs/architecture.md#read-file) 和 [Agent 循环](docs/architecture.md#agent-loop)。
+工作区会话已注册 `list_files`、`search_file`、`grep_code` 与 `read_file`：模型可浏览目录、按名称定位或按正文关键词搜索，再读取内容。工具描述通过结构化 `tools` 字段发送，由 AgentLoop 执行并回填结果，继续请求最终回答。默认每个任务最多请求模型 20 次，最后一次禁用工具用于收尾；完成的工具消息组随会话保存，恢复时不自动重放。说明见 [正文搜索](docs/architecture.md#grep-code)、[文件定位](docs/architecture.md#search-file)、[目录工具](docs/architecture.md#list-files)、[读文件工具](docs/architecture.md#read-file) 和 [Agent 循环](docs/architecture.md#agent-loop)。
 
 控制台显示简洁执行进度：调用轮次、工具名称和涉及的文件，最后展示模型回答；工具失败时补充错误码。聊天中输入 `exit` 返回会话列表，列表中 `exit` 退出；`/exit` 随时退出程序。
 
@@ -27,7 +27,7 @@
 | [模型对话模块](#module-llm) | 已实现：非流式 Chat Completions |
 | [CLI 交互模块](#module-cli) | 已实现：启动选择、输入、分页与会话命令 |
 | [会话管理模块](#module-session) | 已实现：内存历史、本地保存/恢复与标题 |
-| [工具模块](#module-tool) | 已实现基础结构、list_files/search_file/read_file，已接入模型和 CLI |
+| [工具模块](#module-tool) | 已实现基础结构、list_files/search_file/grep_code/read_file，已接入模型和 CLI |
 | [Agent 执行模块](#module-agent) | 已实现：工具循环、轮次预算、中断与完成状态 |
 | [上下文模块](#module-context) | 待实现：请求组织、预算与压缩 |
 | [记忆模块](#module-memory) | 待实现：长期事实保存与召回 |
@@ -291,7 +291,7 @@ Main 解析参数
   ├─ --help/--version：直接展示
   ├─ --list-models/--check-config：只做本地配置操作
   ├─ --prompt：临时 Session + 无工作区 → AgentLoop → 展示回答
-  └─ 无参数/--chat：注册 list_files/search_file/read_file → SessionLauncher → ChatCli.answer → AgentLoop
+  └─ 无参数/--chat：注册 list_files/search_file/grep_code/read_file → SessionLauncher → ChatCli.answer → AgentLoop
 ```
 
 **实现方式与边界**：列表模式的普通文本匹配序号、完整标题或唯一 ID 前缀；聊天模式的普通文本就是问题，切换用 `/resume`。最近每批 10 条，分页持有稳定列表快照，`/sessions` 才刷新；重名与前缀冲突展示候选项。查看列表和历史预览不要求模型凭证，准备继续时才校验。交互终端使用 JLine 3.30.17 与 JNI provider，Tab 唯一匹配直接补全，多个匹配进入菜单，方向键或 Tab 选择、Enter 确认，再 Enter 执行。Ctrl+C 取消当前编辑，EOF 保存退出。路径/标题等辅助输入不提示命令，不启用 shell 转义或 `!` 历史展开。管道/IDE 无原生控制台时使用 UTF-8 逐行输入，不启用补全。未知斜杠命令不发模型请求。命令表和启动例子见 [构建与启动](#build-run)。
@@ -332,9 +332,9 @@ CLI 的 `/clear` 保存旧会话并创建新 ID，沿用工作区/模型，旧�
 
 <a id="module-tool"></a>
 
-### 8. 工具模块：tool（目录浏览、文件定位与读取已实现）
+### 8. 工具模块：tool（目录浏览、文件定位、正文搜索与读取已实现）
 
-**功能**：将模型可见定义与 Java 执行分开，统一注册、查找、参数校验入口、工作区检查、错误结果和输出上限。`list_files` 浏览目录结构，`search_file` 按名称/路径模式定位文件，`read_file` 阅读已知文件内容。三个工具各自实现 Tool，互不调用，由模型按任务选择，均已接入工作区会话的工具循环。
+**功能**：将模型可见定义与 Java 执行分开，统一注册、查找、参数校验入口、工作区检查、错误结果和输出上限。`list_files` 浏览目录结构，`search_file` 按名称/路径模式定位文件，`grep_code` 按正文关键词定位匹配行，`read_file` 阅读已知文件内容。四个工具各自实现 Tool，互不调用，由模型按任务选择，均已接入工作区会话的工具循环。
 
 **涉及文件**：
 
@@ -351,9 +351,11 @@ CLI 的 `/clear` 保存旧会话并创建新 ID，沿用工作区/模型，旧�
 | [builtin/ReadFileTool.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/ReadFileTool.java) | read_file 定义、参数/路径检查、UTF-8 有界分页读取及完整 JSON 输出 |
 | [builtin/ListFilesTool.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/ListFilesTool.java) | list_files 参数与目录条目输出，调用共享遍历器浏览目录结构 |
 | [builtin/SearchFileTool.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/SearchFileTool.java) | search_file 参数、名称/路径匹配和有界路径结果，不读取正文 |
+| [builtin/GrepCodeTool.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/GrepCodeTool.java) | grep_code 参数、逐行字面匹配、文件跳过/预算统计和完整匹配结果 |
 | [filesystem/WorkspaceFiles.java](src/main/java/io/github/jackfeicoder/codey/tool/filesystem/WorkspaceFiles.java) | 目录工具共用的工作区路径校验、有界排序/遍历、忽略和链接规则 |
 | [filesystem/FileGlob.java](src/main/java/io/github/jackfeicoder/codey/tool/filesystem/FileGlob.java) | 跨平台名称/路径模式匹配，支持 *、? 和独立的 ** 目录段 |
-| [builtin/package-info.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/package-info.java) | 内置工具包说明；内容搜索、修改和命令工具后续加入 |
+| [filesystem/Utf8TextReader.java](src/main/java/io/github/jackfeicoder/codey/tool/filesystem/Utf8TextReader.java) | read_file 与 grep_code 共用严格 UTF-8/BOM/换行、有界行读取和实际字节预算 |
+| [builtin/package-info.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/package-info.java) | 内置工具包说明；修改和命令工具后续加入 |
 
 **调用流程**：
 
@@ -407,7 +409,24 @@ ToolCall("search_file", {pattern, path?, maxResults?, caseSensitive?})
 
 `AgentLoop.java` 精确匹配任意层同名文件；`*Config*.java` 按名称模式定位；`**/prompts/*.md` 定位提示词。模式不含 `/` 时只匹配文件名，包含 `/` 时相对搜索起点匹配；`*` 不跨目录，`?` 匹配一个 Unicode 字符，独立的 `**` 目录段可匹配零层或多层。Windows 的反斜杠模式也会统一为 `/`。不做模糊词义、正文或正则搜索，`[]` 和 `{}` 按字面字符处理。需要名称包含 Config 时显式写 `*Config*`，不会把 `Config` 自动改成包含匹配。
 
-结果 `files` 始终是工作区相对路径，可直接交给 read_file；目录、发现的符号链接和 junction 不作为命中，也不进入其目标。扫描上限/忽略规则与 list_files 共用；从搜索起点遍历到目录末端，底层使用显式栈避免受 Java 递归调用层数影响；条数、输出或扫描上限触发时标记 `truncated`，`limitReason` 为 maxResults/outputLimit/scanLimit。空结果仅说明已检查范围内没有匹配。成功输出保持完整 JSON。共享底层能力而不共享工具职责，不强制“先列目录才能查名称”。详见 [文件定位工具](docs/architecture.md#search-file)。后续 `grep_code` 单独负责文件内容搜索。
+结果 `files` 始终是工作区相对路径，可直接交给 read_file；目录、发现的符号链接和 junction 不作为命中，也不进入其目标。扫描上限/忽略规则与 list_files 共用；从搜索起点遍历到目录末端，底层使用显式栈避免受 Java 递归调用层数影响；条数、输出或扫描上限触发时标记 `truncated`，`limitReason` 为 maxResults/outputLimit/scanLimit。空结果仅说明已检查范围内没有匹配。成功输出保持完整 JSON。共享底层能力而不共享工具职责，不强制“先列目录才能查名称”。详见 [文件定位工具](docs/architecture.md#search-file)。`grep_code` 独立负责文件内容搜索。
+
+**正文搜索的参数与流程**：`query` 必填，最多 256 个字符的单行字面文本；`path` 默认 `.`，支持目录或单个文件；`filePattern` 默认 `*`，只用于文件范围筛选；`caseSensitive` 默认 false，同时控制正文和文件模式大小写；`maxResults` 默认 50、最大 500。不设置人为递归深度、不执行 Shell，也不做正则、语义相似度或函数/变量识别。模型负责从问题中选择 login、auth 等关键词。
+
+```text
+ToolCall("grep_code", {query, path?, filePattern?, caseSensitive?, maxResults?})
+  → ToolExecutor → GrepCodeTool 校验参数 → WorkspaceFiles.scope 确认目录或文件范围
+  → 目录：共享遍历器 + FileGlob 筛选；单文件：直接进入读取
+  → Utf8TextReader 有界逐行读取 → 字符串包含匹配，每行最多返回一次
+  → JSON {matches:[{path,line,text}], returnedMatches, searchedFiles, skippedFiles, ...}
+  → 原调用 ID 的 tool 消息 → 模型判断相关性，再按需 read_file 阅读连续上下文
+```
+
+工具互不调用：grep_code 可直接从目录搜索，不要求先 search_file；名称定位只返回路径，正文搜索返回路径/行号/匹配行，read_file 返回连续文本。文件筛选模式相对搜索目录，单文件请求则匹配其文件名。结果保留原文和工作区相对路径，行号从 1 开始。
+
+每次最多扫描 10000 个目录项、检查 1000 个候选文件、实际读取 32 MiB；单文件最多 4 MiB、单行最多 16384 个 UTF-16 单元，输出预算默认 16000 个 Unicode 码点。`scannedFiles` 是开始检查的候选文件数，`searchedFiles` 是完整成功扫描的文本文件数，`partialFiles` 是预算提前停止的文件数；被文件模式排除或忽略目录内的文件不计入候选统计。`readBytes` 包含 UTF-8 解码器预读，精确耗尽总预算时停止，不额外探测 EOF。
+
+非法 UTF-8、NUL、超大/超长行及读取问题按文件跳过，计入 `skippedFiles/skippedReasons`；发生文件错误时撤回该文件此前暂存的匹配。`truncated` 仅表示预算导致提前停止，`limitReason` 为 maxResults/outputLimit/fileLimit/byteLimit/scanLimit；`complete=false` 表示有截断或候选文件跳过。空匹配只说明已检查区域未命中。成功输出始终保持完整 JSON，第一条完整匹配行放不下时明确报错。匹配与预算边界见 [正文搜索工具](docs/architecture.md#grep-code)。
 
 <a id="module-agent"></a>
 
@@ -557,7 +576,7 @@ codeY/
 |---|---|---|
 | M0 | 工程、入口与设计文档 | 已完成 |
 | M1 | LLM 调用与 SSE 流式输出 | 进行中：配置、消息、非流式调用与连续对话已完成 |
-| M2 | Agent 循环与只读工具 | list_files、search_file、read_file、tools 请求、基础循环与工具历史已完成；grep_code 内容搜索待实现 |
+| M2 | Agent 循环与只读工具 | list_files、search_file、grep_code、read_file、tools 请求、基础循环与工具历史已完成；正则与语义检索后续扩展 |
 | M3 | 修改代码、执行命令与验证闭环 | 待实现 |
 | M4 | 上下文预算与历史压缩 | 待实现 |
 | M5 | 会话恢复与项目记忆 | 文本/工具对话保存恢复已实现；执行中恢复与长期记忆待实现 |
@@ -613,7 +632,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --no-workspace
 java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --resume "项目开发"
 ```
 
-构建生成的 JAR 已包含 Jackson 与 JLine 运行依赖，直接使用 `java -jar` 即可。`--prompt` 执行无工作区任务；`--chat` 每轮发送基础提示词、成功历史和当前问题，工作区会话提供 list_files/search_file/read_file。两种入口展示简洁调用进度，都会向选中平台发送真实请求；输出被截断时提示 `finish_reason=length`。
+构建生成的 JAR 已包含 Jackson 与 JLine 运行依赖，直接使用 `java -jar` 即可。`--prompt` 执行无工作区任务；`--chat` 每轮发送基础提示词、成功历史和当前问题，工作区会话提供 list_files/search_file/grep_code/read_file。两种入口展示简洁调用进度，都会向选中平台发送真实请求；输出被截断时提示 `finish_reason=length`。
 
 启动列表接受已显示序号、完整标题或唯一 ID 前缀（至少 8 位）。进入会话后普通文本就是问题；重名/前缀冲突会显示候选项。每行一个问题，终端使用 Console 编码，重定向输入输出使用 UTF-8。
 
@@ -644,7 +663,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --resume "项目开发"
 java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/codeY --title 了解项目
 ```
 
-进入后输入“请看看配置功能是怎么实现的”。模型可先用 `list_files` 了解结构，或用 `search_file` 按名称定位，再用 `read_file` 阅读；目录探索有深度、扫描量与输出限制，需要时继续查看具体子目录。当前没有按内容搜索、修改文件或执行命令的工具。旧会话保留旧系统提示词，`/new` 或 `/clear` 可加载最新工具使用指导。
+进入后输入“请看看配置功能是怎么实现的”。模型可用 `list_files` 了解结构，或用 `search_file` 按名称、`grep_code` 按正文定位，再用 `read_file` 阅读；目录探索有深度、扫描量与输出限制，需要时继续查看具体子目录。当前支持字面内容搜索，尚无修改文件或执行命令的工具。旧会话保留旧系统提示词，`/new` 或 `/clear` 可加载最新工具使用指导。
 
 基础提示词位于 [src/main/resources/prompts/base.md](src/main/resources/prompts/base.md)。PromptLoader 从 classpath 按 UTF-8 读取全文，Main 将其作为 system 消息注入请求；所有模型 Profile 共用。修改提示词后执行 `mvn package` 更新 JAR。资源缺失或空白时会在发送请求前报告提示词错误。设计与后续扩展见 [Prompt 模块](docs/architecture.md#prompt-design)。
 
@@ -660,7 +679,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/c
 
 ## 验证与文档维护
 
-最近一次完整构建 `mvn verify` 共 415 项测试通过，无失败、错误或跳过。文件定位模块现有 42 项真实目录测试与 1 项 Agent 组合测试，覆盖名称/路径匹配、大小写/Unicode、无正文读取、工作区/链接边界、旧深度参数拒绝、超过 20 层的定位，以及条数/扫描/输出限制；既有目录工具 30 项测试全部通过共享遍历回归。另通过 7 组本地 HTTP JAR 场景：生产注册与搜索→读取→回答/保存、跨进程恢复不重放、无工作区单次/会话隐藏工具、越界错误回填、结果条数限制、真实仓库十层 Java 路径和提示词目录发现、超过 20 层定位且 list_files 仍保留深度控制。测试配置与会话全部隔离，没有调用真实厂商。此前运行参数、工具、模型切换、终端补全与 CMD 启动验证记录保留在设计文档。 空最终回答处理新增 7 项测试，覆盖工具后空正文/纯空白、预算末轮和 length 空正文、CLI 错误提示及后续输入；打包 HTTP 场景另验证空回答不保存、429 不自动重试与成功历史保留。
+最近一次完整构建 `mvn verify` 共 458 项测试通过，无失败、错误或跳过。正文搜索新增 42 项临时文件测试与 1 项 Agent 组合测试，覆盖字面/大小写/Unicode 匹配、目录与单文件、范围过滤、编码/BOM/换行、坏文件匹配撤回、超过 20 层目录、扫描/候选文件/总字节/结果/输出预算及路径/链接/中断边界；共享读取与范围重构通过既有读文件 36 项、目录工具 30 项、名称定位 42 项回归。另通过 9 组本地 HTTP JAR 验证：生产注册与 grep→按行读取→回答/保存、跨进程恢复不重放、单文件范围、无工作区单次/会话隐藏工具、跳过统计、条数截断、越界错误、真实 src 文件搜索和深层目录正文搜索。配置与会话隔离，未读取真实 .env 或调用真实厂商。此前功能和构建验证记录保留在设计文档。
 
 后续每完成或调整模块，同步维护模块导航和对应章节的四项内容：
 

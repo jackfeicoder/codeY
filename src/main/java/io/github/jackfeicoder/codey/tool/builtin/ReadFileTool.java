@@ -11,23 +11,16 @@ import io.github.jackfeicoder.codey.tool.ToolDefinition;
 import io.github.jackfeicoder.codey.tool.ToolException;
 import io.github.jackfeicoder.codey.tool.ToolResult;
 import io.github.jackfeicoder.codey.workspace.WorkspaceBinding;
+import io.github.jackfeicoder.codey.tool.filesystem.Utf8TextReader;
 
-import java.io.FilterInputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.PushbackReader;
-import java.nio.channels.Channels;
 import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CodingErrorAction;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Set;
 
@@ -43,9 +36,9 @@ public final class ReadFileTool implements Tool {
     /** 模型参数不能一次要求超过 500 行。 */
     public static final int MAX_LINES = 500;
     /** 首版仅接受不超过 4 MiB 的文件，也限制流的实际读取量以应对文件增长。 */
-    public static final int MAX_FILE_BYTES = 4 * 1024 * 1024;
+    public static final int MAX_FILE_BYTES = Utf8TextReader.MAX_FILE_BYTES;
     /** 一行最多保留的 UTF-16 单元数，超长行明确报错而非无界构造字符串。 */
-    public static final int MAX_LINE_CHARS = 16_384;
+    public static final int MAX_LINE_CHARS = Utf8TextReader.MAX_LINE_CHARS;
     /** 唯一支持的参数名称，拒绝模型额外指定工作区等宿主信息。 */
     private static final Set<String> ARGUMENT_NAMES = Set.of("path", "startLine", "maxLines");
     /** JSON 用于 schema 和输出正文，初始化后不更改配置。 */
@@ -105,14 +98,8 @@ public final class ReadFileTool implements Tool {
             if (!Files.isReadable(file)) {
                 throw error(ToolResult.ErrorCode.FILE_NOT_READABLE, "File is not readable.");
             }
-            // 打开已解析路径，不跟随打开瞬间出现的最终符号链接；不是完整文件系统沙箱。
-            try (var channel = Files.newByteChannel(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
-                 InputStream stream = new LimitedInputStream(Channels.newInputStream(channel));
-                 PushbackReader reader = new PushbackReader(new InputStreamReader(stream,
-                         StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-                                 .onUnmappableCharacter(CodingErrorAction.REPORT)), 1)) {
-                int first = reader.read(); // 只移除文件开头的 UTF-8 BOM，内容中的 BOM 原样保留。
-                if (first != -1 && first != '\uFEFF') reader.unread(first);
+            // 共享读取器统一执行严格 UTF-8、BOM、实际字节和单行限制，不调用其他工具。
+            try (Utf8TextReader reader = Utf8TextReader.open(file)) {
                 String displayPath = root.relativize(file).toString().replace('\\', '/');
                 return readPage(reader, displayPath, options, context.maxOutputChars());
             }
@@ -186,17 +173,17 @@ public final class ReadFileTool implements Tool {
     private record ReadOptions(Path relativePath, int startLine, int maxLines) { }
 
     /** 只保留请求页，不读取整文件进内存；输出容量不足时下一次从未返回行继续。 */
-    private static String readPage(PushbackReader reader, String path, ReadOptions options, int outputLimit)
+    private static String readPage(Utf8TextReader reader, String path, ReadOptions options, int outputLimit)
             throws IOException, InterruptedException {
         ArrayNode lines = MAPPER.createArrayNode(); // 每项保存实际文件行号和原始行文本。
         for (long skipped = 1; skipped < options.startLine(); skipped++) {
             checkInterrupted();
-            if (readLine(reader) == null) return checkedOutput(path, options.startLine(), lines, false, outputLimit);
+            if (reader.readLine() == null) return checkedOutput(path, options.startLine(), lines, false, outputLimit);
         }
         boolean hasMore = false;
         for (int index = 0; index < options.maxLines(); index++) {
             checkInterrupted();
-            String line = readLine(reader);
+            String line = reader.readLine();
             if (line == null) break;
             lines.addObject().put("line", (long) options.startLine() + index).put("text", line);
             // 同时计入 EOF/非 EOF 两种元数据的长度，避免最后一次标志变化导致 JSON 被截断。
@@ -210,33 +197,10 @@ public final class ReadFileTool implements Tool {
                 break;
             }
             if (index + 1 == options.maxLines()) {
-                int next = reader.read(); // 仅查看是否还有字符，不预先读取下一条超长行。
-                hasMore = next != -1;
-                if (next != -1) reader.unread(next);
+                hasMore = reader.hasMore(); // 不预先读取下一条超长行。
             }
         }
         return checkedOutput(path, options.startLine(), lines, hasMore, outputLimit);
-    }
-
-    /** 有界逐字符读取，兼容 LF/CRLF/CR，末尾换行不产生额外空行。 */
-    private static String readLine(PushbackReader reader) throws IOException, InterruptedException {
-        StringBuilder text = new StringBuilder();
-        while (true) {
-            if ((text.length() & 255) == 0) checkInterrupted();
-            int current = reader.read();
-            if (current == -1) return text.isEmpty() ? null : text.toString();
-            if (current == '\n') return text.toString();
-            if (current == '\r') {
-                int next = reader.read();
-                if (next != -1 && next != '\n') reader.unread(next);
-                return text.toString();
-            }
-            if (current == 0) throw error(ToolResult.ErrorCode.NOT_TEXT_FILE, "File contains a NUL character.");
-            if (text.length() >= MAX_LINE_CHARS) {
-                throw error(ToolResult.ErrorCode.LINE_TOO_LONG, "A line exceeds the read_file character limit.");
-            }
-            text.append((char) current);
-        }
     }
 
     /** 判断完整 JSON 是否能放进宿主的码点预算，包括 JSON 转义字符。 */
@@ -281,38 +245,4 @@ public final class ReadFileTool implements Tool {
         return new ToolException(code, message);
     }
 
-    /** 实际字节读取上限，文件在元数据检查后增长时也不会无限读取。 */
-    private static final class LimitedInputStream extends FilterInputStream {
-        /** 包括跳过前文与 UTF-8 解码预读在内的已读取字节数。 */
-        private long consumed;
-
-        /** 包装已打开的文件通道，关闭该流会关闭底层流。 */
-        private LimitedInputStream(InputStream input) { super(input); }
-
-        /** 超过上限时拒绝，恰好等于上限的文件仍可探测 EOF。 */
-        @Override
-        public int read() throws IOException {
-            int value = in.read();
-            if (value != -1) count(1);
-            return value;
-        }
-
-        /** 最多多读一个字节确认越界，不分配与文件大小成比例的缓冲。 */
-        @Override
-        public int read(byte[] bytes, int offset, int length) throws IOException {
-            if (length == 0) return 0;
-            int allowed = (int) Math.min(length, MAX_FILE_BYTES - consumed + 1);
-            int read = in.read(bytes, offset, allowed);
-            if (read > 0) count(read);
-            return read;
-        }
-
-        /** 统一计数，不通过 FilterInputStream.read 导致重复计数。 */
-        private void count(int amount) {
-            consumed += amount;
-            if (consumed > MAX_FILE_BYTES) {
-                throw error(ToolResult.ErrorCode.FILE_TOO_LARGE, "File grew beyond the 4 MiB read_file limit.");
-            }
-        }
-    }
 }

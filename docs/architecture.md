@@ -1,6 +1,6 @@
 # CodeY 架构设计
 
-> 版本：0.1，日期：2026-10-15。当前已实现配置、消息、基础提示词、非流式调用、可选工作区、本地会话管理、list_files、search_file、read_file、结构化 tools 请求与基础 AgentLoop。完成的工具消息组可保存和恢复；执行中恢复、SSE、内容搜索/写入/命令工具仍待实现。验证使用本地替身与临时文件，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
+> 版本：0.1，日期：2026-10-16。当前已实现配置、消息、基础提示词、非流式调用、可选工作区、本地会话管理、list_files、search_file、grep_code、read_file、结构化 tools 请求与基础 AgentLoop。完成的工具消息组可保存和恢复；执行中恢复、SSE、写入/命令工具仍待实现。验证使用本地替身与临时文件，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
 
 ## 阅读导航
 
@@ -217,7 +217,7 @@ sequenceDiagram
 
 ### 工具
 
-工具按职责分为 read_file（内容阅读）、list_files（目录浏览）、search_file（名称/路径定位），后续 grep_code（内容搜索）、write_file、execute_command。read_file 默认分页，返回路径、行号、截断信息。工具输出保留执行元数据，与发给模型的截断文本分开。
+工具按职责分为 read_file（内容阅读）、list_files（目录浏览）、search_file（名称/路径定位），grep_code（字面内容搜索）；后续 write_file、execute_command。read_file 默认分页，返回路径、行号、截断信息。工具输出保留执行元数据，与发给模型的截断文本分开。
 
 工具定义、注册与执行分开。当前 ToolResult 保存调用 ID、工具名称、status、errorCode、output、durationMillis 与 truncated；exitCode、artifacts、路径策略及命令审批随具体工具接入。基础执行器只解析 JSON 对象，并调用工具的显式校验方法。
 
@@ -336,7 +336,7 @@ Chat Completions 适配器已显式映射 role.wireValue()、tool_calls、tool_c
 
 ### 已实现的工具模块骨架与描述
 
-> 基础模块与 list_files/search_file/read_file 已支持独立调用，并已在工作区 CLI 会话通过 tools 字段和 AgentLoop 接通。普通聊天筛掉工作区工具；模型客户端只编解码协议，执行由 Agent 层调度。
+> 基础模块与 list_files/search_file/grep_code/read_file 已支持独立调用，并已在工作区 CLI 会话通过 tools 字段和 AgentLoop 接通。普通聊天筛掉工作区工具；模型客户端只编解码协议，执行由 Agent 层调度。
 
 ```text
 tool/
@@ -407,9 +407,9 @@ ToolResult 的基础失败类别包括 UNKNOWN_TOOL、INVALID_ARGUMENTS、WORKSP
 
 当前没有通用 JSON Schema 校验器：Tool 必须显式实现 validateArguments，schema 用于声明和发送，不能假设定义 schema 就自动完成业务校验。执行器为同步串行调用，durationMillis 只是测量值；工具超时、审批、取消令牌、并行调度与审计事件尚未实现。接 MCP 的复杂 schema 时再引入完整校验能力。
 
-ReadFileTool 已实现定义、参数/路径校验与有界读取；LlmRequest 与协议适配器已发送 tools，AgentLoop 回填 assistant/tool 后继续请求，v2 SessionSnapshot 保存完整成功工具轮次。list_files 已接入目录探索，search_file 已接入文件名/路径定位；grep_code 内容搜索、统一权限策略后续加入。
+ReadFileTool 已实现定义、参数/路径校验与有界读取；LlmRequest 与协议适配器已发送 tools，AgentLoop 回填 assistant/tool 后继续请求，v2 SessionSnapshot 保存完整成功工具轮次。list_files 已接入目录探索，search_file 已接入文件名/路径定位；grep_code 已支持正文定位；统一权限策略后续加入。
 
-验证：工具基础结构有 23 项、读文件有 36 项、Agent 首版新增 35 项；进度/exit 3 项、模型切换/默认偏好 19 项、共享配置目录 3 项，当前完整 mvn verify 共 415 项通过，无失败或跳过。仅使用本地模型替身与临时测试文件。
+验证：工具基础结构有 23 项、读文件有 36 项、Agent 首版新增 35 项；进度/exit 3 项、模型切换/默认偏好 19 项、共享配置目录 3 项，当前完整 mvn verify 共 458 项通过，无失败或跳过。仅使用本地模型替身与临时测试文件。
 
 <a id="read-file"></a>
 
@@ -536,7 +536,7 @@ System.out.println(result.output());
 | DIRECTORY_NOT_READABLE / DIRECTORY_READ_FAILED | 无读取权限或其他目录 I/O 失败 |
 | OUTPUT_LIMIT_TOO_SMALL / INTERRUPTED | 输出容不下完整数据或线程中断 |
 
-提示词 base.md 增加“未知路径时先 list_files，再 read_file；结果截断时选择更具体目录”的行为指导，参数说明仍以工具 schema 为准。新建会话使用新版提示词；恢复旧会话继续使用原快照，但请求 tools 仍按实际工作区动态提供当前注册的三个工具。
+提示词 base.md 增加“未知路径时先 list_files，再 read_file；结果截断时选择更具体目录”的行为指导，参数说明仍以工具 schema 为准。新建会话使用新版提示词；恢复旧会话继续使用原快照，但请求 tools 仍按实际工作区动态提供当前注册的四个工具。
 
 测试：[ListFilesToolTest.java](../src/test/java/io/github/jackfeicoder/codey/tool/builtin/ListFilesToolTest.java) 使用真实临时目录覆盖默认/显式参数、顺序/深度/相对路径、忽略规则、空目录/恰好达到条数、Unicode/输出预算、非法参数、路径/链接边界、扫描上限与中断；AgentLoopTest 验证列目录 → 读取发现的文件 → 最终回答的三次模型请求及历史完整性。
 
@@ -546,14 +546,14 @@ System.out.println(result.output());
 
 ### 已实现的文件定位工具：search_file
 
-职责是按文件名或路径模式找到文件位置，不读取正文、不匹配代码内容。它采用之前讨论的 glob 文件定位语义，统一命名为 `search_file`，不另建同义的 `glob_files`、`search_files` 或 `search_code`。后续 `grep_code` 独立负责文件内容搜索。
+职责是按文件名或路径模式找到文件位置，不读取正文、不匹配代码内容。它采用之前讨论的 glob 文件定位语义，统一命名为 `search_file`，不另建同义的 `glob_files`、`search_files` 或 `search_code`。`grep_code` 独立负责文件内容搜索。
 
 | 工具 | 解决的问题 | 结果 |
 |---|---|---|
 | list_files | 项目目录是什么结构 | 文件/目录条目、类型、层级 |
 | search_file | 某个名称或路径模式对应哪些文件 | 匹配的工作区相对文件路径 |
 | read_file | 已知文件的具体内容是什么 | 连续文本行、行号与分页信息 |
-| grep_code（待实现） | 某段文本在哪些代码位置出现 | 路径、行号和匹配行 |
+| grep_code | 某段文本在哪些代码位置出现 | 路径、行号和匹配行 |
 
 实现文件与依赖：
 
@@ -606,9 +606,73 @@ System.out.println(result.output());
 
 成功输出预留最坏扫描统计和截断字段，始终保持完整 JSON；元数据或第一条完整路径放不下时返回 OUTPUT_LIMIT_TOO_SMALL。非法模式/参数使用 INVALID_ARGUMENTS；工作区、目录越界、缺失、非目录与读取错误复用现有错误码。共享遍历器保留线程中断，权限/读取失败不伪装为空结果。路径检查仍不等于完整操作系统沙箱。
 
-Main 注册三个工具，NONE 工作区全部隐藏。工具说明仍由 SearchFileTool.definition → Registry → LlmRequest.tools → ChatCompletionsClient 编码，无需增加工具说明 Markdown。base.md 仅补充“按名称定位优先 search_file，阅读正文用 read_file”的行为指导；旧会话继续使用提示词快照，`/new` 或 `/clear` 采用新版指导。控制台只增加搜索范围和模式摘要，例如 `[第 1 轮] 调用 search_file · src · *Config*.java`，不打印搜索结果正文。
+Main 注册四个工具，NONE 工作区全部隐藏。工具说明仍由 SearchFileTool.definition → Registry → LlmRequest.tools → ChatCompletionsClient 编码，无需增加工具说明 Markdown。base.md 仅补充“按名称定位优先 search_file，阅读正文用 read_file”的行为指导；旧会话继续使用提示词快照，`/new` 或 `/clear` 采用新版指导。控制台只增加搜索范围和模式摘要，例如 `[第 1 轮] 调用 search_file · src · *Config*.java`，不打印搜索结果正文。
 
 验证：SearchFileToolTest 现有 42 项，AgentLoopTest 新增 1 项“按名称定位 → 读取 → 回答及进度/历史”组合测试；原 ListFilesToolTest 30 项全部通过共享遍历回归。完整 `mvn verify` 共 408 项通过，无失败、错误或跳过。另通过 7 组本地 HTTP JAR 验证：生产工具注册与模型驱动搜索/读取/保存、跨进程恢复不重放、无工作区的单次/会话隐藏工具、越界错误回填、条数截断结果、真实仓库十层 Java 文件定位与目录工具资源发现、超过二十层查找与目录展示深度回归。配置/会话隔离，使用本地模型替身；真实仓库只读取路径元数据，不读取真实 .env，也不调用真实厂商。
+
+<a id="grep-code"></a>
+
+### 已实现的正文搜索工具：grep_code
+
+用途：模型从用户问题提炼 login、auth、API_KEY 等关键词，工具在所选范围内逐行做字面包含匹配，返回路径、行号和匹配行。函数名、变量、注释与字符串中的相同文本都可能命中，相关性由模型判断；不做语义相似度、函数识别或正则展开。无需先调用 search_file；该工具可直接搜索目录，也可搜索已知的单个文件。
+
+| 文件 | 职责 |
+|---|---|
+| [GrepCodeTool.java](../src/main/java/io/github/jackfeicoder/codey/tool/builtin/GrepCodeTool.java) | 参数/schema、逐行匹配、文件失败回退、预算与结构化结果 |
+| [WorkspaceFiles.java](../src/main/java/io/github/jackfeicoder/codey/tool/filesystem/WorkspaceFiles.java) | scope 支持目录或文件；与目录浏览/名称定位共用真实路径校验与显式栈遍历 |
+| [FileGlob.java](../src/main/java/io/github/jackfeicoder/codey/tool/filesystem/FileGlob.java) | filePattern 筛选候选文件，语义与 search_file 的名称/路径模式一致 |
+| [Utf8TextReader.java](../src/main/java/io/github/jackfeicoder/codey/tool/filesystem/Utf8TextReader.java) | 与 ReadFileTool 共用严格 UTF-8、BOM、换行处理、4 MiB/单行限制；ByteBudget 额外约束搜索的总读取字节 |
+| [GrepCodeToolTest.java](../src/test/java/io/github/jackfeicoder/codey/tool/builtin/GrepCodeToolTest.java) | 正文/名称职责区分、范围/编码/链接/参数与各预算边界测试 |
+
+工具各自实现 Tool，互不调用。遍历器负责枚举、文本读取器负责解码和有界行读取，GrepCodeTool 负责匹配及结果。底层只使用 Java NIO/文本流/字符串包含匹配，不启动 Shell、不依赖 grep/rg 或外部索引。Main 注册四个工具，AgentLoop 和 LLM 适配器沿用已有调度协议，不新增 grep 专用循环。
+
+| 参数 | 默认 / 范围 | 规则 |
+|---|---|---|
+| query | 必填，最多 256 个 Unicode 字符 | 非空白单行字面文本，不 strip 首尾空格；拒绝换行、NUL 等控制字符，允许查询内的制表符 |
+| path | `.` | 工作区相对目录或普通文件；不接受 maxDepth，没有人为递归深度限制 |
+| filePattern | `*` | 限定候选文件。相对所选目录匹配；单文件范围则匹配该文件名 |
+| caseSensitive | false | 同时控制正文匹配和文件模式大小写；正文使用 Locale.ROOT 大小写转换后包含匹配，结果保留原文 |
+| maxResults | 50 / 1–500 | 最多返回多少条匹配行；同一行重复出现关键词只返回一次 |
+
+例如模型请求：
+
+```json
+{"query":"login","path":"src","filePattern":"*.java","caseSensitive":false,"maxResults":50}
+```
+
+```text
+AgentLoop → ToolExecutor → GrepCodeTool.options
+  → WorkspaceFiles.scope 检查工作区、归一化路径、真实路径与目录/文件类型
+  → 目录：共享遍历器按每层名称排序并深度优先处理，FileGlob 限定候选
+  → 单文件：直接执行文件检查与读取
+  → Utf8TextReader（严格 UTF-8、去开头 BOM、兼容 LF/CRLF/CR）逐行读取
+  → 字符串包含匹配：追加 {path, line, text}，不返回整文件
+  → 完整 JSON 输出 → ToolResult 原调用 ID → 模型按需 read_file 阅读连续上下文
+```
+
+结果的关键字段：
+
+| 字段 | 含义 |
+|---|---|
+| matches / returnedMatches | 工作区相对 path、1 起始行号、完整匹配行及实际返回数 |
+| scannedEntries | 目录流实际收集的条目数，包含目录与忽略项；单文件范围按一个条目计 |
+| scannedFiles | 已开始检查的候选文件数，包含成功、跳过和部分读取的文件 |
+| searchedFiles | 已完整扫描并成功关闭的 UTF-8 文本文件数 |
+| skippedFiles / skippedReasons | 文件大小、长行、NUL、非法编码、失效/不可读或读取失败等计数 |
+| partialFiles | 因结果/输出/字节预算未读完的文件数 |
+| readBytes | 底层流实际读取的字节，包含解码器预读，不由行数或文件元数据估算 |
+| truncated / limitReason | 是否因预算提前停止；原因 maxResults/outputLimit/fileLimit/byteLimit/scanLimit |
+| complete | 没有预算截断且没有候选文件被跳过时为 true；false 时空匹配不能证明未检查区域不存在关键词 |
+
+每次工具调用最多扫描 10000 条目、检查 1000 个候选文件、实际读取 32 MiB；模型不能通过参数修改这些硬预算。单文件最多 4 MiB、单行最多 16384 个 UTF-16 单元，JSON 输出仍受宿主默认 16000 码点限制。精确耗尽总字节预算时也不额外读取一个字节探测 EOF，保守标记 byteLimit。刚好达到匹配上限但没有额外匹配时不误报 maxResults。文件模式排除项及忽略目录内未枚举的文件不计入候选文件统计。
+
+目录忽略规则与 search_file/list_files 一致，发现的符号链接、junction 和特殊文件不进入候选集合；显式起点可解析指向工作区内的链接，外部链接拒绝。文件读取前再次检查真实路径与普通文件类型，打开时不跟随最终路径的符号链接；仍不宣称完整操作系统沙箱。UTF-8/NUL 检查用于文本判定，不做 MIME 或语法分析；合法 UTF-8 且无 NUL 的文件可以按文本检查，不依赖扩展名判断语言。
+
+文件问题按候选文件处理：遇到晚出现的编码/NUL/长行/读取失败时，撤回该文件此前暂存的匹配，再增加跳过计数，其他成功文件的结果保留。预算耗尽则保留已检查区域的有效匹配并标记 partialFiles/truncated。目录读取失败、非法参数和路径越界仍通过工具错误通道返回，线程中断传播。成功结果预留最坏统计/原因字段空间，不让执行器把 JSON 切碎；元数据或首条完整匹配行放不下时返回 OUTPUT_LIMIT_TOO_SMALL。无分页游标，截断后优先缩小目录、文件模式或直接搜索已知文件。
+
+base.md 增加“已知关键词直接 grep_code，连续上下文用 read_file”的指导，参数说明仍以结构化 tools 为准。控制台沿用路径摘要，不打印查询正文、匹配内容或完整上下文。完成的 assistant/tool 消息组随 v2 会话保存，恢复后仅加载观察结果，不重放搜索。普通聊天和 --prompt 没有工作区，四个文件工具全部隐藏。
+
+验证：GrepCodeToolTest 新增 42 项、AgentLoopTest 新增 1 项，完整 mvn verify 共 458 项通过，无失败/错误/跳过；共享读取/路径重构同时通过既有 ReadFileToolTest 36 项、ListFilesToolTest 30 项、SearchFileToolTest 42 项回归。另通过 9 组本地 HTTP JAR 验证：四工具注册与正文搜索→按行读取→回答/保存、跨进程恢复不重放、单文件范围、无工作区单次/会话隐藏四工具、跳过原因与不完整状态、匹配条数截断、越界错误回填、真实 src 目录搜索、超过二十层目录的正文匹配。使用临时配置/会话与本地模型替身；真实仓库只在 src 内按指定 Java 文件筛选搜索，未读取真实 .env 或请求真实厂商。
 
 <a id="agent-loop"></a>
 
@@ -624,7 +688,7 @@ Main 注册三个工具，NONE 工作区全部隐藏。工具说明仍由 Search
 | [ChatCompletionsClient.java](../src/main/java/io/github/jackfeicoder/codey/llm/ChatCompletionsClient.java) | 显式编码 tools 的 function 包装，不执行工具 |
 | [MessageHistory.java](../src/main/java/io/github/jackfeicoder/codey/session/MessageHistory.java) | 完整轮次与调用 ID/结果配对校验，供提交和磁盘恢复共用 |
 
-实际装配入口是 `Main.main()` 与 `startChat()`，Main 当前没有 run 方法。`Main.createTools(AgentSettings)` 注册 ReadFileTool、ListFilesTool 与 SearchFileTool，传给 SessionLauncher；后者为当前会话装配 AgentLoop 和 ToolContext，ChatCli 调用它并处理最终展示/提交。Main 不实现工具循环。
+实际装配入口是 `Main.main()` 与 `startChat()`，Main 当前没有 run 方法。`Main.createTools(AgentSettings)` 注册 ReadFileTool、ListFilesTool、SearchFileTool 与 GrepCodeTool，传给 SessionLauncher；后者为当前会话装配 AgentLoop 和 ToolContext，ChatCli 调用它并处理最终展示/提交。Main 不实现工具循环。
 
 ```text
 AgentLoop.run(session, input, context)
@@ -678,7 +742,7 @@ v2 磁盘格式支持 `user → (assistant tool_calls → 全部 tool 结果)* �
 java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/codeY --title 了解项目
 ```
 
-输入“请读取 README.md，说明已实现的模块”。没有工作区的聊天及 `--prompt` 不展示 list_files/search_file/read_file。模型可用 list_files 浏览或 search_file 按名称定位，再用 read_file 阅读具体文件；内容搜索仍待接入。旧会话保留旧基础提示词，会显示摘要变化提示；`/new` 或 `/clear` 可采用新版工具指导。
+输入“请读取 README.md，说明已实现的模块”。没有工作区的聊天及 `--prompt` 不展示 list_files/search_file/grep_code/read_file。模型可用 list_files 浏览、search_file 按名称定位或 grep_code 搜索正文，再用 read_file 阅读具体文件。旧会话保留旧基础提示词，会显示摘要变化提示；`/new` 或 `/clear` 可采用新版工具指导。
 
 首版验证记录：AgentLoopTest 15 项；工具请求对象/HTTP 映射 4 项；完整历史校验 12 项；工具快照/旧版本迁移 3 项；CLI 预算退出 1 项，合计新增 35 项。旧的“工具请求只提示”测试已更新为“未知工具反馈并提交完整轮次”。当时完整 `mvn verify` 为 272 项，调试阶段最新记录见下一节。
 
@@ -763,7 +827,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --prompt "解释 Java record" --profil
 
 每次 --prompt 是独立的一次请求，不恢复历史。help/version/list/check 不发起模型调用。参数或配置错误退出码为 2，模型调用错误为 1；获得响应时输出文本，截断时另外提示，工具调用暂不执行。
 
-测试使用本地 HTTP 服务与假密钥，覆盖配置、协议、错误、超时及中断。工具前阶段为 178 项，工具基础 23 项、读文件 36 项、Agent 35 项、进度/exit 3 项、模型命令/偏好 19 项、共享配置目录 3 项，加上运行配置与收尾新增 22 项、文件定位与取消深度限制共新增 43 项，再加空回答处理 7 项，当前总计 415 项通过。没有发送真实服务商请求。
+测试使用本地 HTTP 服务与假密钥，覆盖配置、协议、错误、超时及中断。工具前阶段为 178 项，工具基础 23 项、读文件 36 项、Agent 35 项、进度/exit 3 项、模型命令/偏好 19 项、共享配置目录 3 项，加上运行配置与收尾新增 22 项、文件定位与取消深度限制共新增 43 项，再加空回答处理 7 项、正文搜索 43 项，当前总计 458 项通过。没有发送真实服务商请求。
 
 <a id="session-chat"></a>
 
@@ -1251,7 +1315,7 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 
 ## 12. 开发路线与验收标准
 
-> 当前：非流式对话、list_files/search_file/read_file Agent 循环、完整工具对话保存/恢复、工作区选择和标题已完成。SSE、内容搜索工具与执行中恢复继续按路线推进。
+> 当前：非流式对话、list_files/search_file/grep_code/read_file Agent 循环、完整工具对话保存/恢复、工作区选择和标题已完成。SSE、写入/命令工具与执行中恢复继续按路线推进。
 
 ### M0：工程骨架
 
@@ -1299,7 +1363,8 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 - [x] assistant tool_calls 与全部 tool 结果配对，未知工具也有结果。
 - [x] list_files 支持工作区目录探索，深度/条数/扫描量/输出预算有界；不跟随发现的链接。
 - [x] search_file 按名称/路径通配符定位文件；与 list_files 共用路径/遍历基础能力，不读取正文。
-- [ ] grep_code 按关键词/正则搜索文件内容，返回路径、行号和匹配行。
+- [x] grep_code 按字面关键词搜索目录或单文件，返回路径、行号、匹配行与完整性统计。
+- [ ] grep_code 正则与语义/符号检索后续按需求扩展。
 - [x] read_file 默认分页，大文件读取与输出有上限。
 - [x] read_file 路径越界、符号链接等边界有明确处理；统一策略和强隔离后续完善。
 - [x] 轮次与目录默认深度支持启动配置；临近上限提醒，最后一次仅回答；服务商仍请求工具时返回 BUDGET_EXHAUSTED。工具失败可在剩余预算内修正。
@@ -1720,9 +1785,9 @@ WorkspaceBinding 明确区分 DIRECTORY 与 NONE：DIRECTORY 保存绝对真实�
 - 相对路径相对启动目录解析；接受带空格的路径，使用 Path.toRealPath 校验存在且为目录，不要求必须是 Git 仓库，也不要求目录一定可写。
 - 启动参数优先；没有参数时通过菜单明确选择。CODEY_WORKSPACE 提供“配置建议目录”菜单项，进程环境覆盖启动目录 .env；模板中的点号不自动跳过选择，也不覆盖历史会话的绑定。
 - 配置建议目录作为额外选项展示，即使与当前目录相同也不会自动选定；失效建议不阻止选择其他目录。显式 --workspace 无效时报告参数错误。
-- Main 注册 list_files、search_file 与 read_file，按会话工作区筛选是否展示；NONE 不展示且拒绝执行工作区工具。内容搜索/命令和项目指令后续接入。选目录本身不扫描整个项目或把全项目注入模型。
+- Main 注册 list_files、search_file、grep_code 与 read_file，按会话工作区筛选是否展示；NONE 不展示且拒绝执行工作区工具。写入/命令和项目指令后续接入。选目录本身不扫描整个项目或把全项目注入模型。
 
-工作区是文件和命令的定位依据；read_file 已按真实工作区检查路径，审批与进程隔离后续由策略模块处理。选定目录后模型可浏览目录、按名称定位文件并读取其内容，但当前没有按内容搜索、写入或命令能力。
+工作区是文件和命令的定位依据；read_file 已按真实工作区检查路径，审批与进程隔离后续由策略模块处理。选定目录后模型可浏览目录、按名称定位、按正文关键词搜索并读取连续内容，写入与命令能力后续加入。
 
 ### 会话数据结构与保存内容
 
