@@ -15,7 +15,7 @@ public final class ConsoleApprovalHandler implements ApprovalHandler {
     }
     @Override public Answer approve(ApprovalRequest request) throws InterruptedException {
         if (!available()) return Answer.UNAVAILABLE;
-        output.println("\n待批准：" + clean(request.tool()) + " · " + clean(request.displayTarget()));
+        input.theme().line(output, ConsoleTheme.Tone.WARNING, "\n待批准：" + clean(request.tool()) + " · " + clean(request.displayTarget()));
         output.println("操作：" + clean(request.operation()) + "；字节 " + request.beforeBytes() + " → " + request.afterBytes());
         output.println(request.fileGrant()
                 ? "批准范围：当前会话对此文件的写入、编辑、删除（按已接入工具执行）；不包含其他文件、命令或联网。"
@@ -26,7 +26,7 @@ public final class ConsoleApprovalHandler implements ApprovalHandler {
     /** full 的切换是用户显式操作，不从模型回复读取，也不复用文件授权。 */
     public boolean confirmFull() throws InterruptedException {
         if (!available()) return false;
-        output.println("full 将跳过常规审批；当前工具仍只支持工作区文件，参数/路径/冲突检查及 PLAN 只读约束继续生效。");
+        input.theme().line(output, ConsoleTheme.Tone.WARNING, "full 将跳过常规审批；当前工具仍只支持工作区文件，参数/路径/冲突检查及 PLAN 只读约束继续生效。");
         return confirm("启用 full？[y/N]> ") == Answer.APPROVE;
     }
     private boolean available() { return input.isInteractive() || allowPiped; }

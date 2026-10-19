@@ -7,6 +7,7 @@ import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
 import org.jline.reader.UserInterruptException;
 import org.jline.reader.impl.DefaultParser;
+import org.jline.reader.impl.DefaultHighlighter;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 
@@ -65,7 +66,8 @@ public final class ConsoleInput implements AutoCloseable {
     /** 统一编辑器配置；测试可用虚拟终端验证实际按键行为，无需真实控制台。 */
     static LineReader createReader(Terminal terminal, org.jline.reader.Completer completer) {
         LineReader lineReader = LineReaderBuilder.builder().terminal(terminal).appName("CodeY")
-                .parser(new DefaultParser().escapeChars(null).quoteChars(null)).completer(completer).build();
+                .parser(new DefaultParser().escapeChars(null).quoteChars(null)).completer(completer)
+                .highlighter(ConsoleInput::highlightInput).build();
         // 不展开 ! 历史语法；候选只做前缀匹配，不纠正模型 ID 的拼写。
         lineReader.setOpt(LineReader.Option.DISABLE_EVENT_EXPANSION);
         lineReader.setOpt(LineReader.Option.AUTO_LIST);
@@ -73,6 +75,16 @@ public final class ConsoleInput implements AutoCloseable {
         lineReader.setOpt(LineReader.Option.AUTO_MENU_LIST);
         lineReader.unsetOpt(LineReader.Option.AUTO_MENU);
         lineReader.setVariable(LineReader.ERRORS, 0);
+        // 候选选中项使用明显背景，说明文字弱化；NO_COLOR 尊重终端使用者的偏好。
+        if (!System.getenv().containsKey("NO_COLOR")) {
+            lineReader.setVariable(LineReader.COMPLETION_STYLE_SELECTION, "fg:black,bg:cyan,bold");
+            lineReader.setVariable(LineReader.COMPLETION_STYLE_LIST_SELECTION, "fg:black,bg:cyan,bold");
+            lineReader.setVariable(LineReader.COMPLETION_STYLE_DESCRIPTION, "fg:bright-black");
+            lineReader.setVariable(LineReader.COMPLETION_STYLE_LIST_DESCRIPTION, "fg:bright-black");
+            lineReader.setVariable(LineReader.COMPLETION_STYLE_STARTING, "fg:cyan,bold");
+            lineReader.setVariable(LineReader.COMPLETION_STYLE_LIST_STARTING, "fg:cyan,bold");
+        }
+        lineReader.setVariable(LineReader.MENU_LIST_MAX, 8);
         // JLine 的部分终端会把鼠标序列注册为字面量 \E[M，使反斜杠等待后续按键并吞掉中文前的路径分隔符。
         // 此 CLI 不使用鼠标操作，移除这个字面量前缀，保持 Windows 路径原样输入。
         KeyMap<org.jline.reader.Binding> original = lineReader.getKeyMaps().get(LineReader.MAIN);
@@ -110,6 +122,15 @@ public final class ConsoleInput implements AutoCloseable {
         return lineReader;
     }
 
+    /** 沿用编辑器对控制字符的可见表示，再给用户输入着色，不修改实际提交的文本。 */
+    private static org.jline.utils.AttributedString highlightInput(LineReader editor, String buffer) {
+        var safe = new DefaultHighlighter().highlight(editor, buffer);
+        if (System.getenv().containsKey("NO_COLOR")) return safe;
+        return new org.jline.utils.AttributedString(safe.toString(), buffer.startsWith("/")
+                ? org.jline.utils.AttributedStyle.DEFAULT.foreground(org.jline.utils.AttributedStyle.MAGENTA).bold()
+                : ConsoleTheme.style(ConsoleTheme.Tone.USER));
+    }
+
     /** Ctrl+C 取消当前编辑，EOF 交给启动器保存退出；补全本身不会执行命令。 */
     public String readLine(String prompt) throws IOException {
         boolean mainPrompt = "You> ".equals(prompt) || "选择会话> ".equals(prompt);
@@ -120,7 +141,18 @@ public final class ConsoleInput implements AutoCloseable {
             return plain.readLine();
         }
         completeCommands = "You> ".equals(prompt) || "选择会话> ".equals(prompt);
-        try { return reader.readLine(prompt); }
+        // 框线放在 JLine 提示串中，由编辑器管理多行重绘，避免自行移动光标覆盖输入。
+        boolean framed = mainPrompt && terminal.getHeight() >= 8 && terminal.getWidth() >= 24;
+        String displayPrompt = mainPrompt ? theme().text(ConsoleTheme.Tone.USER,
+                "You> ".equals(prompt) ? "  ❯ " : "  会话 ❯ ") : theme().text(ConsoleTheme.Tone.COMMAND, prompt);
+        if (framed) displayPrompt = theme().separator(terminal.getWidth()) + "\n" + displayPrompt;
+        String hint = mainPrompt && terminal.getWidth() >= 70
+                ? theme().text(ConsoleTheme.Tone.MUTED, "Tab 补全 · ↑↓ 选择 · /help 命令  ") : null;
+        try {
+            String value = reader.readLine(displayPrompt, hint, (Character) null, null);
+            if (framed) { output.println(theme().separator(terminal.getWidth())); output.flush(); }
+            return value;
+        }
         catch (UserInterruptException cancelled) { return ""; }
         catch (EndOfFileException ended) { return null; }
     }
@@ -131,15 +163,34 @@ public final class ConsoleInput implements AutoCloseable {
         if (status == null && footer != null) footer.hide();
     }
     public boolean isInteractive() { return reader != null; }
+    public int columns() { return terminal == null ? 80 : terminal.getWidth(); }
+    /** 展示层唯一主题入口；业务与进度代码无需检测终端或拼接 ANSI。 */
+    public ConsoleTheme theme() { return new ConsoleTheme(isInteractive(), !System.getenv().containsKey("NO_COLOR")); }
+
+    /** 复用简洁进度数据；纯文本仍使用旧格式，交互终端只改变视觉呈现。 */
+    public io.github.jackfeicoder.codey.observability.DebugPrinter progressPrinter(PrintWriter destination) {
+        return new io.github.jackfeicoder.codey.observability.DebugPrinter((kind, value) -> {
+            if (!isInteractive()) { destination.println(value); destination.flush(); return; }
+            switch (kind) {
+                case REQUEST -> theme().line(destination, ConsoleTheme.Tone.THINKING,
+                        "● " + value.replace("请求模型", "思考中 · 等待模型响应…"));
+                case TOOL -> theme().line(destination, ConsoleTheme.Tone.TOOL, "  ↳ " + value.stripLeading());
+                case ERROR -> theme().line(destination, ConsoleTheme.Tone.ERROR, "  ! " + value.stripLeading());
+            }
+        });
+    }
     public void refreshStatus() {
         if (runtimeStatus == null) return;
         if (terminal == null) {
             output.println("[" + runtimeStatus.left() + "] " + ConsoleApprovalHandler.clean(runtimeStatus.right()));
         } else {
-            if (footer == null) footer = org.jline.utils.Status.getStatus(terminal);
+            if (footer == null) {
+                footer = org.jline.utils.Status.getStatus(terminal);
+                if (footer == null) return;
+                footer.setBorder(true);
+            }
             footer.resize();
-            footer.update(List.of(new org.jline.utils.AttributedString(StatusRenderer.render(
-                    runtimeStatus.left(), runtimeStatus.right(), terminal.getWidth()))));
+            footer.update(List.of(theme().display(StatusRenderer.styled(runtimeStatus, terminal.getWidth()))));
         }
         output.flush();
     }
@@ -147,7 +198,7 @@ public final class ConsoleInput implements AutoCloseable {
     public String readApproval(String prompt) throws IOException {
         completeCommands = false;
         if (reader == null) { output.print(prompt); output.flush(); return plain.readLine(); }
-        try { return reader.readLine(prompt); }
+        try { return reader.readLine(theme().text(ConsoleTheme.Tone.WARNING, prompt)); }
         catch (UserInterruptException | EndOfFileException cancelled) { return null; }
     }
 

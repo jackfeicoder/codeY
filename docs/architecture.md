@@ -1979,7 +1979,11 @@ ConsoleApprovalHandler 复用 ConsoleInput，仅明确 y/yes 批准，其他输�
 
 RuntimeStatus 保存模式、模型及上次响应 promptTokens，缺失为未知；StatusRenderer 按终端显示列宽对齐并转义控制字符，窄屏优先保留模式。ConsoleInput 在原生终端用 JLine Status 显示底栏，管道显示普通单行；响应后更新，关闭时移除。当前没有模型窗口配置或精确请求前估算，右侧标注“上次输入 ... tok / 上限 ?”，不是当前上下文占用、压缩阈值或累计费用。鼠标菜单、统一事件总线和 RunCoordinator 抽象未提前实现。
 
-权限阶段新增 35 项测试，完整 mvn verify 为 541 项通过，无失败/错误/跳过。7 组本地 HTTP JAR 验证覆盖真实注册、逐文件批准及复用、恢复不重放、管道边界、模式组合、规则 auto/拒绝与撤销。JLine 虚拟终端验证底栏及窗口尺寸变化。旧协议/配置/会话/文件工具回归保留，未请求真实厂商或读取真实 .env。
+终端展示通过 `cli/ConsoleTheme` 集中管理，ConsoleInput 配置输入分隔线、用户/命令高亮与候选选中样式；ChatCli 展示回答，ConsoleApprovalHandler 展示黄色审批提示，SessionLauncher 使用同一主题展示帮助与错误。DebugPrinter 只产生 REQUEST/TOOL/ERROR 三类简洁进度，由 ConsoleInput 注入的接收器决定颜色和缩进，AgentLoop 不依赖终端库。黄色“思考中 · 等待模型响应”是请求状态，无推理正文、动画或 SSE。
+
+StatusRenderer.styled 使用属性串排版并保留颜色：react 青色、plan 紫色、ask 黄、auto 绿、full 红，模型青色、已知 token 紫色、未知量灰色。底栏左侧留白，宽度不足先压缩模型名、再使用简短用量标签，极窄窗口只保留模式；按显示列而不是 UTF-16 长度裁剪。颜色/边框不写入模型上下文或会话，NO_COLOR 关闭主题着色，非交互输出保留旧文本协议。模型正文在着色展示时转义 ANSI/控制序列并保留完整文本、缩进和换行；这是展示处理，不修改已提交消息。
+
+UI 阶段新增 4 项测试，最新完整 mvn verify 为 545 项通过，无失败/错误/跳过；验证 JLine 实际编辑、纯文本/NO_COLOR、展示与历史隔离、长模型名与中文列宽及分段颜色。开启配色的虚拟终端另外验证输入和菜单行为。权限阶段新增 35 项测试，当时完整 mvn verify 为 541 项通过，无失败/错误/跳过。7 组本地 HTTP JAR 验证覆盖真实注册、逐文件批准及复用、恢复不重放、管道边界、模式组合、规则 auto/拒绝与撤销。JLine 虚拟终端验证底栏及窗口尺寸变化。旧协议/配置/会话/文件工具回归保留，未请求真实厂商或读取真实 .env。
 
 ### 参考行为与层次
 

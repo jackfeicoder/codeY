@@ -37,9 +37,13 @@ public final class CommandCompleter implements Completer {
         }
         String command = line.words().get(0);
         if ("/permissions".equals(command) && line.wordIndex() == 1) {
-            for (String value : List.of("ask", "auto", "full", "revoke")) add(candidates, prefix, value, "权限操作");
+            add(candidates, prefix, "ask", "请求批准 · 每个文件首次修改时询问");
+            add(candidates, prefix, "auto", "帮我批准 · 普通修改自动，风险操作询问");
+            add(candidates, prefix, "full", "完全访问 · 跳过常规审批，需明确确认");
+            add(candidates, prefix, "revoke", "撤销当前会话的文件授权及拒绝记录");
         } else if ("/mode".equals(command) && line.wordIndex() == 1) {
-            for (String value : List.of("react", "plan")) add(candidates, prefix, value, "工作模式");
+            add(candidates, prefix, "react", "执行任务 · 模型与工具循环协作");
+            add(candidates, prefix, "plan", "只读计划 · 探索代码并给出实施方案");
         } else if ("/list".equals(command) && line.wordIndex() == 1) {
             add(candidates, prefix, "model", "已配置模型目录");
         } else if ("/model".equals(command) && line.wordIndex() <= 2) {

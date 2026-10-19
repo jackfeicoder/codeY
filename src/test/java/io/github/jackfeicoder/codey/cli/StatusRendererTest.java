@@ -9,6 +9,25 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** 状态栏宽度、终端控制字符与 token 来源标记；不依赖真实 API 或桌面窗口。 */
 class StatusRendererTest {
+    @Test void styledFooterPreservesFirstLetterAndTokensBeforeLongModelName() {
+        var status = new RuntimeStatus();
+        status.model("供应商/超长模型😀".repeat(30));
+        status.usage(new LlmResponse.TokenUsage(12345L, 1L, 12346L));
+        for (int width : new int[]{20, 28, 40, 60, 100, 180}) {
+            var line = StatusRenderer.styled(status, width);
+            assertTrue(line.toString().startsWith("  react · ask"), line.toString());
+            assertTrue(line.columnLength() <= width - 1);
+            if (width >= 40) assertTrue(line.toString().contains("12345 tok /"), line.toString());
+            assertEquals(ConsoleTheme.style(ConsoleTheme.Tone.USER), line.styleAt(2));
+            assertEquals(ConsoleTheme.style(ConsoleTheme.Tone.WARNING), line.styleAt(line.toString().indexOf("ask")));
+        }
+        status.modes(WorkMode.PLAN, PermissionMode.AUTO);
+        var auto = StatusRenderer.styled(status, 100);
+        assertEquals(ConsoleTheme.style(ConsoleTheme.Tone.SUCCESS), auto.styleAt(auto.toString().indexOf("auto")));
+        status.modes(WorkMode.REACT, PermissionMode.FULL);
+        var full = StatusRenderer.styled(status, 100);
+        assertEquals(ConsoleTheme.style(ConsoleTheme.Tone.ERROR), full.styleAt(full.toString().indexOf("full")));
+    }
     @Test void alignsChineseTextByTerminalColumnsAndHandlesNarrowWidths() {
         for (int width : new int[]{1, 10, 30, 60, 100}) {
             String line = StatusRenderer.render("react · ask", "供应商/模型😀 · 上次输入 123 tok", width);

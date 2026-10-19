@@ -16,6 +16,10 @@ public final class RuntimeStatus {
     public void modes(WorkMode work, PermissionMode permission) { workMode = work; permissionMode = permission; }
     public void model(String value) { model = value; lastInputTokens = null; }
     public void usage(LlmResponse.TokenUsage usage) { lastInputTokens = usage == null ? null : usage.promptTokens(); }
+    public WorkMode workMode() { return workMode; }
+    public PermissionMode permissionMode() { return permissionMode; }
+    public String model() { return model; }
+    public Long lastInputTokens() { return lastInputTokens; }
     public String left() { return workMode.value() + " · " + permissionMode.value(); }
     public String right() {
         return model + " | 上次输入 " + (lastInputTokens == null ? "?" : lastInputTokens) + " tok / 上限 ?";

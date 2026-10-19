@@ -203,9 +203,9 @@ public final class Main {
                 ? new PrintWriter(System.out, true, StandardCharsets.UTF_8) : console.writer();
         PrintWriter errors = new PrintWriter(System.err, true,
                 console == null ? StandardCharsets.UTF_8 : console.charset());
-        var debug = new DebugPrinter(output); // 只显示轮次、工具名称和涉及的文件。
         try (ConsoleInput consoleInput = ConsoleInput.open(input, output,
                 () -> ConfigLoader.loadModelCatalog(startup, environment))) {
+            var debug = consoleInput.progressPrinter(output); // 原生终端统一进度样式，管道保留简洁文本。
             return new SessionLauncher(startup, settings, new JsonSessionStore(settings.dataDirectory()), name -> {
                 // 历史浏览不执行此工厂；准备继续会话时才校验目标 Profile。
                 ModelProfiles profiles = ConfigLoader.loadProfiles(startup, environment, name);

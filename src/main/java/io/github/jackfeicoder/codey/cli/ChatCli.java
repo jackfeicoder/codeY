@@ -81,9 +81,9 @@ public final class ChatCli {
             try {
                 answer(line);
             } catch (LlmException failed) {
-                errors.println("LLM error [" + failed.kind() + "]: " + failed.getMessage()
+                input.theme().line(errors, ConsoleTheme.Tone.ERROR, "LLM error [" + failed.kind() + "]: " + failed.getMessage()
                         + " This turn was not saved.");
-                if (context.hasWorkspace()) errors.println("工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
+                if (context.hasWorkspace()) input.theme().line(errors, ConsoleTheme.Tone.ERROR, "工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
                 if (failed.kind() == LlmException.Kind.INTERRUPTED) {
                     // 中断请求后结束交互，避免继续阻塞在终端输入。
                     output.flush();
@@ -100,20 +100,20 @@ public final class ChatCli {
     public boolean answer(String line) {
         var result = agent.run(session, line, context); // 失败或预算退出不会污染已提交历史。
         if (!result.completed()) {
-            errors.println("Agent stopped [BUDGET_EXHAUSTED] after " + result.modelCalls()
+            input.theme().line(errors, ConsoleTheme.Tone.ERROR, "Agent stopped [BUDGET_EXHAUSTED] after " + result.modelCalls()
                     + " model requests and " + result.toolCalls() + " tool calls. This turn was not saved.");
-            if (context.hasWorkspace()) errors.println("工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
+            if (context.hasWorkspace()) input.theme().line(errors, ConsoleTheme.Tone.ERROR, "工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
             errors.flush();
             return false;
         }
         session.completeAgentTurn(result.turnMessages());
         var response = result.response();
-        output.println("CodeY> " + response.text());
+        input.theme().assistant(output, response.text());
         if (result.budgetLimited()) {
-            errors.println("本轮已到模型请求上限，回答基于现有信息；需要进一步调查可继续追问。");
+            input.theme().line(errors, ConsoleTheme.Tone.WARNING, "本轮已到模型请求上限，回答基于现有信息；需要进一步调查可继续追问。");
         }
         if (response.isTruncated()) {
-            errors.println("Model output was truncated (finish_reason=length).");
+            input.theme().line(errors, ConsoleTheme.Tone.WARNING, "Model output was truncated (finish_reason=length).");
         }
         output.flush();
         errors.flush();

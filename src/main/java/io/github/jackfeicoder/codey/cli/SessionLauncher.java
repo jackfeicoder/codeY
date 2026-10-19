@@ -250,15 +250,15 @@ public final class SessionLauncher {
                         answer(line);
                     }
                 } catch (ConfigException failed) {
-                    errors.println("Configuration error: " + failed.getMessage());
+                    input.theme().line(errors, ConsoleTheme.Tone.ERROR, "Configuration error: " + failed.getMessage());
                 } catch (SessionException | IllegalArgumentException failed) {
-                    errors.println((active != null && active.dirty() ? "未保存，结果仍在内存：" : "Session error: ")
+                    input.theme().line(errors, ConsoleTheme.Tone.ERROR, (active != null && active.dirty() ? "未保存，结果仍在内存：" : "Session error: ")
                             + failed.getMessage());
                 } catch (LlmException failed) {
-                    errors.println("LLM error [" + failed.kind() + "]: " + failed.getMessage()
+                    input.theme().line(errors, ConsoleTheme.Tone.ERROR, "LLM error [" + failed.kind() + "]: " + failed.getMessage()
                             + " This turn was not saved.");
                     if (active != null && active.snapshot().workspace().mode() == WorkspaceBinding.Mode.DIRECTORY) {
-                        errors.println("工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
+                        input.theme().line(errors, ConsoleTheme.Tone.ERROR, "工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
                     }
                     if (failed.kind() == LlmException.Kind.INTERRUPTED) return 1;
                 }
@@ -358,7 +358,7 @@ public final class SessionLauncher {
             else if ("4".equals(choice)) path = settings.suggestedWorkspace();
             if (path != null) {
                 try { return WorkspaceResolver.resolve(startup, unquote(path.strip())); }
-                catch (IllegalArgumentException invalid) { errors.println(invalid.getMessage()); }
+                catch (IllegalArgumentException invalid) { input.theme().line(errors, ConsoleTheme.Tone.ERROR, invalid.getMessage()); }
             } else if ("2".equals(choice)) { exiting = true; return null; }
         }
         return null;
@@ -413,7 +413,7 @@ public final class SessionLauncher {
         while (!exiting) {
             try { return models.apply(profile); }
             catch (ConfigException invalid) {
-                errors.println("Configuration error: " + invalid.getMessage());
+                input.theme().line(errors, ConsoleTheme.Tone.ERROR, "Configuration error: " + invalid.getMessage());
                 String choice = read("输入可用的供应商 [模型ID]（/back 返回）> ");
                 if (choice == null) { exiting = true; return null; }
                 if ("/back".equals(choice.strip())) return null;
@@ -452,9 +452,9 @@ public final class SessionLauncher {
 
     /** 统一列出交互命令；管理页和聊天中都可查看，不向模型发送。 */
     private void printCommands() {
-        output.println("CodeY 命令：");
+        input.theme().line(output, ConsoleTheme.Tone.USER, "CodeY 命令：");
         for (var command : CommandCatalog.commands()) {
-            output.println("  " + command.usage() + "  " + command.description());
+            input.theme().command(output, command.usage(), command.description(), input.columns());
         }
         output.println("  exit  聊天返回列表；列表中退出程序");
         output.println("默认模型为最后一次成功选择的配置；首次没有记录时使用 .env 默认值。");
@@ -498,7 +498,7 @@ public final class SessionLauncher {
         if (!preferenceLoaded) {
             preferenceLoaded = true;
             try { lastUsedProfile = modelPreferences.load().orElse(null); }
-            catch (ConfigException invalid) { errors.println("模型偏好：" + invalid.getMessage()); }
+            catch (ConfigException invalid) { input.theme().line(errors, ConsoleTheme.Tone.ERROR, "模型偏好：" + invalid.getMessage()); }
         }
         return lastUsedProfile;
     }
@@ -508,7 +508,7 @@ public final class SessionLauncher {
         lastUsedProfile = profile;
         preferenceLoaded = true;
         try { modelPreferences.save(profile); }
-        catch (ConfigException failed) { errors.println("模型已选择，但默认偏好未保存：" + failed.getMessage()); }
+        catch (ConfigException failed) { input.theme().line(errors, ConsoleTheme.Tone.ERROR, "模型已选择，但默认偏好未保存：" + failed.getMessage()); }
     }
 
     /** 预览最近四条消息，有界输出；纯工具调用没有文本时展示名称和调用 ID。 */
@@ -616,7 +616,7 @@ public final class SessionLauncher {
                 : SessionSnapshot.TitleSource.FALLBACK, true);
         active.save();
         output.println("会话标题：" + result.title());
-        if (settings.generateTitles() && !result.generated()) errors.println("标题生成未完成，已保留首问摘要。");
+        if (settings.generateTitles() && !result.generated()) input.theme().line(errors, ConsoleTheme.Tone.ERROR, "标题生成未完成，已保留首问摘要。");
     }
 
     /** 用户改名优先，之后不自动覆盖；ID 与消息不变。 */
@@ -633,7 +633,7 @@ public final class SessionLauncher {
             if (active != null) active.save();
             return true;
         } catch (SessionException failed) {
-            errors.println("未保存：" + failed.getMessage() + "；结果仍在内存，下一次输入将重试保存。");
+            input.theme().line(errors, ConsoleTheme.Tone.ERROR, "未保存：" + failed.getMessage() + "；结果仍在内存，下一次输入将重试保存。");
             errors.flush();
             return false;
         }
