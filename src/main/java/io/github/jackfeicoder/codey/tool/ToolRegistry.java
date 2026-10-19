@@ -12,13 +12,13 @@ public final class ToolRegistry {
     private final Map<String, RegisteredTool> tools = new LinkedHashMap<>();
 
     /** 注册时固定元数据，即使实现之后改变 definition() 也不改变已注册说明。 */
-    public record RegisteredTool(ToolDefinition definition, Tool implementation, boolean requiresWorkspace) { }
+    public record RegisteredTool(ToolDefinition definition, Tool implementation, boolean requiresWorkspace, ToolAccess access) { }
 
     /** 返回 this 便于装配多个工具；重复名称明确报错，不静默覆盖。 */
     public ToolRegistry register(Tool tool) {
         Objects.requireNonNull(tool, "tool");
         ToolDefinition definition = Objects.requireNonNull(tool.definition(), "definition");
-        RegisteredTool entry = new RegisteredTool(definition, tool, tool.requiresWorkspace());
+        RegisteredTool entry = new RegisteredTool(definition, tool, tool.requiresWorkspace(), Objects.requireNonNull(tool.access()));
         if (tools.putIfAbsent(definition.name(), entry) != null) {
             throw new IllegalArgumentException("Tool is already registered: " + definition.name());
         }
@@ -39,6 +39,7 @@ public final class ToolRegistry {
     public List<ToolDefinition> definitions(ToolContext context) {
         Objects.requireNonNull(context, "context");
         return tools.values().stream().filter(entry -> !entry.requiresWorkspace() || context.hasWorkspace())
+                .filter(entry -> context.workMode() != io.github.jackfeicoder.codey.agent.WorkMode.PLAN || entry.access() == ToolAccess.READ_ONLY)
                 .map(RegisteredTool::definition).toList();
     }
 }

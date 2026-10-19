@@ -10,6 +10,9 @@ public final class CommandCatalog {
     /** 固定命令说明，不包含会话内容或模型凭证。 */
     private static final List<Command> COMMANDS = List.of(
             new Command("/help", "/help", "查看全部交互命令"),
+            new Command("/permissions", "/permissions [ask|auto|full|revoke]", "查看/切换权限模式或撤销文件授权"),
+            new Command("/mode", "/mode [react|plan]", "切换工作模式；multi 尚待实现"),
+            new Command("/status", "/status", "查看模式、模型、上次请求 token 和文件授权"),
             new Command("/list", "/list model", "查看供应商、模型 ID 和本地配置状态"),
             new Command("/model", "/model [供应商 [模型ID]]", "查看/切换当前模型；省略 ID 使用第一个模型"),
             new Command("/new", "/new", "新建会话，选择工作区和标题"),

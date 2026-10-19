@@ -29,6 +29,8 @@ import java.util.Set;
  * 路径按真实文件检查，内存读取与输出有界；不修改文件，不调用模型或自动注册到 CLI。
  */
 public final class ReadFileTool implements Tool {
+    /** 可信只读分类，供 PLAN 过滤与执行前检查使用。 */
+    @Override public io.github.jackfeicoder.codey.tool.ToolAccess access() { return io.github.jackfeicoder.codey.tool.ToolAccess.READ_ONLY; }
     /** 缺省从文件第一行开始。 */
     public static final int DEFAULT_START_LINE = 1;
     /** 缺省最多返回 200 行，输出预算不足时可少于该值。 */

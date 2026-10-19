@@ -36,7 +36,11 @@ public final class CommandCompleter implements Completer {
             return;
         }
         String command = line.words().get(0);
-        if ("/list".equals(command) && line.wordIndex() == 1) {
+        if ("/permissions".equals(command) && line.wordIndex() == 1) {
+            for (String value : List.of("ask", "auto", "full", "revoke")) add(candidates, prefix, value, "权限操作");
+        } else if ("/mode".equals(command) && line.wordIndex() == 1) {
+            for (String value : List.of("react", "plan")) add(candidates, prefix, value, "工作模式");
+        } else if ("/list".equals(command) && line.wordIndex() == 1) {
             add(candidates, prefix, "model", "已配置模型目录");
         } else if ("/model".equals(command) && line.wordIndex() <= 2) {
             try {

@@ -48,7 +48,8 @@ public final class ToolExecutor {
                 }
             }
             entry.implementation().validateArguments(arguments, context);
-            String output = entry.implementation().execute(arguments, context);
+            io.github.jackfeicoder.codey.policy.PermissionPolicy.check(context.workMode(), entry.access());
+            String output = entry.implementation().prepare(arguments.deepCopy(), context).execute(context);
             if (output == null) {
                 throw new ToolException(ToolResult.ErrorCode.EXECUTION_FAILED, "Tool returned no result.");
             }

@@ -563,11 +563,15 @@ class AgentLoopTest {
     private static ToolContext none() { return new ToolContext(WorkspaceBinding.none()); }
     /** 临时目录绑定真实路径。 */
     private ToolContext workspace() throws Exception {
-        return new ToolContext(new WorkspaceBinding(WorkspaceBinding.Mode.DIRECTORY, directory.toRealPath().toString()));
+        var workspace = new WorkspaceBinding(WorkspaceBinding.Mode.DIRECTORY, directory.toRealPath().toString());
+        return new ToolContext(workspace, ToolContext.DEFAULT_MAX_OUTPUT_CHARS, WorkMode.REACT,
+                new io.github.jackfeicoder.codey.policy.PermissionService(io.github.jackfeicoder.codey.policy.PermissionMode.FULL,
+                        workspace, io.github.jackfeicoder.codey.policy.ApprovalHandler.unavailable()));
     }
 
     /** 计数测试工具，用于观察调用次数及中断传播。 */
     private static final class Probe implements Tool {
+        public ToolAccess access() { return ToolAccess.READ_ONLY; }
         /** 工具实际执行次数。 */
         private int executions;
         /** 是否在 execute 内模拟取消。 */

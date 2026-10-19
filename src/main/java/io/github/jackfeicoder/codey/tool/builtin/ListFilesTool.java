@@ -17,6 +17,7 @@ import java.util.Set;
 
 /** 工作区目录探索工具：有界收集子项 → 按名称排序 → 深度优先返回相对路径，不读取文件正文。 */
 public final class ListFilesTool implements Tool {
+    @Override public io.github.jackfeicoder.codey.tool.ToolAccess access() { return io.github.jackfeicoder.codey.tool.ToolAccess.READ_ONLY; }
     /** 子项算第一层；默认 10 层覆盖当前项目深层 Java 包与提示词资源。 */
     public static final int DEFAULT_MAX_DEPTH = 10;
     /** 防止模型要求无界递归。 */

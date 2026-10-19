@@ -178,6 +178,53 @@ public final class WorkspaceTextFiles {
         catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
     }
 
+    /** 准备后的闭包共用提交/冲突检查与错误分类，不在审批后重新计算新内容。 */
+    public static void commitPrepared(Target target, Snapshot original, byte[] bytes, boolean changed) throws InterruptedException {
+        try {
+            if (changed) commit(target, original, bytes); else verifyUnchanged(target, original);
+        } catch (IOException failed) { checkInterrupted(); throw failure(failed); }
+    }
+
+    /** 有界片段差异预览；敏感路径只展示统计，不向审批界面或审查器复制正文。 */
+    public static io.github.jackfeicoder.codey.policy.ApprovalRequest approval(String tool, Target target,
+            Snapshot original, byte[] replacement, String operation) {
+        String name = target.displayPath().toLowerCase(java.util.Locale.ROOT);
+        boolean sensitive = Arrays.stream(name.split("/")).anyMatch(part -> part.equals(".git") || part.equals(".codey")
+                || part.equals(".claude") || part.equals(".codex") || part.equals(".ssh")
+                || part.startsWith(".env") && !part.endsWith(".example") || part.endsWith(".pem") || part.endsWith(".key")
+                || part.endsWith(".p12") || part.equals("agents.md") || part.equals("claude.md")
+                || part.equals("pom.xml") || part.equals("package.json") || part.endsWith(".ps1")
+                || part.endsWith(".cmd") || part.endsWith(".bat") || part.endsWith(".sh"));
+        String oldText = original == null ? "" : original.text();
+        String newText = decode(replacement);
+        boolean destructive = original != null && (replacement.length == 0
+                || oldText.length() > 1024 && newText.length() < oldText.length() / 2);
+        String preview;
+        if (sensitive) preview = "敏感/执行配置路径，仅展示字节统计，隐藏正文。";
+        else {
+            int start = 0;
+            while (start < Math.min(oldText.length(), newText.length()) && oldText.charAt(start) == newText.charAt(start)) start++;
+            int oldEnd = oldText.length(), newEnd = newText.length();
+            while (oldEnd > start && newEnd > start && oldText.charAt(oldEnd - 1) == newText.charAt(newEnd - 1)) { oldEnd--; newEnd--; }
+            preview = "差异片段（有界预览）：\n- " + fragment(oldText, start, oldEnd) + "\n+ " + fragment(newText, start, newEnd);
+        }
+        return new io.github.jackfeicoder.codey.policy.ApprovalRequest(tool, target.root(), target.path(), operation,
+                original == null ? null : sha256(original.bytes()), sha256(replacement),
+                original == null ? 0 : original.bytes().length, replacement.length, sensitive, destructive, preview, false);
+    }
+
+    /** 文本片段最多 400 码点，保留省略提示；终端最终转义由 ConsoleApprovalHandler 完成。 */
+    private static String fragment(String text, int start, int end) {
+        // 公共前缀可能恰好停在两个 emoji 的代理对中间，预览边界扩到完整码点。
+        if (start > 0 && start < text.length() && Character.isLowSurrogate(text.charAt(start))
+                && Character.isHighSurrogate(text.charAt(start - 1))) start--;
+        if (end > 0 && end < text.length() && Character.isHighSurrogate(text.charAt(end - 1))
+                && Character.isLowSurrogate(text.charAt(end))) end++;
+        int points = text.codePointCount(start, end);
+        int stop = text.offsetByCodePoints(start, Math.min(points, 400));
+        return text.substring(start, stop) + (stop < end ? " …[其余差异已省略]" : "");
+    }
+
     /** 两个工具共用输出预算检查，在写入前调用；不截断成功 JSON。 */
     public static String checkedOutput(String output, ToolContext context) {
         if (output.codePointCount(0, output.length()) > context.maxOutputChars()) {

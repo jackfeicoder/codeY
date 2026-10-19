@@ -165,6 +165,7 @@ class ToolExecutorTest {
 
     /** 用于观察校验与执行顺序的内存工具。 */
     private static class Echo implements Tool {
+        public ToolAccess access() { return ToolAccess.READ_ONLY; }
         /** 实际执行次数，校验失败时必须不增长。 */
         private int executions;
 

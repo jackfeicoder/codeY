@@ -132,6 +132,7 @@ public final class Main {
             } else if ("--check-config".equals(action)) {
                 AgentSettings agentSettings = AgentSettings.load(startup, environment);
                 LlmConfig config = profiles.activeConfig(); // 只做本地字段校验，不发送 HTTP 请求。
+                io.github.jackfeicoder.codey.config.PermissionSettings.load(startup, environment);
                 System.out.println("LLM configuration is valid. Profile: " + profiles.activeSelection());
                 System.out.println(config);
                 System.out.println(agentSettings);
@@ -193,6 +194,7 @@ public final class Main {
         Map<String, String> environment = System.getenv(); // 凭证只传给配置加载器，不写入快照。
         SessionSettings settings = SessionSettings.load(startup, environment);
         AgentSettings agentSettings = AgentSettings.load(startup, environment);
+        var permissionSettings = io.github.jackfeicoder.codey.config.PermissionSettings.load(startup, environment);
         // Console 可正确处理 Windows 终端字符编码；管道和测试进程没有 Console。
         Console console = System.console();
         BufferedReader input = new BufferedReader(console == null
@@ -214,7 +216,7 @@ public final class Main {
                 return new SessionLauncher.ModelChoice(profiles.activeSelection(), new ChatCompletionsClient(config),
                         new ChatCompletionsClient(titleConfig));
             }, PromptLoader::loadBase, consoleInput, output, errors, options, createTools(agentSettings), debug,
-                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations()).run();
+                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings).run();
         }
     }
 
@@ -278,8 +280,11 @@ public final class Main {
                   list_files explores directory trees; search_file finds file paths by name or glob without reading content.
                   grep_code searches literal text in a directory or single UTF-8 file and returns matching lines.
                   write_file creates or explicitly overwrites full UTF-8 text; edit_file replaces exact text fragments.
-                  File writes execute in the selected workspace; interactive write approval is not implemented yet.
-                  Command execution and approval policies will follow.
+                  Defaults: react + ask. First write to each file requires approval for that session.
+                  /permissions ask|auto|full|revoke; /mode react|plan; /status shows permissions and last input tokens.
+                  auto uses conservative local rules; full skips approval but does not expand tool or workspace capabilities.
+                  Piped approvals require CODEY_ALLOW_PIPED_APPROVALS=true; otherwise pending writes fail closed.
+                  Command execution, deletion, network tools and multi-agent execution will follow.
 
                 Start learning:
                   README.md

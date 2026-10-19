@@ -26,11 +26,21 @@ public final class ConsoleInput implements AutoCloseable {
     private LineReader reader;
     /** 主输入与辅助输入共用同一个 Reader，但辅助输入不提示命令。 */
     private boolean completeCommands;
+    /** 仅交互终端固定底栏；管道使用可读单行，不发送 ANSI 控制码。 */
+    private RuntimeStatus runtimeStatus;
+    private org.jline.utils.Status footer;
 
     /** 测试与重定向使用普通输入，不依赖原生终端。 */
     public ConsoleInput(BufferedReader plain, PrintWriter output) {
         this.plain = java.util.Objects.requireNonNull(plain, "plain");
         this.output = java.util.Objects.requireNonNull(output, "output");
+    }
+
+    /** 已有终端的宿主/包内测试可注入终端，关闭输入时一并释放它。 */
+    ConsoleInput(BufferedReader plain, PrintWriter output, Terminal terminal) {
+        this(plain, output);
+        this.terminal = java.util.Objects.requireNonNull(terminal);
+        this.reader = createReader(terminal, new CommandCompleter(List::of, () -> completeCommands));
     }
 
     /** 仅真实控制台尝试启动 JLine；环境不支持时保留原输入功能。 */
@@ -102,6 +112,8 @@ public final class ConsoleInput implements AutoCloseable {
 
     /** Ctrl+C 取消当前编辑，EOF 交给启动器保存退出；补全本身不会执行命令。 */
     public String readLine(String prompt) throws IOException {
+        boolean mainPrompt = "You> ".equals(prompt) || "选择会话> ".equals(prompt);
+        if (mainPrompt) refreshStatus();
         if (reader == null) {
             output.print(prompt);
             output.flush();
@@ -113,9 +125,36 @@ public final class ConsoleInput implements AutoCloseable {
         catch (EndOfFileException ended) { return null; }
     }
 
+    /** 首版状态来源由启动器配置；测试或其他调用不配置时保持原输入行为。 */
+    public void status(RuntimeStatus status) {
+        runtimeStatus = status;
+        if (status == null && footer != null) footer.hide();
+    }
+    public boolean isInteractive() { return reader != null; }
+    public void refreshStatus() {
+        if (runtimeStatus == null) return;
+        if (terminal == null) {
+            output.println("[" + runtimeStatus.left() + "] " + ConsoleApprovalHandler.clean(runtimeStatus.right()));
+        } else {
+            if (footer == null) footer = org.jline.utils.Status.getStatus(terminal);
+            footer.resize();
+            footer.update(List.of(new org.jline.utils.AttributedString(StatusRenderer.render(
+                    runtimeStatus.left(), runtimeStatus.right(), terminal.getWidth()))));
+        }
+        output.flush();
+    }
+    /** 审批中 Ctrl+C/EOF 均返回未批准，不进入主聊天命令处理。 */
+    public String readApproval(String prompt) throws IOException {
+        completeCommands = false;
+        if (reader == null) { output.print(prompt); output.flush(); return plain.readLine(); }
+        try { return reader.readLine(prompt); }
+        catch (UserInterruptException | EndOfFileException cancelled) { return null; }
+    }
+
     /** 关闭终端恢复原始模式，普通输入由进程持有。 */
     @Override
     public void close() throws IOException {
+        if (footer != null) footer.close();
         if (terminal != null) terminal.close();
     }
 }

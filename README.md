@@ -6,11 +6,11 @@
 
 ## 当前进度
 
-当前已完成多模型 Profile 配置、消息模型、基础提示词、非流式模型调用、本地会话保存/恢复、文件读写，以及基础 Agent 工具循环。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。SSE、命令工具、交互审批、长期记忆和 MCP 尚待实现；已使用本地模拟模型验证，真实厂商兼容性需另行验证。
+当前已完成多模型配置、消息与基础提示词、非流式调用、本地会话保存/恢复、六个文件工具、Agent 循环、权限审批及 ReAct/Plan 切换。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。SSE、命令/网络/删除工具、多 Agent、长期记忆和 MCP 尚待实现；验证使用本地模拟模型，真实厂商兼容性需另行验证。
 
 工作区会话已注册 `list_files`、`search_file`、`grep_code` 与 `read_file`：模型可浏览目录、按名称定位或按正文关键词搜索，再读取内容。工具描述通过结构化 `tools` 字段发送，由 AgentLoop 执行并回填结果，继续请求最终回答。默认每个任务最多请求模型 20 次，最后一次禁用工具用于收尾；完成的工具消息组随会话保存，恢复时不自动重放。说明见 [正文搜索](docs/architecture.md#grep-code)、[文件定位](docs/architecture.md#search-file)、[目录工具](docs/architecture.md#list-files)、[读文件工具](docs/architecture.md#read-file) 和 [Agent 循环](docs/architecture.md#agent-loop)。
 
-另已注册 `write_file`（新建/完整覆盖）和 `edit_file`（精确局部替换）。当前写入直接执行，没有交互审批；默认拒绝覆盖，显式 `overwrite=true` 请求整份覆盖，局部修改优先 `edit_file`。一次工具写入成功后，后续模型失败或消息未保存不会自动回滚文件。实现与参数见 [写入和编辑](#file-writes)。
+另已注册 `write_file`（新建/完整覆盖）和 `edit_file`（精确局部替换）。默认 `react + ask`，只读自动执行，每个文件首次实际修改前确认，成功后本会话复用该文件授权。`/permissions ask|auto|full` 切换权限，`/permissions revoke` 撤销授权；`/mode react|plan` 切换工作模式，PLAN 在 full 下仍保持只读。原生终端底栏显示模式/权限及模型/上次请求输入 token，`/status` 查看详情。上下文上限尚未知，不将上次 token 当作当前占用或累计消耗。一次工具写入成功后，后续模型失败或消息未保存不会自动回滚文件。实现见 [写入和编辑](#file-writes)、[权限模块](#module-policy)。
 
 控制台显示简洁执行进度：调用轮次、工具名称和涉及的文件，最后展示模型回答；工具失败时补充错误码。聊天中输入 `exit` 返回会话列表，列表中 `exit` 退出；`/exit` 随时退出程序。
 
@@ -34,8 +34,8 @@
 | [上下文模块](#module-context) | 待实现：请求组织、预算与压缩 |
 | [记忆模块](#module-memory) | 待实现：长期事实保存与召回 |
 | [MCP 模块](#module-mcp) | 待实现：外部工具协议与适配 |
-| [权限模块](#module-policy) | 待实现：路径策略、审批与执行控制 |
-| [模式切换模块](#module-mode) | 已实现会话内模型切换；PLAN/AGENT 运行模式待实现 |
+| [权限模块](#module-policy) | 已实现 ask/规则 auto/full、逐文件审批、撤销和拒绝拦截；审计及进程沙箱待实现 |
+| [模式切换模块](#module-mode) | 已实现模型切换和 react/plan；multi 明确未开放 |
 | [可观测性模块](#module-observability) | 已实现简洁控制台进度；事件、指标与持久化轨迹待实现 |
 
 ## 技术基线
@@ -373,7 +373,7 @@ ToolCall → Registry.find → Executor 解析 JSON / 检查工作区
 
 **实现方式与边界**：工具用途用自然语言 description，参数用 JSON Schema，由协议适配器编码为结构化 `tools`；MD 只适合额外行为指导。当前只验证 schema 顶层为 object，没有通用 schema 校验器，具体字段/类型/业务限制由工具的 `validateArguments()` 明确实现。
 
-执行器拒绝重复键、尾随 JSON、非对象与超过 64 Ki 字符的参数；需要工作区的工具会检查 NONE/失效目录。默认输出最多 16000 个 Unicode 码点，截断状态单独记录。保留中断标志，不吞 JVM Error，不自动重试。当前同步执行，耗时统计不代表超时控制；统一权限策略、审批、超时与并行调度仍待接入。详见 [工具模块设计与示例](docs/architecture.md#tool-foundation)。
+执行器拒绝重复键、尾随 JSON、非对象与超过 64 Ki 字符的参数；需要工作区的工具会检查 NONE/失效目录。默认输出最多 16000 个 Unicode 码点，截断状态单独记录。保留中断标志，不吞 JVM Error，不自动重试。当前同步执行，耗时统计不代表超时控制；已接入工作模式检查和审批；工具超时与并行调度仍待接入。详见 [工具模块设计与示例](docs/architecture.md#tool-foundation)。
 
 **读文件的参数与流程**：`path` 必填，使用工作区相对路径；`startLine` 从 1 开始，默认 1；`maxLines` 默认 200，最大 500。
 
@@ -458,7 +458,7 @@ ToolCall("grep_code", {query, path?, filePattern?, caseSensitive?, maxResults?})
 
 共用边界：仅工作区相对路径，拒绝路径中的符号链接/junction（包括内部链接）及 Windows ADS。每段模型输入最多 64 KiB UTF-8，完整参数仍受执行器 64 Ki UTF-16 单元上限约束；已有及编辑后文件最多 4 MiB。拒绝 NUL、非法 UTF-8 和无效 Unicode；局部编辑保留未改动的 BOM、空白、换行。底层 Java NIO，无 Shell、正则或模糊编辑。
 
-写前检查输出预算，成功 JSON 不截断、不回传完整正文，字段包括 `path/operation/changed/bytesWritten/fileBytes/sha256`，编辑另有 `replacements`。新文件以同目录临时文件硬链接发布，文件系统需支持硬链接；已有文件原子替换，不支持时失败并保留原文件，失败后清理临时文件。父目录已创建时可能留下空目录；当前不保证保留所有原 ACL/扩展属性。提交前对比文件身份、mtime 和完整字节，捕获本次读取后的常规修改；检查至提交仍有竞态窗口，也未验证跨工具 `read_file` 后文件是否变化。这不是文件系统事务或完整沙箱。权限审批、持久化操作日志和失败自动回滚后续实现。详见 [写入模块设计](docs/architecture.md#file-writes)。
+写前检查输出预算，成功 JSON 不截断、不回传完整正文，字段包括 `path/operation/changed/bytesWritten/fileBytes/sha256`，编辑另有 `replacements`。新文件以同目录临时文件硬链接发布，文件系统需支持硬链接；已有文件原子替换，不支持时失败并保留原文件，失败后清理临时文件。父目录已创建时可能留下空目录；当前不保证保留所有原 ACL/扩展属性。提交前对比文件身份、mtime 和完整字节，捕获本次读取后的常规修改；检查至提交仍有竞态窗口，也未验证跨工具 `read_file` 后文件是否变化。这不是文件系统事务或完整沙箱。已接入准备后审批；持久化操作日志和失败自动回滚后续实现。详见 [写入模块设计](docs/architecture.md#file-writes)。
 
 <a id="module-agent"></a>
 
@@ -527,27 +527,44 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
 
 <a id="module-policy"></a>
 
-### 13. 权限模块：policy（待实现）
+### 13. 权限模块：policy（已实现）
 
 **功能（目标）**：在工具执行前落实文件路径范围、读写/命令策略和需要的审批，不靠提示词文字授予权限。
 
-**涉及文件**：目前只有 [policy/package-info.java](src/main/java/io/github/jackfeicoder/codey/policy/package-info.java)，路径策略、执行策略及审批组件尚未实现。
+**涉及文件**：
 
-**调用流程（计划）**：ToolCall + 工作区/模式 → 执行策略/路径校验 → 必要审批 → 执行或明确拒绝结果。
+| 文件 | 职责 |
+|---|---|
+| [PermissionMode.java](src/main/java/io/github/jackfeicoder/codey/policy/PermissionMode.java) | ask/auto/full 预设、名称与解析 |
+| [PermissionPolicy.java](src/main/java/io/github/jackfeicoder/codey/policy/PermissionPolicy.java) | 执行前检查 PLAN 只读与未实现的 MULTI 模式 |
+| [ApprovalRequest.java](src/main/java/io/github/jackfeicoder/codey/policy/ApprovalRequest.java) | 真实目标、操作、前后指纹/字节数、风险标记和有界预览 |
+| [ApprovalHandler.java](src/main/java/io/github/jackfeicoder/codey/policy/ApprovalHandler.java) | 人工批准/拒绝/不可用接口 |
+| [ApprovalReviewer.java](src/main/java/io/github/jackfeicoder/codey/policy/ApprovalReviewer.java) | 独立审查接口与首版普通文件规则；不是额外 LLM 调用 |
+| [PermissionService.java](src/main/java/io/github/jackfeicoder/codey/policy/PermissionService.java) | 会话文件授权/拒绝记录、自动审查回退与授权撤销 |
+| [ConsoleApprovalHandler.java](src/main/java/io/github/jackfeicoder/codey/cli/ConsoleApprovalHandler.java) | 复用终端输入展示预览、按 y/yes 批准；full 需显式确认 |
+| [PermissionSettings.java](src/main/java/io/github/jackfeicoder/codey/config/PermissionSettings.java) | 加载默认模式和显式管道审批开关 |
+| [ToolAccess.java](src/main/java/io/github/jackfeicoder/codey/tool/ToolAccess.java) | 宿主可信只读/文件修改/未知分类，不读取模型自报权限 |
+| [PreparedToolOperation.java](src/main/java/io/github/jackfeicoder/codey/tool/PreparedToolOperation.java) | 封装确定操作，审批后执行，成功后保存文件授权 |
 
-**实现方式（计划）**：先处理文件路径与读写分类，再加入命令审批和进程隔离。已有真实目录检查、工具是否需要工作区的判断只是基础前置条件，不是完整路径权限或沙箱。
+**调用流程**：ToolExecutor 解析/校验 → PermissionPolicy 检查工作模式 → Tool.prepare 捕获快照、新内容及输出 → PreparedToolOperation 调用 PermissionService → 自动规则/人工批准 → 原快照复检并提交 → 成功后保存文件级授权 → ToolResult 回填。写工具直接 Java execute 也经过 prepare/审批；审批不是模型可自行调用的工具。无实际变化的整体写入不触发审批或建立授权。
+
+**三种预设**：默认普通 ReAct + ask。ask 每个文件首次实际修改需确认，成功后同会话的同文件写入/编辑复用授权；auto 规则自动批准普通文件，敏感/执行配置路径、清空和明显大幅删减转人工；未知工具也需人工。full 跳过审批，路径/参数/冲突检查继续生效。审批范围提示包含写入/编辑/删除，但删除工具尚未接入。auto 只做当前规则能识别的情况，不是语义完备的风险检测，也未复刻模型审查器或 OS 沙箱。
+
+**配置与边界**：`CODEY_PERMISSION_MODE=ask|auto|full`，默认 ask；配置 full 或命令切换 full 仍需本次用户确认。`CODEY_ALLOW_PIPED_APPROVALS=false` 默认不消费管道中的普通聊天作批准；确实需要脚本回答审批时显式设 true，使用 y/yes，其他输入拒绝，EOF/中断不批准。拒绝目标保留到当前会话，跨写工具重试同文件也被拦截；`/permissions revoke` 清除批准/拒绝记录，`/permissions` 列出已批准相对路径。切换会话/权限模式、重启和关闭清除状态，切换模型保留；full 不自动扩散到下一个会话。没有持久审计、完整敏感读取策略或进程/网络隔离，后续扩展工具仍需接入策略。现有工具的工作区范围不会因模式名称扩大。
+
+文件授权复用只适用于 ask。auto 对每次新操作重新执行规则，先前普通写入获批不会顺带允许之后清空文件；auto 转人工时只批准当前一次操作，界面会显示不同的批准范围。
 
 <a id="module-mode"></a>
 
-### 14. 模型与模式切换（模型切换已实现，尚未独立建包）
+### 14. 模型与工作模式切换（已实现 ReAct/Plan）
 
-**功能**：会话内切换模型、保留完整消息历史，默认采用最后选择。PLAN/AGENT 运行行为与工具能力切换后续实现。
+**功能**：会话内切换模型并保留历史，默认采用最后选择；工作模式默认 react，`/mode plan` 只读探索并输出计划，`/mode react` 回到执行模式。`/mode multi` 明确提示尚未实现，不更改状态。
 
 **涉及文件**：ModelProfiles 提供目录和配置校验；Main 装配客户端工厂；SessionLauncher 管理 `/model`、`/list model` 和 `/help`；SessionService 保存会话别名；ModelPreferenceStore 保存默认选择。真实文件见对应模块，目前没有独立模式管理类。
 
 **调用流程**：`/model 供应商 [模型ID]` → 查找该供应商的模型列表/校验配置/创建客户端 → switchProfile 持锁保存完整选择 → 替换聊天/标题客户端 → 保存默认偏好。下一条输入继续携带同一 Session 的文本和工具历史。
 
-**实现方式与边界**：配置或会话保存失败时保留旧模型；默认偏好保存失败不撤销已完成的会话切换，会报告重启默认可能未保存。切换不调用模型、不重放旧工具、不清空历史、不重生成标题。新模型通过请求获得历史，不依赖内部记忆；上下文容量及提供商兼容性仍需实际验证。PLAN 策略后续实现。详见 [模型命令](docs/architecture.md#model-commands)。
+**实现方式与边界**：模型切换不请求远端、不重放工具、不清空历史；新模型通过请求获得历史。WorkMode 和 PermissionMode 独立，每次 answer 创建固定 ToolContext；PLAN 同时通过 Registry 隐藏修改/未知工具、Executor 执行前拦截，运行时只读指导放在 system 请求副本，不保存进历史。full 也不解除 PLAN 约束。命令只在空闲输入时处理，多 Agent 还没有执行调度器。模型容量与提供商兼容性仍需实际验证。详见 [模型命令](docs/architecture.md#model-commands)。
 
 <a id="module-observability"></a>
 
@@ -560,9 +577,13 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
 | 文件 | 职责 |
 |---|---|
 | [DebugPrinter.java](src/main/java/io/github/jackfeicoder/codey/observability/DebugPrinter.java) | 一行显示轮次/工具/文件，失败显示错误码；摘要立即刷新、长名称有界 |
+| [RuntimeStatus.java](src/main/java/io/github/jackfeicoder/codey/cli/RuntimeStatus.java) | 模式、权限、模型和上次模型输入 token，不保存凭证 |
+| [StatusRenderer.java](src/main/java/io/github/jackfeicoder/codey/cli/StatusRenderer.java) | 按终端显示列宽左右对齐，转义控制字符，窄屏优先保留模式 |
 | [observability/package-info.java](src/main/java/io/github/jackfeicoder/codey/observability/package-info.java) | 当前打印能力与后续事件/指标的职责说明 |
 
 **调用流程**：Main 创建 DebugPrinter → AgentLoop 请求前打印轮次 → 执行工具前打印名称与 path → 失败打印错误码 → CLI 展示最终回答。
+
+原生终端由 ConsoleInput 使用 JLine Status 保留底栏，左侧工作模式/权限，右侧模型/上次请求输入 token；管道退化为普通单行，不发送 ANSI 控制码。SessionLauncher 观察模型响应更新状态，切换模型清除旧计数，`/status` 查看来源与授权数量。当前没有精确当前上下文估算或模型窗口配置，因此未知量显示 ?，不使用累计用量冒充占用。鼠标点击菜单尚未实现。
 
 **实现方式与边界**：直接在执行位置加打印，不建立事件观察接口。Main 默认启用，旧核心构造方式默认静默；LLM 适配器不打印 HTTP 正文。工具摘要只提取 path，成功不展示工具正文，失败只展示类别；完整结果仍回填模型并随成功轮次保存。提示词、历史、原始响应和认证头不作为日志输出。自动标题请求不计入 ReAct 次数。进度不进入会话消息、不生成额外日志文件；统一指标与事件存储后续加入。详见 [简洁控制台输出](docs/architecture.md#console-debug)。
 
@@ -609,7 +630,7 @@ codeY/
 | M0 | 工程、入口与设计文档 | 已完成 |
 | M1 | LLM 调用与 SSE 流式输出 | 进行中：配置、消息、非流式调用与连续对话已完成 |
 | M2 | Agent 循环与只读工具 | list_files、search_file、grep_code、read_file、tools 请求、基础循环与工具历史已完成；正则与语义检索后续扩展 |
-| M3 | 修改代码、执行命令与验证闭环 | write_file/edit_file 已完成；命令、审批、验证证据与失败恢复待实现 |
+| M3 | 修改代码、执行命令与验证闭环 | write_file/edit_file、审批、ReAct/Plan 已完成；命令、审计、验证证据与失败恢复待实现 |
 | M4 | 上下文预算与历史压缩 | 待实现 |
 | M5 | 会话恢复与项目记忆 | 文本/工具对话保存恢复已实现；执行中恢复与长期记忆待实现 |
 | M6 | MCP 工具接入 | 待实现 |
@@ -711,7 +732,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/c
 
 ## 验证与文档维护
 
-最近一次完整构建 `mvn verify` 共 506 项测试通过，无失败、错误或跳过。写入/编辑新增 45 项临时文件测试与 3 项 Agent 组合测试，覆盖创建/覆盖保护、精确替换/插入/删除、歧义及错误修正、编码/BOM/换行、输入/输出/文件大小预算、路径/链接边界、文件冲突、中断与临时文件清理。另通过 6 组本地 HTTP JAR 验证：生产六工具注册与新建→读取→编辑→回答/保存、跨进程恢复不重放、覆盖/歧义/不存在/越界错误回填及修正、无工作区的两个入口隐藏工具、写入后 429 不回滚文件且不提交失败消息、最终预算轮次禁止写入。配置、会话与工作区全部隔离，未读取真实 .env 或调用真实厂商。此前正文搜索等功能的验证记录保留在设计文档。
+最近一次完整构建 `mvn verify` 共 541 项测试通过，无失败、错误或跳过。权限阶段新增 35 项测试，覆盖默认 ask、按文件授权/撤销/拒绝、直接工具调用、未知工具、自动规则/人工回退、审批期间冲突、准备后参数变化、PLAN+full、会话恢复、管道不误读、配置和 token 状态。终端测试使用真实 JLine 编辑器配合虚拟终端，验证底栏与窗口缩窄；厂商请求使用替身。另通过 7 组本地 HTTP JAR 验证：生产六工具与首次批准/授权复用、恢复不恢复批准或重放写入、管道默认不误读下一条聊天、full 显式确认和 PLAN 拦截、auto 普通写入/敏感目标拒绝及跨工具重试拦截、撤销后重新批准、无工作区两个入口隐藏工具。全部配置、会话与工作区隔离，未读取真实 .env 或调用真实厂商。原有写入、搜索、会话、配置及协议回归全部保留。
 
 后续每完成或调整模块，同步维护模块导航和对应章节的四项内容：
 

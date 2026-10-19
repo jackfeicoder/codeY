@@ -24,11 +24,18 @@ public final class WriteFileTool implements Tool {
     @Override public ToolDefinition definition() { return DEFINITION; }
     /** 普通聊天不展示或执行文件写入。 */
     @Override public boolean requiresWorkspace() { return true; }
+    @Override public ToolAccess access() { return ToolAccess.FILE_MUTATION; }
     /** 实际字段/类型/编码校验与 execute 共用，不只依赖 schema。 */
     @Override public void validateArguments(JsonNode arguments, ToolContext context) { options(arguments); }
 
     /** 先构造完整结果并检查输出预算，再落盘；成功输出不含文件正文。 */
     @Override public String execute(JsonNode arguments, ToolContext context) throws InterruptedException {
+        return prepare(arguments, context).execute(context);
+    }
+
+    /** 捕获本次完整变更，审批界面与真正提交使用相同快照和字节。 */
+    @Override public PreparedToolOperation prepare(JsonNode arguments, ToolContext context) throws InterruptedException {
+        io.github.jackfeicoder.codey.policy.PermissionPolicy.check(context.workMode(), access());
         WorkspaceTextFiles.checkInterrupted();
         Options options = options(arguments);
         try {
@@ -43,9 +50,12 @@ public final class WriteFileTool implements Tool {
                     .put("operation", original == null ? "create" : "overwrite").put("changed", changed)
                     .put("bytesWritten", changed ? options.content().length : 0).put("fileBytes", options.content().length)
                     .put("sha256", WorkspaceTextFiles.sha256(options.content())).toString(), context);
-            if (changed) WorkspaceTextFiles.commit(target, original, options.content());
-            else WorkspaceTextFiles.verifyUnchanged(target, original);
-            return output;
+            var approval = changed ? WorkspaceTextFiles.approval("write_file", target, original, options.content(),
+                    original == null ? "create" : "overwrite") : null;
+            return new PreparedToolOperation(approval, () -> {
+                WorkspaceTextFiles.commitPrepared(target, original, options.content(), changed);
+                return output;
+            });
         } catch (IOException failed) {
             WorkspaceTextFiles.checkInterrupted();
             throw WorkspaceTextFiles.failure(failed);

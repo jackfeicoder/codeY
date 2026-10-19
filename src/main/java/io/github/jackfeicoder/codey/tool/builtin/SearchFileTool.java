@@ -17,6 +17,7 @@ import java.util.Set;
 
 /** 按文件名或相对路径通配符定位文件，只返回路径，不读取正文、不搜索代码内容。 */
 public final class SearchFileTool implements Tool {
+    @Override public io.github.jackfeicoder.codey.tool.ToolAccess access() { return io.github.jackfeicoder.codey.tool.ToolAccess.READ_ONLY; }
     /** 返回路径条数的默认值与硬上限，扫描量另受共享遍历器限制。 */
     public static final int DEFAULT_MAX_RESULTS = 100;
     public static final int MAX_RESULTS = 1_000;

@@ -28,6 +28,7 @@ import java.util.Set;
 
 /** 在工作区文本正文中执行字面搜索，返回匹配行；不执行 Shell、不推测关键词、不调用其他工具。 */
 public final class GrepCodeTool implements Tool {
+    @Override public io.github.jackfeicoder.codey.tool.ToolAccess access() { return io.github.jackfeicoder.codey.tool.ToolAccess.READ_ONLY; }
     /** 查询限制为单行文本；参数长度按 Unicode 字符计数。 */
     public static final int MAX_QUERY_LENGTH = 256;
     /** 返回匹配行数，单行多次出现关键词也只返回一条。 */

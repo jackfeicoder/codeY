@@ -330,7 +330,10 @@ class TextWriteToolsTest {
     }
     private ToolRegistry registry() { return new ToolRegistry().register(new WriteFileTool()).register(new EditFileTool()); }
     private ToolContext context() throws Exception {
-        return new ToolContext(new WorkspaceBinding(WorkspaceBinding.Mode.DIRECTORY, directory.toRealPath().toString()));
+        var workspace = new WorkspaceBinding(WorkspaceBinding.Mode.DIRECTORY, directory.toRealPath().toString());
+        return new ToolContext(workspace, ToolContext.DEFAULT_MAX_OUTPUT_CHARS, io.github.jackfeicoder.codey.agent.WorkMode.REACT,
+                new io.github.jackfeicoder.codey.policy.PermissionService(io.github.jackfeicoder.codey.policy.PermissionMode.FULL,
+                        workspace, io.github.jackfeicoder.codey.policy.ApprovalHandler.unavailable()));
     }
     private JsonNode success(ToolResult result) throws Exception {
         assertEquals(ToolResult.Status.SUCCESS, result.status(), result.output());

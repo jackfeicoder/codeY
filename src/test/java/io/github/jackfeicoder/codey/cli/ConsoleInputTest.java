@@ -19,6 +19,26 @@ import static org.junit.jupiter.api.Assertions.*;
 @Timeout(5)
 class ConsoleInputTest {
     @Test
+    void fixedFooterWorksWithRealLineEditorAndTerminalResize() throws Exception {
+        var bytes = new ByteArrayInputStream("first\rsecond\r".getBytes(StandardCharsets.UTF_8));
+        var display = new ByteArrayOutputStream();
+        var terminal = new DumbTerminal("fixture", "xterm", bytes, display, StandardCharsets.UTF_8);
+        terminal.setSize(new org.jline.terminal.Size(100, 25));
+        try (var input = new ConsoleInput(new BufferedReader(new StringReader("")), new PrintWriter(display), terminal)) {
+            var status = new RuntimeStatus(); status.model("fixture model");
+            input.status(status);
+            assertEquals("first", input.readLine("You> "));
+            terminal.setSize(new org.jline.terminal.Size(28, 10));
+            status.modes(io.github.jackfeicoder.codey.agent.WorkMode.PLAN, io.github.jackfeicoder.codey.policy.PermissionMode.FULL);
+            assertEquals("second", input.readLine("You> "));
+            input.status(null);
+        }
+        String text = display.toString(StandardCharsets.UTF_8);
+        assertTrue(text.contains("react"));
+        assertTrue(text.contains("plan"));
+    }
+
+    @Test
     void plainInputKeepsUnicodePromptsAndEof() throws Exception {
         var output = new StringWriter();
         try (var input = new ConsoleInput(new BufferedReader(new StringReader("你好\n/exit\n")), new PrintWriter(output))) {
@@ -39,8 +59,8 @@ class ConsoleInputTest {
     void arrowKeyChangesMenuCandidateAndEnterConfirmsBeforeSubmission() throws Exception {
         String first = edit("/m\t\r\r");
         String next = edit("/m\t\u001b[B\r\r");
-        assertTrue(List.of("/model", "/more_session").contains(first), "first=" + first);
-        assertTrue(List.of("/model", "/more_session").contains(next), "next=" + next);
+        assertTrue(List.of("/model", "/mode", "/more_session").contains(first), "first=" + first);
+        assertTrue(List.of("/model", "/mode", "/more_session").contains(next), "next=" + next);
         assertNotEquals(first, next);
     }
 

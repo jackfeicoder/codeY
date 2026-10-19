@@ -71,6 +71,10 @@ public final class AgentLoop {
             boolean finalRound = step == maxSteps;
             // 预算提示只改本次请求中的 system 副本，既不伪造用户消息，也不写入会话快照。
             var requestMessages = new ArrayList<>(messages);
+            if (context.workMode() == WorkMode.PLAN) {
+                requestMessages.set(0, Message.system(messages.get(0).content()
+                        + "\n\n[当前工作模式：PLAN]\n只读探索并输出计划，不修改文件、不执行副作用操作。用户可用 /mode react 切换后实施。"));
+            }
             int remaining = maxSteps - step + 1;
             if (remaining <= 3) {
                 String instruction = finalRound
@@ -78,7 +82,7 @@ public final class AgentLoop {
                         + "明确尚未完成或尚未确认的部分，不要声称未执行的操作已完成，不要再请求工具。"
                         : "当前任务最多允许 " + maxSteps + " 次模型请求，包括本次还剩 " + remaining
                         + " 次。请优先使用已有证据，避免重复探索；信息足够时立即回答，最后一次请求将禁用工具并用于总结。";
-                requestMessages.set(0, Message.system(messages.get(0).content() + "\n\n[运行时任务预算]\n" + instruction));
+                requestMessages.set(0, Message.system(requestMessages.get(0).content() + "\n\n[运行时任务预算]\n" + instruction));
             }
             LlmRequest request = new LlmRequest(requestMessages, registry.definitions(context), !finalRound);
             debug.round(step);

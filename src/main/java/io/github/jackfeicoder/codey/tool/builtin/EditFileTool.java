@@ -23,11 +23,18 @@ public final class EditFileTool implements Tool {
     @Override public ToolDefinition definition() { return DEFINITION; }
     /** 局部编辑只能在宿主绑定的项目工作区执行。 */
     @Override public boolean requiresWorkspace() { return true; }
+    @Override public ToolAccess access() { return ToolAccess.FILE_MUTATION; }
     /** 校验实际参数；文件存在性和匹配情况在 execute 中检查。 */
     @Override public void validateArguments(JsonNode arguments, ToolContext context) { options(arguments); }
 
     /** 完整读取 → 计数/限额 → 构造新文本 → 检查结果预算 → 冲突检查与提交。 */
     @Override public String execute(JsonNode arguments, ToolContext context) throws InterruptedException {
+        return prepare(arguments, context).execute(context);
+    }
+
+    /** 精确匹配与结果预算检查完成后才审批，避免无效编辑打扰用户。 */
+    @Override public PreparedToolOperation prepare(JsonNode arguments, ToolContext context) throws InterruptedException {
+        io.github.jackfeicoder.codey.policy.PermissionPolicy.check(context.workMode(), access());
         WorkspaceTextFiles.checkInterrupted();
         Options options = options(arguments);
         try {
@@ -51,8 +58,11 @@ public final class EditFileTool implements Tool {
                     .put("operation", "edit").put("changed", true).put("replacements", count)
                     .put("bytesWritten", replacement.length).put("fileBytes", replacement.length)
                     .put("sha256", WorkspaceTextFiles.sha256(replacement)).toString(), context);
-            WorkspaceTextFiles.commit(target, original, replacement);
-            return output;
+            var approval = WorkspaceTextFiles.approval("edit_file", target, original, replacement, "edit");
+            return new PreparedToolOperation(approval, () -> {
+                WorkspaceTextFiles.commitPrepared(target, original, replacement, true);
+                return output;
+            });
         } catch (IOException failed) {
             WorkspaceTextFiles.checkInterrupted();
             throw WorkspaceTextFiles.failure(failed);

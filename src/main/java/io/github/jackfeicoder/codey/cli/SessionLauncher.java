@@ -1,6 +1,9 @@
 package io.github.jackfeicoder.codey.cli;
 
 import io.github.jackfeicoder.codey.agent.AgentLoop;
+import io.github.jackfeicoder.codey.agent.WorkMode;
+import io.github.jackfeicoder.codey.config.PermissionSettings;
+import io.github.jackfeicoder.codey.policy.*;
 import io.github.jackfeicoder.codey.config.ConfigException;
 import io.github.jackfeicoder.codey.config.SessionSettings;
 import io.github.jackfeicoder.codey.config.ModelPreferenceStore;
@@ -86,6 +89,12 @@ public final class SessionLauncher {
     private boolean browsing = true;
     /** EOF 或任意输入阶段的 /exit 使入口结束。 */
     private boolean exiting;
+    /** 配置只在宿主启动时读取；模式、批准不写入聊天快照。 */
+    private final ConsoleApprovalHandler approvalHandler;
+    private PermissionMode permissionMode;
+    private WorkMode workMode = WorkMode.REACT;
+    private PermissionService permissions;
+    private final RuntimeStatus runtimeStatus = new RuntimeStatus();
 
     /** 输入、模型工厂和存储可替换，测试无需真实终端、用户目录或厂商凭证。 */
     public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
@@ -134,6 +143,16 @@ public final class SessionLauncher {
                            ConsoleInput input, PrintWriter output, PrintWriter errors, Options options,
                            ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog,
                            int maxIterations) {
+        this(startup, settings, store, models, basePrompt, input, output, errors, options, tools, debug,
+                modelCatalog, maxIterations, new PermissionSettings());
+    }
+
+    /** 权限生产装配入口；旧测试/库构造默认 ask，且不接受管道中的隐式批准。 */
+    public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
+                           Function<String, ModelChoice> models, Supplier<String> basePrompt,
+                           ConsoleInput input, PrintWriter output, PrintWriter errors, Options options,
+                           ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog,
+                           int maxIterations, PermissionSettings permissionSettings) {
         if (maxIterations < 1 || maxIterations > AgentLoop.MAX_STEPS) throw new IllegalArgumentException("Agent steps must be within 1..100.");
         this.maxIterations = maxIterations;
         this.startup = startup.toAbsolutePath().normalize();
@@ -150,11 +169,21 @@ public final class SessionLauncher {
         this.options = options;
         this.tools = java.util.Objects.requireNonNull(tools, "tools");
         this.debug = java.util.Objects.requireNonNull(debug, "debug");
+        java.util.Objects.requireNonNull(permissionSettings);
+        this.approvalHandler = new ConsoleApprovalHandler(input, output, permissionSettings.pipedApprovals());
+        this.permissionMode = permissionSettings.mode();
+        input.status(runtimeStatus);
+        updateModes();
     }
 
     /** EOF 或 /exit 结束；错误保存会话返回 1，参数配置错误由 Main 分类。 */
     public int run() throws IOException {
         try {
+            if (permissionMode == PermissionMode.FULL && !confirmFull()) {
+                permissionMode = PermissionMode.ASK;
+                output.println("full 未启用，当前保持 ask；无交互终端时可显式配置管道审批。");
+                updateModes();
+            }
             if (options.resume() != null) {
                 resume(options.resume(), false);
             } else if (options.workspace() != null || options.noWorkspace() || options.title() != null) {
@@ -181,6 +210,12 @@ public final class SessionLauncher {
                         refresh(); // 刚才的轮次已保存；保留活动会话，可 /back 或选择其他会话。
                     } else if ("/help".equals(command)) {
                         printCommands();
+                    } else if (command.equals("/permissions") || command.startsWith("/permissions ")) {
+                        changePermissions(command.substring(12).strip());
+                    } else if (command.equals("/mode") || command.startsWith("/mode ")) {
+                        changeWorkMode(command.substring(5).strip());
+                    } else if (command.equals("/status")) {
+                        printStatus();
                     } else if (command.matches("/list\\s+model")) {
                         listModels();
                     } else if ("/model".equals(command)) {
@@ -232,6 +267,8 @@ public final class SessionLauncher {
             }
             return savePending() ? 0 : 1;
         } finally {
+            if (permissions != null) permissions.revoke();
+            input.status(null);
             if (active != null) active.close();
             output.flush();
             errors.flush();
@@ -396,6 +433,13 @@ public final class SessionLauncher {
         }
         active = candidate;
         model = selected;
+        // 替换会话清除旧批准；full 不自动扩散到另一个会话，工作模式回到 ReAct。
+        if (permissions != null && permissionMode == PermissionMode.FULL) permissionMode = PermissionMode.ASK;
+        workMode = WorkMode.REACT;
+        if (permissions != null) permissions.revoke();
+        permissions = new PermissionService(permissionMode, active.snapshot().workspace(), approvalHandler);
+        runtimeStatus.model(selected.profile());
+        updateModes();
         startupProfile = null; // 后续新建与恢复使用最近选择，不重复套用启动覆盖。
         rememberModel(selected.profile());
         browsing = false;
@@ -444,6 +488,7 @@ public final class SessionLauncher {
         ModelChoice selected = models.apply(profile); // 不套用启动覆盖，也不发探测请求。
         active.switchProfile(selected.profile());
         model = selected;
+        runtimeStatus.model(selected.profile());
         rememberModel(selected.profile());
         output.println("已切换模型：" + selected.profile() + "；原会话和消息历史已保留。");
     }
@@ -481,13 +526,80 @@ public final class SessionLauncher {
 
     /** 先保存成功回答，再执行一次有界标题任务；生成文本不会加入历史。 */
     private void answer(String line) {
-        ChatCli chat = new ChatCli(new AgentLoop(model.chat(), tools, maxIterations, debug), active.session(),
-                new ToolContext(active.snapshot().workspace()), input, output, errors);
+        // 模型客户端/模式在任务开始时固定，运行中不消费切换命令；状态只观察响应。
+        final var selectedClient = model.chat();
+        LlmClient observed = request -> {
+            runtimeStatus.usage(null); // 请求失败或未报告 usage 时，不把旧模型计数冒充最新请求。
+            var response = selectedClient.generate(request);
+            if (response != null) runtimeStatus.usage(response.usage());
+            input.refreshStatus();
+            return response;
+        };
+        ChatCli chat = new ChatCli(new AgentLoop(observed, tools, maxIterations, debug), active.session(),
+                new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions), input, output, errors);
         if (chat.answer(line)) {
             active.captureTurn();
             active.save();
             generateTitle();
         }
+    }
+
+    /** 无参数选择菜单，参数直接切换；revoke 由用户撤销本会话的批准与拒绝。 */
+    private void changePermissions(String value) throws IOException {
+        if (value.isEmpty()) {
+            output.println("当前权限：" + permissionMode.value() + "；ask 请求批准 / auto 规则审查 / full 跳过常规审批。");
+            if (permissions != null) {
+                for (String file : permissions.grantedFiles()) output.println("  已批准文件：" + ConsoleApprovalHandler.clean(file));
+                output.println("/permissions revoke 撤销当前会话全部文件授权和拒绝记录。");
+            }
+            if (!input.isInteractive()) return;
+            value = read("选择权限 ask/auto/full（空行保持，revoke 撤销文件授权）> ");
+            if (value == null || value.isBlank()) return;
+        }
+        if (value.equals("revoke")) {
+            if (permissions != null) permissions.revoke();
+            output.println("已撤销当前会话文件授权和拒绝记录。");
+            return;
+        }
+        var next = PermissionMode.parse(value);
+        if (next == PermissionMode.FULL && permissionMode != next && !confirmFull()) {
+            output.println("未启用 full，原权限保持。"); return;
+        }
+        if (permissionMode != next) {
+            if (permissions != null) permissions.revoke();
+            permissionMode = next;
+            if (active != null) permissions = new PermissionService(next, active.snapshot().workspace(), approvalHandler);
+        }
+        updateModes();
+        output.println("权限模式：" + next.value() + "（" + next.label() + "）。当前工具仅支持工作区文件；命令/网络/删除尚未接入。");
+    }
+
+    /** 工作模式和权限分别切换；Multi 未实现时不更新任何状态。 */
+    private void changeWorkMode(String value) throws IOException {
+        if (value.isEmpty()) {
+            output.println("当前工作模式：" + workMode.value() + "；multi 尚待实现。");
+            if (!input.isInteractive()) return;
+            value = read("选择工作模式 react/plan（空行保持）> ");
+            if (value == null || value.isBlank()) return;
+        }
+        WorkMode next = WorkMode.parse(value);
+        if (next == WorkMode.MULTI) { output.println("multi 尚待实现，工作模式保持不变。"); return; }
+        workMode = next; updateModes();
+        output.println("工作模式：" + next.value() + (next == WorkMode.PLAN ? "（只读探索并输出计划）" : "（执行任务）"));
+    }
+
+    private void updateModes() { runtimeStatus.modes(workMode, permissionMode); }
+    private void printStatus() {
+        output.println("工作模式：" + workMode.value() + "；权限：" + permissionMode.value());
+        output.println("模型与用量：" + runtimeStatus.right());
+        output.println("Token 是服务商报告的上次请求输入量，不是当前上下文估算或累计消耗；模型上下文上限尚未配置。");
+        output.println("文件授权 " + (permissions == null ? 0 : permissions.grantCount()) + "；拒绝记录 "
+                + (permissions == null ? 0 : permissions.denialCount()) + "。/permissions revoke 可撤销。");
+        output.println("文件权限限制来自内置工具路径检查，当前没有进程/网络沙箱。");
+    }
+    private boolean confirmFull() {
+        try { return approvalHandler.confirmFull(); }
+        catch (InterruptedException cancelled) { Thread.currentThread().interrupt(); return false; }
     }
 
     /** 提前保存已尝试标记，崩溃恢复也不会重复请求标题模型。 */
