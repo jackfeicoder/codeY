@@ -571,7 +571,7 @@ public final class SessionLauncher {
             if (active != null) permissions = new PermissionService(next, active.snapshot().workspace(), approvalHandler);
         }
         updateModes();
-        output.println("权限模式：" + next.value() + "（" + next.label() + "）。当前工具仅支持工作区文件；命令/网络/删除尚未接入。");
+        output.println("权限模式：" + next.value() + "（" + next.label() + "）。命令在 ask/auto 下逐次批准；full 跳过审批，工作目录不构成进程沙箱。");
     }
 
     /** 工作模式和权限分别切换；Multi 未实现时不更新任何状态。 */

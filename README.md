@@ -6,7 +6,7 @@
 
 ## 当前进度
 
-当前已完成多模型配置、消息与基础提示词、非流式调用、本地会话保存/恢复、六个文件工具、Agent 循环、权限审批及 ReAct/Plan 切换。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。SSE、命令/网络/删除工具、多 Agent、长期记忆和 MCP 尚待实现；验证使用本地模拟模型，真实厂商兼容性需另行验证。
+当前已完成多模型配置、消息与基础提示词、非流式调用、本地会话保存/恢复、六个文件工具、execute_command 本地命令、Agent 循环、权限审批及 ReAct/Plan 切换。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。SSE、专用网络/删除工具、进程沙箱、多 Agent、长期记忆和 MCP 尚待实现；验证使用本地模拟模型，真实厂商兼容性需另行验证。
 
 工作区会话已注册 `list_files`、`search_file`、`grep_code` 与 `read_file`：模型可浏览目录、按名称定位或按正文关键词搜索，再读取内容。工具描述通过结构化 `tools` 字段发送，由 AgentLoop 执行并回填结果，继续请求最终回答。默认每个任务最多请求模型 20 次，最后一次禁用工具用于收尾；完成的工具消息组随会话保存，恢复时不自动重放。说明见 [正文搜索](docs/architecture.md#grep-code)、[文件定位](docs/architecture.md#search-file)、[目录工具](docs/architecture.md#list-files)、[读文件工具](docs/architecture.md#read-file) 和 [Agent 循环](docs/architecture.md#agent-loop)。
 
@@ -29,7 +29,7 @@
 | [模型对话模块](#module-llm) | 已实现：非流式 Chat Completions |
 | [CLI 交互模块](#module-cli) | 已实现：启动选择、输入、分页与会话命令 |
 | [会话管理模块](#module-session) | 已实现：内存历史、本地保存/恢复与标题 |
-| [工具模块](#module-tool) | 已实现基础结构、list_files/search_file/grep_code/read_file，已接入模型和 CLI |
+| [工具模块](#module-tool) | 已实现六个文件工具及 execute_command，已接入模型、审批和 CLI |
 | [Agent 执行模块](#module-agent) | 已实现：工具循环、轮次预算、中断与完成状态 |
 | [上下文模块](#module-context) | 待实现：请求组织、预算与压缩 |
 | [记忆模块](#module-memory) | 待实现：长期事实保存与召回 |
@@ -136,6 +136,7 @@ Main → 注册工具 / 加载会话设置 → SessionLauncher 展示历史
 | [AuthMode.java](src/main/java/io/github/jackfeicoder/codey/config/AuthMode.java) | 表达 Bearer 认证或无需认证的 NONE 模式 |
 | [SessionSettings.java](src/main/java/io/github/jackfeicoder/codey/config/SessionSettings.java) | 加载数据目录、建议工作区、自动标题设置，不保存模型凭证 |
 | [AgentSettings.java](src/main/java/io/github/jackfeicoder/codey/config/AgentSettings.java) | 启动时加载任务模型请求预算与目录工具默认深度，校验范围后由 Main 注入 |
+| [CommandSettings.java](src/main/java/io/github/jackfeicoder/codey/config/CommandSettings.java) | 命令默认/最大超时、输出保留预算及解码字符集，环境覆盖 .env |
 | [ConfigException.java](src/main/java/io/github/jackfeicoder/codey/config/ConfigException.java) | 表达读取/字段校验错误，供 CLI 展示 |
 | [.env.example](.env.example) | 可填写字段模板；实际运行加载 `.env`，模板不作为有效配置 |
 
@@ -337,9 +338,9 @@ CLI 的 `/clear` 保存旧会话并创建新 ID，沿用工作区/模型，旧�
 
 <a id="module-tool"></a>
 
-### 8. 工具模块：tool（目录浏览、文件定位、正文搜索与读取已实现）
+### 8. 工具模块：tool（文件操作与本地命令已实现）
 
-**功能**：将模型可见定义与 Java 执行分开，统一注册、查找、参数校验入口、工作区检查、错误结果和输出上限。`list_files` 浏览目录，`search_file` 定位路径，`grep_code` 搜正文，`read_file` 阅读，`write_file` 完整写入，`edit_file` 局部编辑。六个工具各自实现 Tool，互不调用，由模型按任务选择，均已接入工作区会话的工具循环。
+**功能**：将模型可见定义与 Java 执行分开，统一注册、查找、参数校验入口、工作区检查、错误结果和输出上限。`list_files` 浏览目录，`search_file` 定位路径，`grep_code` 搜正文，`read_file` 阅读，`write_file` 完整写入，`edit_file` 局部编辑。增加 execute_command 后，七个工具各自实现 Tool，互不调用，由模型按任务选择，均已接入工作区会话的工具循环。
 
 **涉及文件**：
 
@@ -359,24 +360,55 @@ CLI 的 `/clear` 保存旧会话并创建新 ID，沿用工作区/模型，旧�
 | [builtin/GrepCodeTool.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/GrepCodeTool.java) | grep_code 参数、逐行字面匹配、文件跳过/预算统计和完整匹配结果 |
 | [builtin/WriteFileTool.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/WriteFileTool.java) | 完整内容写入、默认覆盖保护、创建/覆盖/未变化结果 |
 | [builtin/EditFileTool.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/EditFileTool.java) | 精确匹配计数、唯一匹配校验、替换/插入/删除与替换全部 |
+| [builtin/ExecuteCommandTool.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/ExecuteCommandTool.java) | 命令 schema/校验、固定 argv 和审批预览、完整进程结果 JSON |
+| [process/CommandResolver.java](src/main/java/io/github/jackfeicoder/codey/tool/process/CommandResolver.java) | PATH/实际程序定位、Windows 参数及批处理适配、程序身份复检 |
+| [process/CommandRunner.java](src/main/java/io/github/jackfeicoder/codey/tool/process/CommandRunner.java) | 启动进程、关闭 stdin、并行排空日志、超时/取消和已观察后代清理 |
 | [filesystem/WorkspaceTextFiles.java](src/main/java/io/github/jackfeicoder/codey/tool/filesystem/WorkspaceTextFiles.java) | 两个写工具共用的路径/链接检查、严格 UTF-8、快照冲突检查和临时文件提交 |
 | [filesystem/WorkspaceFiles.java](src/main/java/io/github/jackfeicoder/codey/tool/filesystem/WorkspaceFiles.java) | 目录工具共用的工作区路径校验、有界排序/遍历、忽略和链接规则 |
 | [filesystem/FileGlob.java](src/main/java/io/github/jackfeicoder/codey/tool/filesystem/FileGlob.java) | 跨平台名称/路径模式匹配，支持 *、? 和独立的 ** 目录段 |
 | [filesystem/Utf8TextReader.java](src/main/java/io/github/jackfeicoder/codey/tool/filesystem/Utf8TextReader.java) | read_file 与 grep_code 共用严格 UTF-8/BOM/换行、有界行读取和实际字节预算 |
-| [builtin/package-info.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/package-info.java) | 六个内置文件工具的职责说明；命令工具后续加入 |
+| [builtin/package-info.java](src/main/java/io/github/jackfeicoder/codey/tool/builtin/package-info.java) | 六个文件工具与本地命令的职责说明 |
 
 **调用流程**：
 
 ```text
 宿主 register(Tool) → 固定 ToolDefinition 与 Java 实现
 ToolCall → Registry.find → Executor 解析 JSON / 检查工作区
-  → Tool.validateArguments → Tool.execute → ToolResult → toMessage()
+  → Tool.validateArguments → 工作模式检查 → Tool.prepare
+  → PreparedToolOperation 审批/执行 → ToolResult → toMessage()
 模型接入：Registry.definitions(context) → LLM 请求 tools → AgentLoop 调度与回填
 ```
 
 **实现方式与边界**：工具用途用自然语言 description，参数用 JSON Schema，由协议适配器编码为结构化 `tools`；MD 只适合额外行为指导。当前只验证 schema 顶层为 object，没有通用 schema 校验器，具体字段/类型/业务限制由工具的 `validateArguments()` 明确实现。
 
-执行器拒绝重复键、尾随 JSON、非对象与超过 64 Ki 字符的参数；需要工作区的工具会检查 NONE/失效目录。默认输出最多 16000 个 Unicode 码点，截断状态单独记录。保留中断标志，不吞 JVM Error，不自动重试。当前同步执行，耗时统计不代表超时控制；已接入工作模式检查和审批；工具超时与并行调度仍待接入。详见 [工具模块设计与示例](docs/architecture.md#tool-foundation)。
+执行器拒绝重复键、尾随 JSON、非对象与超过 64 Ki 字符的参数；需要工作区的工具会检查 NONE/失效目录。默认输出最多 16000 个 Unicode 码点，截断状态单独记录。保留中断标志，不吞 JVM Error，不自动重试。当前按模型调用组顺序同步执行，已接入工作模式检查和审批；execute_command 单独实现进程超时，其他工具未统一增加执行超时，并行工具调度仍待实现。详见 [工具模块设计与示例](docs/architecture.md#tool-foundation)。
+
+<a id="execute-command"></a>
+
+**本地命令工具 execute_command**：启动单个程序，用于编译、测试和诊断；返回退出码及 stdout/stderr，不在工具内部自动修复或重试。
+
+```json
+{"command":"mvn","args":["test"],"workingDirectory":".","timeoutSeconds":60}
+```
+
+| 参数 | 用途及边界 |
+|---|---|
+| command | 必填，单个程序名或路径；裸名称搜索 PATH，程序路径可为绝对路径或相对工作目录 |
+| args | 默认空数组，最多 32 个字符串，每项最多 1024 个 UTF-16 单元；可见参数预览合计最多 8192 字符 |
+| workingDirectory | 默认 `.`，现有的工作区相对目录；拒绝越界或指向工作区外的链接 |
+| timeoutSeconds | 默认 60 秒，可选 1 至宿主最大值；宿主最大值默认 300 秒、硬上限 600 秒 |
+
+调用流程：模型选择命令 → ToolExecutor 校验 → 解析真实目录与程序 → 固定 argv/目录身份并生成预览 → 权限批准 → 复检目录与程序 → ProcessBuilder 启动 → 同时排空两个输出流 → 等待结束/超时/取消 → 完整 JSON 回填 AgentLoop → 模型决定总结、修复或继续验证。
+
+结果包含 `status`（completed/timed_out）、可空 `exitCode`、`stdout`、`stderr`、`durationMs`、`timedOut`、`stdoutTruncated`、`stderrTruncated`、`outputIncomplete`、`cleanupIncomplete`。外层 ToolResult.success 表示获得有效执行结果；completed + 非零 exitCode 表示程序报错。超时退出码为 null；找不到程序/启动失败分别返回 COMMAND_NOT_FOUND/COMMAND_START_FAILED。中断沿既有 INTERRUPTED 通道结束本轮；Agent 仍受单任务模型请求预算约束。
+
+`ask`、`auto` 每次命令都人工批准，不复用文件授权，不建立长期命令授权。拒绝按真实程序、argv 和 cwd 摘要缓存，修改超时不会解除同一命令的拒绝；其他不同命令仍可独立确认，语义等价命令的识别不是完备的。`full` 跳过审批；`plan`、NONE 会话隐藏并强制拒绝命令工具。
+
+配置：`CODEY_COMMAND_TIMEOUT_SECONDS=60`、`CODEY_COMMAND_MAX_TIMEOUT_SECONDS=300`、`CODEY_COMMAND_MAX_OUTPUT_CHARS=8000`；`CODEY_COMMAND_CHARSET` 默认 Java 平台编码，可按实际程序设置 UTF-8/GBK，修改后重启。stdout/stderr 各保留一半码点预算，超出仍排空；JSON 转义后超出工具总预算会继续缩短日志并标记，保留合法 JSON。
+
+普通程序独立传递 argv，不自动解释 Shell 语法；Windows 适配 `.cmd/.bat`（例如 mvn.cmd），首版批处理参数不接受引号、百分号、感叹号、插入号、`&|<>()` 和控制字符。审批展示真实程序、完整参数和 cwd，控制字符可见，不截掉待审批参数；进度仅显示程序/cwd 和退出或超时摘要，不打印日志全文。历史会话沿用旧 base.md 快照，新会话使用命令指导。
+
+工作目录不是文件/网络沙箱，进程可使用当前用户权限，可能修改或删除工作区外文件、联网，已有副作用不会回滚。后台/交互进程首版不支持，stdin 关闭；尽力清理已观察后代，快速脱离的后代可能未被观察。尚无 OS Job Object/容器隔离，清理可能额外耗时，不完整状态返回模型；程序/目录复检也不是原子启动保证。详见 [命令执行设计](docs/architecture.md#execute-command)。
 
 **读文件的参数与流程**：`path` 必填，使用工作区相对路径；`startLine` 从 1 开始，默认 1；`maxLines` 默认 200，最大 500。
 
@@ -546,14 +578,14 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
 | [PermissionService.java](src/main/java/io/github/jackfeicoder/codey/policy/PermissionService.java) | 会话文件授权/拒绝记录、自动审查回退与授权撤销 |
 | [ConsoleApprovalHandler.java](src/main/java/io/github/jackfeicoder/codey/cli/ConsoleApprovalHandler.java) | 复用终端输入展示预览、按 y/yes 批准；full 需显式确认 |
 | [PermissionSettings.java](src/main/java/io/github/jackfeicoder/codey/config/PermissionSettings.java) | 加载默认模式和显式管道审批开关 |
-| [ToolAccess.java](src/main/java/io/github/jackfeicoder/codey/tool/ToolAccess.java) | 宿主可信只读/文件修改/未知分类，不读取模型自报权限 |
+| [ToolAccess.java](src/main/java/io/github/jackfeicoder/codey/tool/ToolAccess.java) | 宿主可信只读/文件修改/进程/未知分类，不读取模型自报权限 |
 | [PreparedToolOperation.java](src/main/java/io/github/jackfeicoder/codey/tool/PreparedToolOperation.java) | 封装确定操作，审批后执行，成功后保存文件授权 |
 
 **调用流程**：ToolExecutor 解析/校验 → PermissionPolicy 检查工作模式 → Tool.prepare 捕获快照、新内容及输出 → PreparedToolOperation 调用 PermissionService → 自动规则/人工批准 → 原快照复检并提交 → 成功后保存文件级授权 → ToolResult 回填。写工具直接 Java execute 也经过 prepare/审批；审批不是模型可自行调用的工具。无实际变化的整体写入不触发审批或建立授权。
 
-**三种预设**：默认普通 ReAct + ask。ask 每个文件首次实际修改需确认，成功后同会话的同文件写入/编辑复用授权；auto 规则自动批准普通文件，敏感/执行配置路径、清空和明显大幅删减转人工；未知工具也需人工。full 跳过审批，路径/参数/冲突检查继续生效。审批范围提示包含写入/编辑/删除，但删除工具尚未接入。auto 只做当前规则能识别的情况，不是语义完备的风险检测，也未复刻模型审查器或 OS 沙箱。
+**三种预设**：默认普通 ReAct + ask。ask 每个文件首次实际修改需确认，成功后同会话的同文件写入/编辑复用授权；auto 规则自动批准普通文件，敏感/执行配置路径、清空和明显大幅删减转人工；未知工具也需人工。execute_command 在 ask/auto 下每次都需人工批准，不复用文件授权。full 跳过审批，路径/参数/冲突检查继续生效。审批范围提示包含写入/编辑/删除，但删除工具尚未接入。auto 只做当前规则能识别的情况，不是语义完备的风险检测，也未复刻模型审查器或 OS 沙箱。
 
-**配置与边界**：`CODEY_PERMISSION_MODE=ask|auto|full`，默认 ask；配置 full 或命令切换 full 仍需本次用户确认。`CODEY_ALLOW_PIPED_APPROVALS=false` 默认不消费管道中的普通聊天作批准；确实需要脚本回答审批时显式设 true，使用 y/yes，其他输入拒绝，EOF/中断不批准。拒绝目标保留到当前会话，跨写工具重试同文件也被拦截；`/permissions revoke` 清除批准/拒绝记录，`/permissions` 列出已批准相对路径。切换会话/权限模式、重启和关闭清除状态，切换模型保留；full 不自动扩散到下一个会话。没有持久审计、完整敏感读取策略或进程/网络隔离，后续扩展工具仍需接入策略。现有工具的工作区范围不会因模式名称扩大。
+**配置与边界**：`CODEY_PERMISSION_MODE=ask|auto|full`，默认 ask；配置 full 或命令切换 full 仍需本次用户确认。`CODEY_ALLOW_PIPED_APPROVALS=false` 默认不消费管道中的普通聊天作批准；确实需要脚本回答审批时显式设 true，使用 y/yes，其他输入拒绝，EOF/中断不批准。拒绝目标保留到当前会话，跨写工具重试同文件也被拦截；`/permissions revoke` 清除批准/拒绝记录，`/permissions` 列出已批准相对路径。切换会话/权限模式、重启和关闭清除状态，切换模型保留；full 不自动扩散到下一个会话。没有持久审计、完整敏感读取策略或进程/网络隔离，后续扩展工具仍需接入策略。文件工具保留工作区范围检查；execute_command 的工作目录不是 OS 沙箱，批准的进程可使用当前用户的文件与网络权限。
 
 文件授权复用只适用于 ask。auto 对每次新操作重新执行规则，先前普通写入获批不会顺带允许之后清空文件；auto 转人工时只批准当前一次操作，界面会显示不同的批准范围。
 
@@ -690,7 +722,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --no-workspace
 java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --resume "项目开发"
 ```
 
-构建生成的 JAR 已包含 Jackson 与 JLine 运行依赖，直接使用 `java -jar` 即可。`--prompt` 执行无工作区任务；`--chat` 每轮发送基础提示词、成功历史和当前问题，工作区会话提供六个文件工具。两种入口展示简洁调用进度，都会向选中平台发送真实请求；输出被截断时提示 `finish_reason=length`。
+构建生成的 JAR 已包含 Jackson 与 JLine 运行依赖，直接使用 `java -jar` 即可。`--prompt` 执行无工作区任务；`--chat` 每轮发送基础提示词、成功历史和当前问题，工作区会话提供六个文件工具与 execute_command。两种入口展示简洁调用进度，都会向选中平台发送真实请求；输出被截断时提示 `finish_reason=length`。
 
 启动列表接受已显示序号、完整标题或唯一 ID 前缀（至少 8 位）。进入会话后普通文本就是问题；重名/前缀冲突会显示候选项。每行一个问题，终端使用 Console 编码，重定向输入输出使用 UTF-8。
 
@@ -737,7 +769,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/c
 
 ## 验证与文档维护
 
-最近一次完整构建 `mvn verify` 共 545 项测试通过，无失败、错误或跳过。本次 UI 新增 4 项测试，覆盖真实 JLine 输入框与回答展示、ANSI 不进入模型消息/历史、纯文本管道和 NO_COLOR、长模型名下的模式/token 保留及颜色属性；另在开启配色的虚拟终端下验证 Tab/方向键。权限阶段新增 35 项测试，覆盖默认 ask、按文件授权/撤销/拒绝、直接工具调用、未知工具、自动规则/人工回退、审批期间冲突、准备后参数变化、PLAN+full、会话恢复、管道不误读、配置和 token 状态。终端测试使用真实 JLine 编辑器配合虚拟终端，验证底栏与窗口缩窄；厂商请求使用替身。权限阶段另通过 7 组本地 HTTP JAR 验证：生产六工具与首次批准/授权复用、恢复不恢复批准或重放写入、管道默认不误读下一条聊天、full 显式确认和 PLAN 拦截、auto 普通写入/敏感目标拒绝及跨工具重试拦截、撤销后重新批准、无工作区两个入口隐藏工具。全部配置、会话与工作区隔离，未读取真实 .env 或调用真实厂商。原有写入、搜索、会话、配置及协议回归全部保留。
+最近一次完整构建 `mvn verify` 共 577 项测试通过，无失败、错误或跳过。命令阶段新增 32 项测试，覆盖真实隔离进程的正常/非零退出、双流输出与截断、超时/中断清理、stdin EOF、Windows 参数及批处理优先、审批/拒绝/PLAN/NONE、参数冻结、目录/程序变更、输出预算与配置；另通过 6 组本地 HTTP 生产 JAR 验证，包括 ask/auto 每次实际执行 Maven 版本命令、非零结果回填、管道审批不可用、PLAN 和无工作区。本次 UI 新增 4 项测试，覆盖真实 JLine 输入框与回答展示、ANSI 不进入模型消息/历史、纯文本管道和 NO_COLOR、长模型名下的模式/token 保留及颜色属性；另在开启配色的虚拟终端下验证 Tab/方向键。权限阶段新增 35 项测试，覆盖默认 ask、按文件授权/撤销/拒绝、直接工具调用、未知工具、自动规则/人工回退、审批期间冲突、准备后参数变化、PLAN+full、会话恢复、管道不误读、配置和 token 状态。终端测试使用真实 JLine 编辑器配合虚拟终端，验证底栏与窗口缩窄；厂商请求使用替身。权限阶段另通过 7 组本地 HTTP JAR 验证：生产六工具与首次批准/授权复用、恢复不恢复批准或重放写入、管道默认不误读下一条聊天、full 显式确认和 PLAN 拦截、auto 普通写入/敏感目标拒绝及跨工具重试拦截、撤销后重新批准、无工作区两个入口隐藏工具。全部配置、会话与工作区隔离，未读取真实 .env 或调用真实厂商。原有写入、搜索、会话、配置及协议回归全部保留。
 
 后续每完成或调整模块，同步维护模块导航和对应章节的四项内容：
 

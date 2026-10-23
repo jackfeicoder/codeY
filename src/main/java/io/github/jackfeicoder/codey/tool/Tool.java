@@ -17,7 +17,7 @@ public interface Tool {
                 () -> execute(arguments, context));
     }
 
-    /** 项目文件/命令工具后续覆盖为 true；纯计算等工具可在普通聊天中使用。 */
+    /** 项目文件/命令工具覆盖为 true；纯计算等工具可在普通聊天中使用。 */
     default boolean requiresWorkspace() {
         return false;
     }

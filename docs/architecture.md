@@ -1,6 +1,6 @@
 # CodeY 架构设计
 
-> 版本：0.1，日期：2026-10-19。当前已实现配置、消息、基础提示词、非流式调用、可选工作区、本地会话管理、六个文件工具、AgentLoop、ask/规则 auto/full、会话文件授权、ReAct/Plan 切换和终端状态栏。完成的工具消息组可保存和恢复；执行中恢复、SSE、命令/网络/删除工具、持久审计及多 Agent 仍待实现。验证使用本地替身与临时文件，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
+> 版本：0.1，日期：2026-10-23。当前已实现配置、消息、基础提示词、非流式调用、可选工作区、本地会话管理、六个文件工具、execute_command 本地命令、AgentLoop、ask/规则 auto/full、会话文件授权、ReAct/Plan 切换和终端状态栏。完成的工具消息组可保存和恢复；执行中恢复、SSE、专用网络/删除工具、OS 进程沙箱、持久审计及多 Agent 仍待实现。验证使用本地替身与临时文件，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
 
 ## 阅读导航
 
@@ -10,6 +10,7 @@
 - [工具模块骨架与工具描述](#tool-foundation)
 - [读文件工具实现与独立调用](#read-file)
 - [完整写入与局部编辑](#file-writes)
+- [本地命令执行、结果与审批](#execute-command)
 - [权限审批模块设计与三种模式](#permission-design)
 - [Agent 循环与工具请求接入](#agent-loop)
 - [简洁控制台进度与 exit 返回列表](#console-debug)
@@ -538,7 +539,7 @@ System.out.println(result.output());
 | DIRECTORY_NOT_READABLE / DIRECTORY_READ_FAILED | 无读取权限或其他目录 I/O 失败 |
 | OUTPUT_LIMIT_TOO_SMALL / INTERRUPTED | 输出容不下完整数据或线程中断 |
 
-提示词 base.md 增加“未知路径时先 list_files，再 read_file；结果截断时选择更具体目录”的行为指导，参数说明仍以工具 schema 为准。新建会话使用新版提示词；恢复旧会话继续使用原快照，但请求 tools 仍按实际工作区动态提供当前注册的六个工具。
+提示词 base.md 增加“未知路径时先 list_files，再 read_file；结果截断时选择更具体目录”的行为指导，参数说明仍以工具 schema 为准。新建会话使用新版提示词；恢复旧会话继续使用原快照，但请求 tools 仍按实际工作区动态提供当前注册的七个工具。
 
 测试：[ListFilesToolTest.java](../src/test/java/io/github/jackfeicoder/codey/tool/builtin/ListFilesToolTest.java) 使用真实临时目录覆盖默认/显式参数、顺序/深度/相对路径、忽略规则、空目录/恰好达到条数、Unicode/输出预算、非法参数、路径/链接边界、扫描上限与中断；AgentLoopTest 验证列目录 → 读取发现的文件 → 最终回答的三次模型请求及历史完整性。
 
@@ -608,7 +609,7 @@ System.out.println(result.output());
 
 成功输出预留最坏扫描统计和截断字段，始终保持完整 JSON；元数据或第一条完整路径放不下时返回 OUTPUT_LIMIT_TOO_SMALL。非法模式/参数使用 INVALID_ARGUMENTS；工作区、目录越界、缺失、非目录与读取错误复用现有错误码。共享遍历器保留线程中断，权限/读取失败不伪装为空结果。路径检查仍不等于完整操作系统沙箱。
 
-Main 当前注册六个工具，NONE 工作区全部隐藏。工具说明仍由 SearchFileTool.definition → Registry → LlmRequest.tools → ChatCompletionsClient 编码，无需增加工具说明 Markdown。base.md 仅补充“按名称定位优先 search_file，阅读正文用 read_file”的行为指导；旧会话继续使用提示词快照，`/new` 或 `/clear` 采用新版指导。控制台只增加搜索范围和模式摘要，例如 `[第 1 轮] 调用 search_file · src · *Config*.java`，不打印搜索结果正文。
+Main 当前注册七个工具（六个文件工具和 execute_command），NONE 工作区全部隐藏。工具说明仍由 SearchFileTool.definition → Registry → LlmRequest.tools → ChatCompletionsClient 编码，无需增加工具说明 Markdown。base.md 仅补充“按名称定位优先 search_file，阅读正文用 read_file”的行为指导；旧会话继续使用提示词快照，`/new` 或 `/clear` 采用新版指导。控制台只增加搜索范围和模式摘要，例如 `[第 1 轮] 调用 search_file · src · *Config*.java`，不打印搜索结果正文。
 
 验证：SearchFileToolTest 现有 42 项，AgentLoopTest 新增 1 项“按名称定位 → 读取 → 回答及进度/历史”组合测试；原 ListFilesToolTest 30 项全部通过共享遍历回归。完整 `mvn verify` 共 408 项通过，无失败、错误或跳过。另通过 7 组本地 HTTP JAR 验证：生产工具注册与模型驱动搜索/读取/保存、跨进程恢复不重放、无工作区的单次/会话隐藏工具、越界错误回填、条数截断结果、真实仓库十层 Java 文件定位与目录工具资源发现、超过二十层查找与目录展示深度回归。配置/会话隔离，使用本地模型替身；真实仓库只读取路径元数据，不读取真实 .env，也不调用真实厂商。
 
@@ -626,7 +627,7 @@ Main 当前注册六个工具，NONE 工作区全部隐藏。工具说明仍由 
 | [Utf8TextReader.java](../src/main/java/io/github/jackfeicoder/codey/tool/filesystem/Utf8TextReader.java) | 与 ReadFileTool 共用严格 UTF-8、BOM、换行处理、4 MiB/单行限制；ByteBudget 额外约束搜索的总读取字节 |
 | [GrepCodeToolTest.java](../src/test/java/io/github/jackfeicoder/codey/tool/builtin/GrepCodeToolTest.java) | 正文/名称职责区分、范围/编码/链接/参数与各预算边界测试 |
 
-工具各自实现 Tool，互不调用。遍历器负责枚举、文本读取器负责解码和有界行读取，GrepCodeTool 负责匹配及结果。底层只使用 Java NIO/文本流/字符串包含匹配，不启动 Shell、不依赖 grep/rg 或外部索引。Main 当前注册六个工具，AgentLoop 和 LLM 适配器沿用已有调度协议，不新增 grep 专用循环。
+工具各自实现 Tool，互不调用。遍历器负责枚举、文本读取器负责解码和有界行读取，GrepCodeTool 负责匹配及结果。底层只使用 Java NIO/文本流/字符串包含匹配，不启动 Shell、不依赖 grep/rg 或外部索引。Main 当前注册七个工具，AgentLoop 和 LLM 适配器沿用已有调度协议，不新增 grep 专用循环。
 
 | 参数 | 默认 / 范围 | 规则 |
 |---|---|---|
@@ -1853,9 +1854,9 @@ WorkspaceBinding 明确区分 DIRECTORY 与 NONE：DIRECTORY 保存绝对真实�
 - 相对路径相对启动目录解析；接受带空格的路径，使用 Path.toRealPath 校验存在且为目录，不要求必须是 Git 仓库，也不要求目录一定可写。
 - 启动参数优先；没有参数时通过菜单明确选择。CODEY_WORKSPACE 提供“配置建议目录”菜单项，进程环境覆盖启动目录 .env；模板中的点号不自动跳过选择，也不覆盖历史会话的绑定。
 - 配置建议目录作为额外选项展示，即使与当前目录相同也不会自动选定；失效建议不阻止选择其他目录。显式 --workspace 无效时报告参数错误。
-- Main 注册六个文件工具，按会话工作区筛选是否展示；NONE 不展示且拒绝执行工作区工具。权限审批已接入，命令和项目指令后续接入。选目录本身不扫描整个项目或把全项目注入模型。
+- Main 注册六个文件工具与 execute_command，按会话工作区筛选是否展示；NONE 不展示且拒绝执行工作区工具。权限审批与本地命令已接入，项目指令后续接入。选目录本身不扫描整个项目或把全项目注入模型。
 
-工作区是文件和命令的定位依据；读写工具已检查路径范围，审批已由策略模块处理，进程隔离后续实现。选定目录后模型可浏览、定位、搜索、读取及写入文件，命令能力后续加入。
+工作区是文件和命令的定位依据；读写工具已检查路径范围，审批已由策略模块处理，进程隔离后续实现。选定目录后模型可浏览、定位、搜索、读取及写入文件，命令通过 execute_command 接入，工作目录不构成进程沙箱。
 
 ### 会话数据结构与保存内容
 
@@ -1961,11 +1962,11 @@ Main → SessionSettings + JsonSessionStore → SessionLauncher
 
 ## 17. 权限审批模块设计与三种模式（2026-10-19 更新）
 
-本节记录设计及当前实现。已接入现有六工具、ask/规则 auto/full、会话文件授权/拒绝、撤销、准备后变更预览、PLAN 执行限制、CLI 命令和状态栏。命令、网络、删除、多 Agent、持久审计、模型审查器和完整 OS 沙箱尚未实现；下文涉及这些能力时按扩展设计理解。
+本节记录设计及当前实现。已接入六个文件工具及 execute_command、ask/规则 auto/full、会话文件授权/拒绝、撤销、准备后变更预览、PLAN 执行限制、CLI 命令和状态栏。execute_command 已接入，ask/auto 逐次批准；专用网络/删除工具、多 Agent、持久审计、模型审查器和完整 OS 沙箱尚未实现；下文涉及这些能力时按扩展设计理解。
 
 ### 当前实现与实际调用
 
-核心仍复用 SessionLauncher/AgentLoop/ToolExecutor，没有新建一套 Agent 核心。SessionLauncher 持有 WorkMode、PermissionMode、PermissionService 和 RuntimeStatus；每次任务创建固定模式的 ToolContext。ToolRegistry 固定 ToolAccess 元数据，默认 UNKNOWN，四个只读工具声明 READ_ONLY，两个写工具声明 FILE_MUTATION；PLAN 过滤掉修改/未知定义，并在执行器中再次检查，full 不解除限制。
+核心仍复用 SessionLauncher/AgentLoop/ToolExecutor，没有新建一套 Agent 核心。SessionLauncher 持有 WorkMode、PermissionMode、PermissionService 和 RuntimeStatus；每次任务创建固定模式的 ToolContext。ToolRegistry 固定 ToolAccess 元数据，默认 UNKNOWN，四个只读工具声明 READ_ONLY，两个写工具声明 FILE_MUTATION，命令工具声明 PROCESS；PLAN 过滤掉修改/未知定义，并在执行器中再次检查，full 不解除限制。
 
 Tool 新增 prepare，WriteFileTool/EditFileTool 准备旧快照、新字节、完整成功结果和 ApprovalRequest。PreparedToolOperation 先 authorize，再执行封装的相同内容；原文件版本变化产生 FILE_CONFLICT，成功后 PermissionService.completed 才保存文件授权。直接调用写工具 execute 也走 prepare/审批，不会绕过默认 ask。默认 ToolContext 为 react + ask + 无审批来源，独立库调用不会默默允许写入。
 
@@ -2015,7 +2016,7 @@ OpenAI 官方文档将 sandbox（实际文件/网络限制）、approval policy�
 
 首版 auto 是清晰标注的规则版：只自动批准规则能确认的具体低风险请求，未知操作转人工，不声称具备语义完整的风险识别。后续 LlmApprovalReviewer 可以使用独立、权限更窄的调用，输入真实用户任务与具体操作证据、结构化输出决定和理由；主执行模型不自行批准自己的操作。审查器错误/超时不默认放行，规则检查仍先执行。
 
-当前仅有六个工作区文件工具，没有 Shell、网络、删除或外部路径能力。接入权限后，ask 与 auto/full 的直接差异首先体现为写入/编辑是否逐文件确认；普通只读操作都自动执行。full 首版只表示跳过本模块审批，不表示现有工具突然支持任意绝对路径或网络访问，CLI 必须显示这个限制。外部文件在工具升级前明确报不支持/越界，不能先批准再悄悄失败，也不能因为 full 就取消现有路径保护。
+当前有六个工作区文件工具与 execute_command。文件工具继续保留工作区路径检查；ask/auto 每次命令都需人工批准，full 跳过审批。命令进程继承当前用户的文件/网络能力，可能影响工作区外目标，cwd 不是沙箱。没有专用网络/删除工具或 OS 隔离。CLI 的 full 确认会说明实际能力；不能把文件路径检查误称为进程访问限制。
 
 ### 模块职责与实际文件
 
@@ -2080,9 +2081,9 @@ OpenAI 官方文档将 sandbox（实际文件/网络限制）、approval policy�
 
 1. 已完成现有工具检查、逐文件人工审批及会话授权、拒绝回填、有限预览、模式切换与终端状态；默认 ReAct + ask，只读自动执行。
 2. 已接规则版独立审查接口和测试；模型审查器、持久审计、精确上下文计数/窗口配置后续实现。
-3. execute_command、联网和 MCP 各自实现时接入统一策略；Shell 子进程访问范围要靠容器/操作系统沙箱等实际约束，设置 ProcessBuilder.directory() 不限制文件或网络访问，也不能只靠命令字符串黑名单。
+3. execute_command 已接入逐次审批、超时与进程结果；联网和 MCP 各自实现时接入统一策略；Shell 子进程访问范围要靠容器/操作系统沙箱等实际约束，设置 ProcessBuilder.directory() 不限制文件或网络访问，也不能只靠命令字符串黑名单。
 
-验收至少覆盖：默认 ReAct + ask；普通只读不询问；ask 首次修改 A 文件需确认，同会话后续写/编辑/删除 A 复用展示过的授权，修改 B 需另确认；需审操作先审批再落盘；拒绝/EOF/中断/未知操作不产生副作用；批准范围不串文件/操作类别/会话；预览与实际修改一致；等待首次审批时原文件变化重新确认；规则禁止与 PLAN 只读约束在 full 下仍有效；后续敏感读取策略应覆盖 grep_code 等入口（当前尚未实现）；auto 审查失败转人工且不默认允许；恢复不重放批准或写入；网络/Shell/删除尚未实现时如实展示能力范围。
+验收至少覆盖：默认 ReAct + ask；普通只读不询问；ask 首次修改 A 文件需确认，同会话后续写/编辑/删除 A 复用展示过的授权，修改 B 需另确认；需审操作先审批再落盘；拒绝/EOF/中断/未知操作不产生副作用；批准范围不串文件/操作类别/会话；预览与实际修改一致；等待首次审批时原文件变化重新确认；规则禁止与 PLAN 只读约束在 full 下仍有效；后续敏感读取策略应覆盖 grep_code 等入口（当前尚未实现）；auto 审查失败转人工且不默认允许；恢复不重放批准或写入；网络/删除专用工具和进程沙箱未实现时如实展示能力范围，execute_command 的进程访问范围单独说明。
 
 ## 18. 参考资料与维护方式
 
@@ -2092,3 +2093,101 @@ OpenAI 官方文档将 sandbox（实际文件/网络限制）、approval policy�
 - [长期任务 Harness 实践](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)：理解进度交接、验收与跨会话工作。
 
 说明性文档仅维护两份 Markdown：README 提供快速使用，并按模块记录功能、涉及文件、调用流程与实现方式；本设计文档集中保留完整架构、配置契约、实施顺序、取舍和学习笔记。后续实现模块时同步更新 README 导航、对应模块章节与此处状态。resources/prompts/base.md 是运行资源。完成阶段后补充真实验证证据，规划能力始终明确标注为待实现。
+
+
+<a id="execute-command"></a>
+
+## 19. 本地命令执行（2026-10-23 已实现）
+
+### 功能与模块
+
+execute_command 是进程工具，用于运行编译、测试及诊断程序。程序定位、进程控制、工具协议和权限协调分别处理，工具内部不调用 LLM、不自动编辑代码或重试。
+
+| 文件 | 职责 |
+|---|---|
+| [ExecuteCommandTool.java](../src/main/java/io/github/jackfeicoder/codey/tool/builtin/ExecuteCommandTool.java) | 定义 schema、校验输入、准备审批、固定参数及目录身份、编码完整结果 |
+| [CommandResolver.java](../src/main/java/io/github/jackfeicoder/codey/tool/process/CommandResolver.java) | PATH 与真实程序定位，Windows 启动适配、程序基本身份复检 |
+| [CommandRunner.java](../src/main/java/io/github/jackfeicoder/codey/tool/process/CommandRunner.java) | ProcessBuilder 启动、stdin 关闭、两个日志流同时排空、超时/中断与后代清理 |
+| [CommandSettings.java](../src/main/java/io/github/jackfeicoder/codey/config/CommandSettings.java) | 启动时加载超时、日志预算和字符集，环境覆盖 .env |
+| ApprovalRequest / PermissionService | 命令专属操作摘要，逐次审批，拒绝缓存，不保存文件或命令长期授权 |
+| Main / DebugPrinter | 注册生产第七个工具，进度显示程序/cwd 与退出摘要，不打印日志全文 |
+
+### 参数与校验
+
+```json
+{"command":"mvn","args":["test"],"workingDirectory":".","timeoutSeconds":60}
+```
+
+command 是单个程序名称或路径，args 默认空数组，workingDirectory 默认工作区根目录，timeoutSeconds 默认宿主配置。目录必须存在、属于工作区且链接真实目标不越界。程序可以来自 PATH 或明确的程序路径，允许系统目录下的 Java/Maven/Git；程序路径与工作目录具有不同含义，不把程序定位限制误用为进程访问沙箱。
+
+未知字段、null、非字符串 argv、NUL、非法 Unicode、非整数/越界超时在启动前拒绝。最多 32 个参数、单项最多 1024 个 UTF-16 单元；为完整审批，每项 JSON 可见编码最多 1050 字符、参数预览合计最多 8192 字符，超过时显式报错。目录与实际程序的显示同样有长度约束。终端控制/双向格式字符在审批预览中可见，参数逐项编号，不将完整命令压成一条可能省略尾部的摘要。
+
+### 执行流程
+
+```text
+AgentLoop 收到模型 tool_call
+  → ToolExecutor 严格解析 / 工作区与 PLAN 检查
+  → ExecuteCommandTool.prepare
+      → 校验参数、解析实际目录及程序、捕获身份、固定启动向量
+      → 生成真实程序/argv/cwd/超时的审批预览
+      → 检查最小结果 JSON 是否适配输出预算
+  → PreparedToolOperation / PermissionService
+      → ask/auto 每次人工确认，full 放行，plan 已拒绝
+  → 再检查程序元数据及目录身份
+  → ProcessBuilder.start，关闭 stdin
+  → 两个消费任务排空 stdout/stderr，超过保留预算仍继续消费
+  → 主线程等待退出，定期观察子进程，检查超时/中断
+  → 清理已观察后代、等待退出与管道关闭，生成有界完整结果
+  → ToolResult.toMessage 按原 callId 回填
+  → AgentLoop 下一轮由模型判断任务完成、分析报错或继续修复
+```
+
+准备后的 argv 不再从可变 JSON 读取。程序真实路径、大小/修改时间/fileKey 与工作目录 fileKey/创建时间在批准后复检，常规变化返回 FILE_CONFLICT；检查与系统启动之间仍有窗口，没有宣称原子 exec 或不可替换程序能力。
+
+### 返回结果与错误
+
+```json
+{
+  "status":"completed",
+  "exitCode":1,
+  "stdout":"...",
+  "stderr":"...",
+  "durationMs":5230,
+  "timedOut":false,
+  "stdoutTruncated":false,
+  "stderrTruncated":false,
+  "outputIncomplete":false,
+  "cleanupIncomplete":false
+}
+```
+
+外层 ToolResult 的 success 表示取得执行结果；进程非零退出仍是有效结果。completed 只表示主进程退出，必须检查 exitCode。超时为 timed_out、timedOut=true、exitCode=null；输出/回收不完整通过单独字段表达，不能等同于完整验证通过。durationMs 包含进程启动、等待及返回前清理，不含人工审批；ToolResult.durationMillis 还包含工具准备和审批。
+
+COMMAND_NOT_FOUND 表示定位失败，COMMAND_START_FAILED 表示启动/输入初始化失败；不回显任意底层异常。审批不可用、拒绝、PLAN、工作区/参数错误沿统一错误通道返回。中断尽力清理后抛 InterruptedException，执行器恢复中断标志，沿现有 Agent 中断逻辑停止本轮，不自动重试或提交半轮轨迹。进程实际文件副作用不因此回滚。
+
+两个日志流并发读取；各保留一半日志预算，超出的字节继续消费，避免管道满后死锁。保留缓冲有界，按宿主字符集解码，最后按 Unicode 码点限制；截断边界的残缺多字节字符可能显示替代字符，同时标记截断。最终 JSON 转义后若仍过大，继续缩短正文并设置各流截断标记，避免 ToolExecutor 截掉半个 JSON。启动前最小元数据预检失败时不产生进程副作用。
+
+### 权限与 Windows
+
+ask/auto 下每个命令都人工审批，不因名字看似只读而自动放行，也不因文件已授权而跳过。批准只用于当前固定操作。拒绝摘要使用真实程序 + argv + 真实 cwd 的 SHA-256，修改超时不会绕过同一拒绝；不同命令仍可独立申请，摘要不具备语义等价操作的完备识别能力。撤销、会话切换、重启沿既有机制清除状态。full 跳过命令审批，plan 即使 full 也拒绝，NONE 会话不提供命令工具。
+
+普通程序使用独立 argv，不自动解释管道/重定向/&&。JDK 17 Windows 默认 legacy 启动模式中，对普通程序按 CRT 规则编码空参数、引号与末尾反斜杠；程序仍可自行解释其参数。Windows .cmd/.bat 由系统 cmd.exe /d /v:off /s /c 适配，为避免参数被重新解释，首版批处理的程序路径/参数不接受引号、% ! ^ & | < > ( ) 和控制字符；带这些字符的路径也会被拒绝。该限制是批处理适配边界，不是通用命令风险判断器。没有“通过命令名黑名单就能限制文件/网络”的假设。
+
+工作目录只是定位依据。批准的进程继承当前用户的文件、网络和环境访问能力，可能删除文件、加载构建脚本或作用于工作区外目标；没有专用删除/联网工具不代表进程没有这些能力。full 确认与命令审批界面会说明这个范围。没有 OS 沙箱、Windows Job Object 或进程组强隔离；首版不支持后台服务、交互输入或运行中再次提供 stdin。
+
+超时、取消或正常主进程结束时，尽力终止实际观察到的后代，并等待退出通知及日志任务关闭。快速脱离、未观察到的后代存在遗漏可能，无法确认的清理通过 cleanupIncomplete 报告；该标记也不是不存在未观察后代的证明。清理、系统启动和 IO 收尾可能额外耗时，超时值不表示整个工具调用的绝对墙钟上限。要实现强约束需后续 OS/容器层隔离。
+
+### 配置与验证方式
+
+与配置模块共用 CODEY_CONFIG_DIR，环境优先，显式空值或越界报 ConfigException，修改后重启。
+
+| 配置 | 默认及范围 |
+|---|---|
+| CODEY_COMMAND_TIMEOUT_SECONDS | 60，满足 1 <= 默认值 <= 最大值 |
+| CODEY_COMMAND_MAX_TIMEOUT_SECONDS | 300，硬范围 1..600 |
+| CODEY_COMMAND_MAX_OUTPUT_CHARS | 8000，范围 256..32000，stdout/stderr 各一半 |
+| CODEY_COMMAND_CHARSET | Java 平台默认字符集，可显式 UTF-8、GBK 等 |
+
+测试通过真实隔离 Java 子进程覆盖正常/非零退出、stdout/stderr、大日志、EOF、超时后代清理、中断释放、Windows argv/批处理、审批/拒绝/PLAN/NONE、参数冻结、目录/程序变化和最小预算；AgentLoop 替身验证非零结果按原 callId 回填后进入下一轮。配置测试使用临时 .env，CLI 的生产工具注册另用本地 HTTP 替身验证，不需要真实厂商凭证。历史会话保留原 system 快照，新 base.md 的命令指导在新会话生效，工具定义仍由当前 Registry 提供。
+
+最新验证：完整 `mvn verify` 为 577 项，失败/错误/跳过均为 0。命令阶段新增 32 项；本机 Windows + JDK 17 的 argv、批处理、超时和中断用真实隔离子进程验证。另通过 6 组本地 HTTP 生产 JAR 场景，ask/auto 各两次实际 `mvn --version` 均逐次批准，结果和历史回填正常；验证 Java 非零退出、管道审批不可用不误读下一条问题、PLAN 强制拦截和无工作区隐藏工具。Maven 版本检查不构建用户项目、不下载依赖，所有会话/配置/工作区隔离，不使用真实厂商凭证。

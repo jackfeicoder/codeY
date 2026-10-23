@@ -9,6 +9,7 @@ import io.github.jackfeicoder.codey.config.ModelProfiles;
 import io.github.jackfeicoder.codey.config.ModelPreferenceStore;
 import io.github.jackfeicoder.codey.config.SessionSettings;
 import io.github.jackfeicoder.codey.config.AgentSettings;
+import io.github.jackfeicoder.codey.config.CommandSettings;
 import io.github.jackfeicoder.codey.llm.ChatCompletionsClient;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
@@ -25,6 +26,7 @@ import io.github.jackfeicoder.codey.tool.builtin.SearchFileTool;
 import io.github.jackfeicoder.codey.tool.builtin.GrepCodeTool;
 import io.github.jackfeicoder.codey.tool.builtin.WriteFileTool;
 import io.github.jackfeicoder.codey.tool.builtin.EditFileTool;
+import io.github.jackfeicoder.codey.tool.builtin.ExecuteCommandTool;
 import io.github.jackfeicoder.codey.workspace.WorkspaceBinding;
 
 import java.io.BufferedReader;
@@ -133,6 +135,7 @@ public final class Main {
                 AgentSettings agentSettings = AgentSettings.load(startup, environment);
                 LlmConfig config = profiles.activeConfig(); // 只做本地字段校验，不发送 HTTP 请求。
                 io.github.jackfeicoder.codey.config.PermissionSettings.load(startup, environment);
+                CommandSettings.load(startup, environment);
                 System.out.println("LLM configuration is valid. Profile: " + profiles.activeSelection());
                 System.out.println(config);
                 System.out.println(agentSettings);
@@ -147,7 +150,7 @@ public final class Main {
                 // basePrompt 是内置 Markdown 原文，与模型厂商和启动目录无关。
                 String basePrompt = PromptLoader.loadBase();
                 // --prompt 没有工作区，read_file 不会列入可用定义；循环仍由同一 Agent 处理。
-                var result = new AgentLoop(client, createTools(agentSettings), agentSettings.maxIterations(), debug).run(new Session(basePrompt), prompt,
+                var result = new AgentLoop(client, createTools(agentSettings, CommandSettings.load(startup, environment)), agentSettings.maxIterations(), debug).run(new Session(basePrompt), prompt,
                         new ToolContext(WorkspaceBinding.none()));
                 if (!result.completed()) {
                     System.err.println("Agent stopped [BUDGET_EXHAUSTED].");
@@ -194,6 +197,7 @@ public final class Main {
         Map<String, String> environment = System.getenv(); // 凭证只传给配置加载器，不写入快照。
         SessionSettings settings = SessionSettings.load(startup, environment);
         AgentSettings agentSettings = AgentSettings.load(startup, environment);
+        CommandSettings commandSettings = CommandSettings.load(startup, environment);
         var permissionSettings = io.github.jackfeicoder.codey.config.PermissionSettings.load(startup, environment);
         // Console 可正确处理 Windows 终端字符编码；管道和测试进程没有 Console。
         Console console = System.console();
@@ -215,16 +219,17 @@ public final class Main {
                 LlmConfig titleConfig = new LlmConfig(config.baseUrl(), config.apiKey(), config.model(), timeout, config.authMode());
                 return new SessionLauncher.ModelChoice(profiles.activeSelection(), new ChatCompletionsClient(config),
                         new ChatCompletionsClient(titleConfig));
-            }, PromptLoader::loadBase, consoleInput, output, errors, options, createTools(agentSettings), debug,
+            }, PromptLoader::loadBase, consoleInput, output, errors, options, createTools(agentSettings, commandSettings), debug,
                     () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings).run();
         }
     }
 
     /** 统一注册本阶段工具；是否向模型提供，由 Registry 按会话上下文筛选。 */
-    private static ToolRegistry createTools(AgentSettings settings) {
+    private static ToolRegistry createTools(AgentSettings settings, CommandSettings commands) {
         return new ToolRegistry().register(new ReadFileTool())
                 .register(new ListFilesTool(settings.listFilesDefaultDepth())).register(new SearchFileTool())
-                .register(new GrepCodeTool()).register(new WriteFileTool()).register(new EditFileTool());
+                .register(new GrepCodeTool()).register(new WriteFileTool()).register(new EditFileTool())
+                .register(new ExecuteCommandTool(commands));
     }
 
     /** 统一处理非法参数，不回显可能包含敏感内容的用户输入。 */
@@ -238,7 +243,7 @@ public final class Main {
         System.out.println("""
                 CodeY - A CLI coding agent built from scratch in Java.
 
-                Status: model profiles, persistent conversations and six file tools in Agent loops are available.
+                Status: model profiles, persistent conversations, six file tools and execute_command are available.
 
                 Usage:
                   java -jar target/codey-0.1.0-SNAPSHOT.jar
@@ -270,7 +275,11 @@ public final class Main {
                   The built-in prompts/base.md is sent as the system message.
                   Initial selection: --profile > last-used profile > saved session profile > CODEY_ACTIVE_PROFILE.
                   Successful selections persist in CODEY_DATA_DIR/model-preference.json, without credentials.
-                  Workspace chats expose list_files, search_file, grep_code, read_file, write_file and edit_file.
+                  Workspace chats expose list_files, search_file, grep_code, read_file, write_file, edit_file and execute_command.
+                  execute_command runs one local program with args; ask/auto approve every invocation, PLAN disables it.
+                  CODEY_COMMAND_TIMEOUT_SECONDS=60; CODEY_COMMAND_MAX_TIMEOUT_SECONDS=300 (hard maximum 600).
+                  CODEY_COMMAND_MAX_OUTPUT_CHARS=8000; CODEY_COMMAND_CHARSET defaults to the Java platform charset.
+                  Process working directories are not file/network sandboxes; full skips command approval.
                   CODEY_MAX_ITERATIONS defaults to 20 (range 1..100).
                   The final request disables tools and asks for an evidence-based answer; budget hints are not saved.
                   CODEY_LIST_FILES_DEFAULT_DEPTH defaults to 10 (range 1..20); Agent settings load on startup.
@@ -284,7 +293,7 @@ public final class Main {
                   /permissions ask|auto|full|revoke; /mode react|plan; /status shows permissions and last input tokens.
                   auto uses conservative local rules; full skips approval but does not expand tool or workspace capabilities.
                   Piped approvals require CODEY_ALLOW_PIPED_APPROVALS=true; otherwise pending writes fail closed.
-                  Command execution, deletion, network tools and multi-agent execution will follow.
+                  Dedicated deletion/network tools, OS process sandboxes and multi-agent execution will follow.
 
                 Start learning:
                   README.md

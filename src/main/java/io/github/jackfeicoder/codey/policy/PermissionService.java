@@ -21,7 +21,7 @@ public final class PermissionService {
     /** 成功后批准的文件和用户拒绝的文件，只在当前会话有效。 */
     private final Set<Path> grants = new HashSet<>();
     private final Set<Path> denials = new HashSet<>();
-    /** 未分类工具没有可靠文件目标，拒绝后按工具名阻止反复调用。 */
+    /** 未分类工具按名称缓存拒绝；命令按真实程序、argv 和 cwd 摘要区分，不授予进程长期权限。 */
     private final Set<String> unknownDenials = new HashSet<>();
 
     public PermissionService(PermissionMode mode, WorkspaceBinding workspace, ApprovalHandler handler) {
@@ -54,11 +54,11 @@ public final class PermissionService {
         if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
         if (request.target() != null && !Objects.equals(root, request.root())) throw denied("Approval target belongs to another workspace.");
         if (mode == PermissionMode.FULL) return;
-        if ((request.target() != null && denials.contains(request.target())) || unknownDenials.contains(request.tool())) {
+        if ((request.target() != null && denials.contains(request.target())) || unknownDenials.contains(request.denialKey())) {
             throw denied("This action was denied in this session. Ask the user to revoke or change permissions; do not retry indirectly.");
         }
         if (mode == PermissionMode.ASK && request.target() != null && grants.contains(request.target())) return;
-        if (mode == PermissionMode.AUTO) {
+        if (mode == PermissionMode.AUTO && !request.command()) {
             try { if (reviewer.review(request) == ApprovalReviewer.Verdict.ALLOW) return; }
             catch (RuntimeException unavailable) { /* 审查失败明确回退到人工，而不是允许执行。 */ }
         }
@@ -68,7 +68,7 @@ public final class PermissionService {
         if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
         if (answer == ApprovalHandler.Answer.APPROVE) return;
         if (answer == ApprovalHandler.Answer.DENY) {
-            if (request.target() == null) unknownDenials.add(request.tool()); else denials.add(request.target());
+            if (request.target() == null) unknownDenials.add(request.denialKey()); else denials.add(request.target());
             throw denied("User denied this action. Do not bypass it with another tool or indirect operation.");
         }
         throw unavailable();

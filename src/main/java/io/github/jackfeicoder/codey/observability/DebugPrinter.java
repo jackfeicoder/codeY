@@ -43,10 +43,21 @@ public final class DebugPrinter {
                 + (path == null ? "" : " · " + shortText(path)));
     }
 
-    /** 成功不追加正文，失败只显示类别；完整结果仍回填给模型并按原逻辑保存。 */
+    /** 不追加工具正文；命令只显示退出/超时摘要，其他失败只显示类别。 */
     public void toolFailed(int step, ToolResult result) {
         if (result.status() == ToolResult.Status.ERROR) {
             line(Kind.ERROR, "  [第 " + step + " 轮] " + shortText(result.name()) + " 失败 · " + result.errorCode());
+        } else if ("execute_command".equals(result.name())) {
+            try {
+                var body = MAPPER.readTree(result.output());
+                boolean timedOut = body.path("timedOut").asBoolean();
+                boolean ok = !timedOut && body.path("exitCode").isInt() && body.path("exitCode").asInt() == 0;
+                line(ok ? Kind.TOOL : Kind.ERROR, "  [第 " + step + " 轮] execute_command · "
+                        + (timedOut ? "超时" : "退出码 " + body.path("exitCode").asInt())
+                        + " · " + body.path("durationMs").asLong() + " ms"
+                        + (body.path("stdoutTruncated").asBoolean() || body.path("stderrTruncated").asBoolean() ? " · 输出截断" : "")
+                        + (body.path("outputIncomplete").asBoolean() || body.path("cleanupIncomplete").asBoolean() ? " · 输出/清理未完整完成" : ""));
+            } catch (java.io.IOException ignored) { /* 有效结果仍由执行器回填，不打印原始输出。 */ }
         }
     }
 
@@ -61,6 +72,10 @@ public final class DebugPrinter {
         if (arguments.length() > 64 * 1024) return null;
         try {
             var tree = MAPPER.readTree(arguments);
+            if ("execute_command".equals(call.name()) && tree != null && tree.path("command").isTextual()) {
+                return tree.path("command").asText() + " · "
+                        + (tree.path("workingDirectory").isTextual() ? tree.path("workingDirectory").asText() : ".");
+            }
             var path = tree == null ? null : tree.get("path");
             String location = path != null && path.isTextual() && !path.asText().isBlank() ? path.asText() : null;
             var pattern = tree == null ? null : tree.get("pattern");
