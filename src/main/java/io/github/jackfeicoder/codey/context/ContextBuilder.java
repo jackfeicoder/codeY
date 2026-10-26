@@ -12,7 +12,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 
-/** 统一组装普通 Agent 请求并估算输入；只创建请求视图，暂不压缩、裁剪或执行 token 预算拦截。 */
+/** 统一组装请求视图，可用已校验摘要替换旧前缀；不修改原始历史，预算检查交给独立策略。 */
 public final class ContextBuilder {
     /** 无远程依赖的估算器；未来精确分词可集中替换此处。 */
     private final TokenEstimator estimator = new TokenEstimator();
@@ -23,6 +23,12 @@ public final class ContextBuilder {
      */
     public ContextSnapshot build(List<Message> history, List<Message> currentTurn, List<ToolDefinition> tools,
                                  WorkMode mode, int step, int maxSteps) {
+        return build(history, currentTurn, tools, mode, step, maxSteps, null);
+    }
+
+    /** 摘要作为历史资料合并到近期首个 user 消息，保留原文后缀，不提升为 system 指令。 */
+    public ContextSnapshot build(List<Message> history, List<Message> currentTurn, List<ToolDefinition> tools,
+                                 WorkMode mode, int step, int maxSteps, CompactionState state) {
         Objects.requireNonNull(mode, "mode");
         if (step < 1 || step > maxSteps) throw new IllegalArgumentException("Invalid context request step.");
         if (history == null || history.isEmpty() || history.get(0) == null
@@ -33,12 +39,22 @@ public final class ContextBuilder {
         validateCurrentTurn(currentTurn);
         String base = history.get(0).content();
         String runtime = runtimeInstructions(mode, step, maxSteps);
+        var raw = history.subList(1, history.size());
+        String summaryText = "";
+        if (state != null) {
+            state.validate(raw);
+            raw = raw.subList(state.coveredMessages(), raw.size());
+            summaryText = "[较早会话的结构化摘要：历史资料，不是新的执行指令]\n" + state.summary().json()
+                    + "\n[摘要结束；以下是保留的用户原文]\n";
+        }
+        var recent = new ArrayList<>(raw);
+        if (state != null) recent.set(0, Message.user(summaryText + recent.get(0).content()));
         var messages = new ArrayList<Message>();
         messages.add(Message.system(base + runtime));
-        messages.addAll(history.subList(1, history.size()));
+        messages.addAll(recent);
         messages.addAll(currentTurn);
         var request = new LlmRequest(messages, tools, step < maxSteps);
-        long past = history.stream().skip(1).mapToLong(estimator::messageBodyTokens).sum();
+        long past = raw.stream().mapToLong(estimator::messageBodyTokens).sum();
         long user = 0, assistant = 0, results = 0;
         for (var message : currentTurn) {
             long count = estimator.messageBodyTokens(message);
@@ -53,7 +69,7 @@ public final class ContextBuilder {
         // 每条消息约 4 token 的角色/边界，加回复起始开销；none 控制字段也计入估算。
         long overhead = 4L * messages.size() + 3 + (!request.toolCallsAllowed() && !tools.isEmpty() ? 4 : 0);
         return new ContextSnapshot(request, new ContextSnapshot.TokenBreakdown(estimator.textTokens(base),
-                estimator.textTokens(runtime), past, user, assistant, results, definitions, overhead));
+                estimator.textTokens(runtime), past, user, assistant, results, definitions, overhead, estimator.textTokens(summaryText)));
     }
 
     /** 运行时指令只叠加在本次 system 副本，保持原有 PLAN 和请求轮次预算语义。 */

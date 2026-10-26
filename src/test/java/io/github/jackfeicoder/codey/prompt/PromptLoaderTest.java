@@ -6,6 +6,13 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** 验证内置提示词的 UTF-8 加载，以及缺失、空白资源的明确失败。 */
 class PromptLoaderTest {
+    @org.junit.jupiter.api.Test void compactionPromptIsSeparateAndSpecifiesFactsConstraintsAndJson() {
+        String text = PromptLoader.loadCompact();
+        org.junit.jupiter.api.Assertions.assertNotEquals(PromptLoader.loadBase(), text);
+        org.junit.jupiter.api.Assertions.assertTrue(text.contains("constraints"));
+        org.junit.jupiter.api.Assertions.assertTrue(text.contains("verification"));
+        org.junit.jupiter.api.Assertions.assertTrue(text.contains("只生成摘要"));
+    }
     /** 基础提示词保留 Markdown 标题和中文文本，不依赖工作目录。 */
     @Test
     void loadsUtf8BasePrompt() {

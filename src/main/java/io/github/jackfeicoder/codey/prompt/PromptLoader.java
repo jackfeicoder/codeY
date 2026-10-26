@@ -18,6 +18,9 @@ public final class PromptLoader {
         return loadResource(BASE_RESOURCE);
     }
 
+    /** 压缩专用指令，独立于业务 base.md，不把旧对话当作当前执行任务。 */
+    public static String loadCompact() { return loadResource("/prompts/compact.md"); }
+
     /** 按资源路径读取文本；缺失、空白或读取失败时抛出可由 CLI 展示的异常。 */
     static String loadResource(String resourcePath) {
         // 通过类定位资源，支持从构建目录或 JAR 读取，try 自动关闭流。

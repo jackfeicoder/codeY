@@ -257,6 +257,7 @@ public final class ChatCompletionsClient implements LlmClient {
         ObjectNode root = mapper.createObjectNode(); // 请求顶层对象：model、stream、messages、可选 tools。
         root.put("model", config.model());
         root.put("stream", stream);
+        if (request.maxOutputTokens() != null) root.put("max_tokens", request.maxOutputTokens());
         if (stream && streaming.includeUsage()) root.putObject("stream_options").put("include_usage", true);
         ArrayNode messages = root.putArray("messages"); // 保存按历史顺序排列的协议消息。
         for (Message message : request.messages()) {

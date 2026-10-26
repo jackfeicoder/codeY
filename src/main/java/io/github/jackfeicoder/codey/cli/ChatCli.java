@@ -138,7 +138,7 @@ public final class ChatCli {
     /** 上下文拦截保持失败不提交语义，并准确告知已发生的调用和文件副作用。 */
     private void reportContextLimit(ContextLimitException limited) {
         input.theme().line(errors, ConsoleTheme.Tone.ERROR, "上下文预算超限：" + limited.getMessage());
-        input.theme().line(errors, ConsoleTheme.Tone.WARNING, "可切换更大上下文的模型，或 /new、/clear 开启新会话；自动压缩尚未接入。");
+        input.theme().line(errors, ConsoleTheme.Tone.WARNING, "可在会话入口用 /compact 压缩、切换更大上下文模型，或 /new、/clear 开启新会话。");
         if (context.hasWorkspace() && limited.toolCalls() > 0) input.theme().line(errors, ConsoleTheme.Tone.WARNING,
                 "本轮消息未保存；已执行的文件修改仍保留，重试前请检查当前文件。");
         errors.flush();

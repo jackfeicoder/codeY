@@ -14,6 +14,8 @@ import io.github.jackfeicoder.codey.config.CommandSettings;
 import io.github.jackfeicoder.codey.config.StreamingSettings;
 import io.github.jackfeicoder.codey.config.ModelCapabilitiesLoader;
 import io.github.jackfeicoder.codey.config.ContextBudgetSettings;
+import io.github.jackfeicoder.codey.config.CompactionSettings;
+import io.github.jackfeicoder.codey.context.HistoryCompactor;
 import io.github.jackfeicoder.codey.context.ContextBudgetPolicy;
 import io.github.jackfeicoder.codey.context.ContextBuilder;
 import io.github.jackfeicoder.codey.context.ContextLimitException;
@@ -146,6 +148,7 @@ public final class Main {
                 StreamingSettings.load(startup, environment);
                 var capabilities = ModelCapabilitiesLoader.load(startup, environment, profiles.activeProfile(), config.model());
                 var budget = new ContextBudgetPolicy(capabilities, ContextBudgetSettings.load(startup, environment)).evaluate(0);
+                System.out.println(CompactionSettings.load(startup, environment));
                 System.out.println("LLM configuration is valid. Profile: " + profiles.activeSelection());
                 System.out.println(config);
                 System.out.println(agentSettings);
@@ -165,6 +168,7 @@ public final class Main {
                 LlmConfig config = profiles.activeConfig();
                 var capabilities = ModelCapabilitiesLoader.load(startup, environment, profiles.activeProfile(), config.model());
                 var budget = new ContextBudgetPolicy(capabilities, ContextBudgetSettings.load(startup, environment));
+                var compaction = CompactionSettings.load(startup, environment);
                 LlmClient client = new ChatCompletionsClient(config, StreamingSettings.load(startup, environment));
                 // basePrompt 是内置 Markdown 原文，与模型厂商和启动目录无关。
                 String basePrompt = PromptLoader.loadBase();
@@ -174,7 +178,8 @@ public final class Main {
                 AgentResult result;
                 try {
                     result = new AgentLoop(client, createTools(agentSettings, CommandSettings.load(startup, environment)), agentSettings.maxIterations(), debug,
-                            new ContextBuilder(), snapshot -> { }, budget)
+                            new ContextBuilder(), snapshot -> { }, budget,
+                            new HistoryCompactor(client, budget, compaction, new ContextBuilder(), debug), () -> { })
                             .run(new Session(basePrompt), prompt, new ToolContext(WorkspaceBinding.none()), stream);
                 } catch (LlmException | ContextLimitException failed) {
                     if (stream.hasDisplayedText()) System.err.println("以上流式内容尚未确认为完整结果。");
@@ -232,6 +237,7 @@ public final class Main {
         CommandSettings commandSettings = CommandSettings.load(startup, environment);
         StreamingSettings streamingSettings = StreamingSettings.load(startup, environment);
         ContextBudgetSettings budgetSettings = ContextBudgetSettings.load(startup, environment);
+        CompactionSettings compactionSettings = CompactionSettings.load(startup, environment);
         var permissionSettings = io.github.jackfeicoder.codey.config.PermissionSettings.load(startup, environment);
         // Console 可正确处理 Windows 终端字符编码；管道和测试进程没有 Console。
         Console console = System.console();
@@ -255,7 +261,7 @@ public final class Main {
                 return new SessionLauncher.ModelChoice(profiles.activeSelection(), new ChatCompletionsClient(config, streamingSettings),
                         new ChatCompletionsClient(titleConfig), capabilities);
             }, PromptLoader::loadBase, consoleInput, output, errors, options, createTools(agentSettings, commandSettings), debug,
-                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings, budgetSettings).run();
+                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings, budgetSettings, compactionSettings).run();
         }
     }
 
@@ -296,7 +302,8 @@ public final class Main {
                   --check-config validates settings without calling a model.
                   Optional models.json in the configuration directory declares contextWindow per profile/modelId.
                   Known windows enable pre-request input budget checks; model outputReserveTokens/safetyMarginTokens override global defaults.
-                  /context and /status show estimates and input budgets; unknown windows skip capacity checks. Auto-compaction is not implemented.
+                  /context and /status show estimates, budgets, and compaction. /compact summarizes old turns; raw history is retained.
+                  Auto-compaction defaults to 80% trigger / 40% target of input budget, keeping 3 recent turns (2 if needed).
                   --prompt runs one chat task without a workspace; chat and --prompt stream text by default.
                   CODEY_LLM_STREAM=false disables streaming; CODEY_LLM_STREAM_INCLUDE_USAGE=false omits stream_options.
                   Automatic titles always use non-streaming generate; completed turns are saved as full messages.

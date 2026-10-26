@@ -8,6 +8,7 @@ import io.github.jackfeicoder.codey.context.ContextBuilder;
 import io.github.jackfeicoder.codey.context.ContextSnapshot;
 import io.github.jackfeicoder.codey.context.ContextBudgetPolicy;
 import io.github.jackfeicoder.codey.context.ContextLimitException;
+import io.github.jackfeicoder.codey.context.HistoryCompactor;
 import io.github.jackfeicoder.codey.observability.DebugPrinter;
 import io.github.jackfeicoder.codey.session.Session;
 import io.github.jackfeicoder.codey.session.Message;
@@ -44,6 +45,9 @@ public final class AgentLoop {
     private final Consumer<ContextSnapshot> onContext;
     /** 当前模型的输入预算，独立于 maxSteps 模型请求次数预算。 */
     private final ContextBudgetPolicy budget;
+    private final HistoryCompactor compactor;
+    /** 宿主在摘要生效后持久化派生状态；保存失败应阻止继续请求。 */
+    private final Runnable onCompacted;
 
     /** 使用默认预算装配循环，注册工具由宿主负责。 */
     public AgentLoop(LlmClient client, ToolRegistry registry) { this(client, registry, DEFAULT_MAX_STEPS); }
@@ -67,6 +71,13 @@ public final class AgentLoop {
     /** 生产入口显式注入选中模型的预算策略；旧库调用没有模型资料时保持 UNKNOWN。 */
     public AgentLoop(LlmClient client, ToolRegistry registry, int maxSteps, DebugPrinter debug,
                      ContextBuilder contexts, Consumer<ContextSnapshot> onContext, ContextBudgetPolicy budget) {
+        this(client, registry, maxSteps, debug, contexts, onContext, budget, null, () -> { });
+    }
+
+    /** 摘要器调用次数单独有界，原始任务消息仍由 AgentResult 返回，不混入摘要请求。 */
+    public AgentLoop(LlmClient client, ToolRegistry registry, int maxSteps, DebugPrinter debug,
+                     ContextBuilder contexts, Consumer<ContextSnapshot> onContext, ContextBudgetPolicy budget,
+                     HistoryCompactor compactor, Runnable onCompacted) {
         this.client = Objects.requireNonNull(client, "client");
         this.registry = Objects.requireNonNull(registry, "registry");
         if (maxSteps < 1 || maxSteps > MAX_STEPS) throw new IllegalArgumentException("Agent steps must be within 1..100.");
@@ -76,9 +87,11 @@ public final class AgentLoop {
         this.contexts = Objects.requireNonNull(contexts, "contexts");
         this.onContext = Objects.requireNonNull(onContext, "onContext");
         this.budget = Objects.requireNonNull(budget, "budget");
+        this.compactor = compactor;
+        this.onCompacted = Objects.requireNonNull(onCompacted, "onCompacted");
     }
 
-    /** 在独立消息副本上执行，不修改 Session；调用方只提交正常完成结果。 */
+    /** 在副本上执行任务，调用方只提交正常完成结果；通过验收的旧历史摘要由回调单独保存。 */
     public AgentResult run(Session session, String input, ToolContext context) {
         return run(session, input, context, null);
     }
@@ -99,10 +112,18 @@ public final class AgentLoop {
         Set<String> callIds = new HashSet<>(); // 同一任务内跨步骤检测重复调用 ID。
         int executions = 0;
         boolean warned = false; // 一个用户任务最多输出一次预警，不把每轮都刷成同一提醒。
+        boolean summaryFailed = false;
         for (int step = 1; step <= maxSteps; step++) {
             checkInterrupted();
             boolean finalRound = step == maxSteps;
-            var snapshot = contexts.build(history, messages, registry.definitions(context), context.workMode(), step, maxSteps);
+            var definitions = registry.definitions(context);
+            var snapshot = contexts.build(history, messages, definitions, context.workMode(), step, maxSteps, session.compaction());
+            if (compactor != null && !summaryFailed) {
+                var outcome = compactor.prepare(session, messages, definitions, context.workMode(), step, maxSteps, false);
+                snapshot = outcome.context();
+                if (outcome.changed()) onCompacted.run();
+                else if (outcome.summaryCalls() > 0) summaryFailed = true; // 一个任务失败后不在每步反复付费压缩。
+            }
             onContext.accept(snapshot); // 每次网络请求前更新估算，不向 HTTP 增加统计字段。
             var assessment = budget.evaluate(snapshot);
             if (!assessment.canSend()) throw new ContextLimitException(assessment, step - 1, executions);

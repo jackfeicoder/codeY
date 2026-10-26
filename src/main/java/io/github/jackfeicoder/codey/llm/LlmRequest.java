@@ -12,8 +12,11 @@ import java.util.Objects;
  * @param messages 按对话顺序排列的完整消息列表，内部保存不可修改的副本
  * @param tools 本次可用工具定义；为空时保持普通聊天协议，不发送 tools 字段
  * @param toolCallsAllowed false 时用于预算收尾，协议显式发送 tool_choice=none（存在工具定义时）
+ * @param maxOutputTokens 显式输出上限，摘要请求映射为 max_tokens；null 保持原业务协议
  */
-public record LlmRequest(List<Message> messages, List<ToolDefinition> tools, boolean toolCallsAllowed) {
+public record LlmRequest(List<Message> messages, List<ToolDefinition> tools, boolean toolCallsAllowed, Integer maxOutputTokens) {
+    /** 原业务请求保持不发送 max_tokens；摘要请求可显式限制输出。 */
+    public LlmRequest(List<Message> messages, List<ToolDefinition> tools, boolean toolCallsAllowed) { this(messages, tools, toolCallsAllowed, null); }
     /** 常规请求允许模型自主选择工具，保留原两参数构造方式。 */
     public LlmRequest(List<Message> messages, List<ToolDefinition> tools) { this(messages, tools, true); }
     /** 普通聊天和标题生成无需工具，保留原来的构造方式。 */
@@ -21,6 +24,7 @@ public record LlmRequest(List<Message> messages, List<ToolDefinition> tools, boo
 
     /** 校验非空消息列表并复制，避免请求创建后被外部改动。 */
     public LlmRequest {
+        if (maxOutputTokens != null && maxOutputTokens <= 0) throw new IllegalArgumentException("Output token limit must be positive.");
         if (messages == null || messages.isEmpty() || messages.stream().anyMatch(Objects::isNull)) {
             throw new IllegalArgumentException("LLM request requires a nonempty list of non-null messages.");
         }

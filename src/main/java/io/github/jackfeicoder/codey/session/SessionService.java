@@ -68,7 +68,14 @@ public final class SessionService implements AutoCloseable {
         if (snapshot.messages().isEmpty() && snapshot.titleSource() != SessionSnapshot.TitleSource.MANUAL) {
             title = SessionSnapshot.fallbackTitle(history.get(0).content());
         }
-        snapshot = snapshot.update(title, snapshot.titleSource(), snapshot.titleGenerationAttempted(), history);
+        snapshot = snapshot.update(title, snapshot.titleSource(), snapshot.titleGenerationAttempted(), history).withCompaction(session.compaction());
+        dirty = true;
+    }
+
+    /** 压缩只覆盖已成功历史，可在当前新任务完成前单独保存；失败仍保留 dirty 供重试。 */
+    public void captureCompaction() {
+        if (java.util.Objects.equals(snapshot.compaction(), session.compaction())) return;
+        snapshot = snapshot.withCompaction(session.compaction());
         dirty = true;
     }
 

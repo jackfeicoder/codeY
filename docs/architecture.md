@@ -1,6 +1,6 @@
 # CodeY 架构设计
 
-> 版本：0.1，日期：2026-10-26。当前已实现配置、消息、基础提示词、普通与 SSE 流式调用、可选工作区、本地会话管理、六个文件工具、execute_command 本地命令、AgentLoop、ask/规则 auto/full、会话文件授权、ReAct/Plan 切换、终端状态栏及按模型配置上下文容量。请求组装、Token 估算、输入预算与预警已实现，自动压缩待实现。完成的工具消息组可保存和恢复；执行中恢复、专用网络/删除工具、OS 进程沙箱、持久审计及多 Agent 仍待实现。验证使用本地替身与临时文件，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
+> 版本：0.1，日期：2026-10-26。当前已实现配置、消息、基础提示词、普通与 SSE 流式调用、可选工作区、本地会话管理、六个文件工具、execute_command 本地命令、AgentLoop、ask/规则 auto/full、会话文件授权、ReAct/Plan 切换、终端状态栏及按模型配置上下文容量。请求组装、Token 估算、输入预算与预警已实现，发送前有界摘要压缩与 /compact 已实现。完成的工具消息组可保存和恢复；执行中恢复、专用网络/删除工具、OS 进程沙箱、持久审计及多 Agent 仍待实现。验证使用本地替身与临时文件，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
 
 ## 阅读导航
 
@@ -780,7 +780,7 @@ AgentLoop.run(session, input, context)
 
 工具定义传输的职责分工：具体 Tool 声明自身 name/description/parameters，ToolRegistry 汇总并筛选，AgentLoop 放入 LlmRequest，ChatCompletionsClient 编码成 `tools[].type="function"` 与 `function.name/description/parameters`。`base.md` 的工具使用指导作为 system 消息发送，两者不拼成一份字符串。无工具时省略 tools 字段；普通轮次不强制 tool_choice；最后一次存在工具定义时显式发送 tool_choice="none"，程序也拦截该轮工具。无工具定义时省略 tools 和 tool_choice。
 
-AgentLoop 本身不修改 Session。COMPLETED 返回仅本轮的 user、所有 assistant/tool 与最终 assistant；ChatCli 调用 `completeAgentTurn()` 完整校验后提交，Launcher 再 capture/save。最后一次获得有效文本时，仍提交完整消息组并提示预算受限，未确认部分由模型在回答中说明；若服务商仍请求工具或网络/协议失败、中断，则不提交残缺本轮。预算提醒只附加到当次 system 消息副本，不进入历史或磁盘，下一用户任务重新计数；强制执行由代码保证，提示词仅用于引导。当前已包含写入/编辑/命令工具；失败不提交消息，但已执行的文件修改不会自动回滚。执行事件和未完成任务恢复仍待实现。
+AgentLoop 不提交本次任务原消息，已验收的旧历史摘要单独应用并由宿主保存。COMPLETED 返回仅本轮的 user、所有 assistant/tool 与最终 assistant；ChatCli 调用 `completeAgentTurn()` 完整校验后提交，Launcher 再 capture/save。最后一次获得有效文本时，仍提交完整消息组并提示预算受限，未确认部分由模型在回答中说明；若服务商仍请求工具或网络/协议失败、中断，则不提交残缺本轮。预算提醒只附加到当次 system 消息副本，不进入历史或磁盘，下一用户任务重新计数；强制执行由代码保证，提示词仅用于引导。当前已包含写入/编辑/命令工具；失败不提交消息，但已执行的文件修改不会自动回滚。执行事件和未完成任务恢复仍待实现。
 
 空最终回答校验：finish_reason=stop/length 只表示服务端结束生成，不代表任务已经完成。AgentLoop 在没有工具调用时要求正文非空、非纯空白，否则抛 INVALID_RESPONSE，CLI 明确报错并继续等待用户输入，不打印空 CodeY 回答，也不把本轮工具轨迹与空回答保存为成功轮次。不会自动请求下一轮或重放工具；已有历史不自动改写。HTTP 429 属于独立的服务端请求限制错误，当前仅分类为可重试，不自动重试；频率、并发或额度原因需结合厂商信息确认。失败任务不提交，随后输入“继续”只会携带已成功保存的历史。
 
@@ -944,7 +944,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --profile qwen
 
 Session 保存完整文本/工具对话，并非完整执行审计日志；不保存模型失败、中断或预算耗尽的轮次。SessionService/JsonSessionStore 已提供跨进程恢复，不重放旧工具调用。当前仍发送全部历史，没有 Token 预算、裁剪或摘要；超长时可 /clear，新会话不删除旧历史。
 
-模块边界：Session 保存发生过的对话，ContextBuilder 后续选择和组织本次请求，Memory 后续提取/保存/召回可复用事实。当前不增加 context 或 memory 的具体实现。
+模块边界：Session 保存发生过的对话，ContextBuilder 后续选择和组织本次请求，Memory 后续提取/保存/召回可复用事实。context 已实现统一组装、预算与摘要；memory 独立模块仍待实现。
 
 阶段记录：最初新增 11 项 Session 与 7 项 ChatCli 测试，共 151 项通过，并完成 8 项内存交互 JAR 检查。目前入口与 /clear 已升级为持久化语义，最新验证见 [第 16 节](#workspace-sessions)。
 
@@ -1468,8 +1468,8 @@ write_file、edit_file、权限审批与 ReAct/Plan 已实现；继续加入 exe
 
 - [ ] 新增项目规则或 Skill 的加载与注入（请求前组装入口已实现）。
 - [x] 预算包含系统提示词、工具 schema、历史、输出预留和安全余量；估算与实际 usage 分开。
-- [ ] 压缩保留近期完整工具调用组、当前目标和项目约束。
-- [ ] 完整事件历史留存，请求压缩不破坏源记录。
+- [x] 有界摘要保留近期完整工具组、当前任务，摘要包含目标/约束/验证/下一步。
+- [x] 完整成功消息历史留存，请求压缩不破坏源记录（失败/执行中事件另行设计）。
 - [ ] 用同一模型和任务比较策略前后的任务结果、Token 与耗时。
 
 产出证据：压缩前后样例、预算统计、失败案例。面试：Context Engineering、Token、摘要取舍。
@@ -1873,7 +1873,7 @@ WorkspaceBinding 明确区分 DIRECTORY 与 NONE：DIRECTORY 保存绝对真实�
 
 | 字段 | 含义 |
 |---|---|
-| schemaVersion | 当前为 2，支持完整工具轮次；旧 v1 文本记录可加载并升级 |
+| schemaVersion | 无摘要为 v2，含摘要为 v3；保存全量原始消息并兼容 v1 文本记录 |
 | id | UUID，与目录名一致；标题/前缀解析为合法完整 ID 后再加载 |
 | title | 用户标题、模型生成标题，或首问的本地摘要 |
 | titleSource | MANUAL、PENDING、LLM、FALLBACK，表示标题来源与生成状态 |
@@ -1987,7 +1987,7 @@ ConsoleApprovalHandler 复用 ConsoleInput，仅明确 y/yes 批准，其他输�
 
 实际命令 `/permissions [ask|auto|full|revoke]`、`/mode [react|plan]`、`/status` 均已接入命令目录与参数补全；无参数命令在交互终端显示选择输入，在管道仅显示当前状态。multi 明确未启用。PermissionSettings 从相同配置目录的 .env 和环境读取 CODEY_PERMISSION_MODE（默认 ask）与 CODEY_ALLOW_PIPED_APPROVALS（默认 false）；无原生交互终端且未显式开启管道审批时，不读取下一条聊天作为批准。显式开启管道审批后，调用方负责按交互顺序提供 y/n。
 
-RuntimeStatus 保存模式、模型、上下文估算和最近实际 promptTokens；StatusRenderer 按终端显示列宽对齐并转义控制字符，窄屏优先保留模式。ConsoleInput 在原生终端用 JLine Status 显示底栏，管道显示普通单行，关闭时移除。模型窗口由 models.json 配置；当前采用 heuristic-v1 本地估算而非精确分词。右侧“已用 ≈... / ... (...)”以 K/M 显示，百分比为原始估算 / 配置容量，未知容量为 ?%。/context 显示拆分，/status 单独显示实际 usage。输入前与每次 ReAct 请求前重新组装；已知容量进行请求前输入预算检查，尚无自动压缩。鼠标菜单、统一事件总线和 RunCoordinator 抽象未提前实现。
+RuntimeStatus 保存模式、模型、上下文估算和最近实际 promptTokens；StatusRenderer 按终端显示列宽对齐并转义控制字符，窄屏优先保留模式。ConsoleInput 在原生终端用 JLine Status 显示底栏，管道显示普通单行，关闭时移除。模型窗口由 models.json 配置；当前采用 heuristic-v1 本地估算而非精确分词。右侧“已用 ≈... / ... (...)”以 K/M 显示，百分比为原始估算 / 配置容量，未知容量为 ?%。/context 显示拆分，/status 单独显示实际 usage。输入前与每次 ReAct 请求前重新组装；已知容量进行请求前输入预算检查，已接入自动摘要与 /compact。鼠标菜单、统一事件总线和 RunCoordinator 抽象未提前实现。
 
 终端展示通过 `cli/ConsoleTheme` 集中管理，ConsoleInput 配置输入分隔线、用户/命令高亮与候选选中样式；ChatCli 展示回答，ConsoleApprovalHandler 展示黄色审批提示，SessionLauncher 使用同一主题展示帮助与错误。DebugPrinter 只产生 REQUEST/TOOL/ERROR 三类简洁进度，由 ConsoleInput 注入的接收器决定颜色和缩进，AgentLoop 不依赖终端库。黄色“思考中 · 等待模型响应”是请求状态，不展示推理正文或等待动画；模型正文由 ConsoleStreamOutput 随 SSE 片段即时显示。
 
@@ -2332,7 +2332,7 @@ Main 模型工厂
 
 ### 后续接入
 
-ContextBuilder/TokenEstimator 现已提供统一请求视图与分类估算。ContextBudgetPolicy 已结合选中模型容量、输出预留及安全余量计算输入预算和预警水位。未知容量保持未知；输出上限、供应商能力发现及自动摘要后续逐项接入，继续保留原始会话提交边界。
+ContextBuilder/TokenEstimator 现已提供统一请求视图与分类估算。ContextBudgetPolicy 已结合选中模型容量、输出预留及安全余量计算输入预算和预警水位。未知容量保持未知；摘要已有独立输出上限，普通业务输出参数与供应商能力发现后续逐项接入，继续保留原始会话提交边界。
 
 ### 验证
 
@@ -2398,7 +2398,7 @@ context/
   package-info.java       包边界说明
 ```
 
-ContextBuilder.build(history, currentTurn, tools, mode, step, maxSteps) 不依赖终端、密钥、存储或实际模型客户端。currentTurn 为空表示预览；非空时必须只有一个未结束的用户任务，每组 assistant tool_calls 后已有且只有一个对应 tool 结果。历史仍由 MessageHistory 按完整成功轮次校验。调用 ID 可在不同历史任务间复用，同一任务内重复或悬空结果在请求前报错。请求中的消息顺序原样保留，不做静默丢弃。
+ContextBuilder.build(history, currentTurn, tools, mode, step, maxSteps) 不依赖终端、密钥、存储或实际模型客户端。currentTurn 为空表示预览；非空时必须只有一个未结束的用户任务，每组 assistant tool_calls 后已有且只有一个对应 tool 结果。历史仍由 MessageHistory 按完整成功轮次校验。调用 ID 可在不同历史任务间复用，同一任务内重复或悬空结果在请求前报错。原始历史顺序保留；已有摘要时，只在请求视图用摘要替代已覆盖前缀，近期与当前任务保留。
 
 ### 实际组装内容
 
@@ -2443,7 +2443,7 @@ TokenBreakdown 八项互不重复：basePrompt、runtimeInstructions、history�
 
 ### 当前限制和下一步
 
-组装阶段之后已接入[预算管理](#context-budget)：输入预算 = 模型窗口 - 输出预留 - 安全余量，每次发送前检查，80% 输入预算为默认预警水位，超过输入预算时阻止。尚无摘要压缩、自动裁剪或输出 API 硬限制。单文件/工具输出上限与任务模型请求次数保护继续有效。下一阶段接入保留近期完整工具组的摘要压缩，完整成功历史继续留存，压缩仅作用于请求视图。
+组装阶段之后已接入[预算管理](#context-budget)：输入预算 = 模型窗口 - 输出预留 - 安全余量，每次发送前检查，80% 输入预算为默认预警水位，超过输入预算时阻止。已接入[历史摘要](#context-compaction)，完整原始记录保留，近期工具组不拆分。摘要请求单独限制输出，普通业务请求继续原协议。单文件/工具输出上限与任务模型请求次数保护继续有效。
 
 ### 验证
 
@@ -2515,7 +2515,7 @@ remainingTokens  = inputBudget - estimatedInput
 |---|---|---|
 | UNKNOWN | 未配置当前模型 contextWindow | 输入预算/水位/剩余空间为未知，允许请求，继续原有工具与次数限制 |
 | NORMAL | estimate < warningThreshold | 正常请求 |
-| WARNING | warningThreshold ≤ estimate ≤ inputBudget | 允许请求；同一用户任务最多提醒一次，不自动压缩 |
+| WARNING | warningThreshold ≤ estimate ≤ inputBudget | 允许请求；同一用户任务最多提醒一次；压缩由独立触发比例控制 |
 | EXCEEDED | estimate > inputBudget | 阻止即将发出的请求，剩余空间为负数，明确报告超限 |
 
 因此 80% 不是拒绝线，也不等于模型总窗口的 80%；等于输入预算仍可发送。底栏继续显示估算 / 总窗口，/context 和 /status 另列输入预算占比、精确预算、预留、预警水位和剩余 Token，避免混淆两种分母。预览不含下一条尚未提交的输入，真正发送时会重新判断。
@@ -2533,7 +2533,7 @@ Main 读取全局设置 + 选中模型容量/覆盖值
   → 有完整 tool_calls：保留原审批与执行流程，回填全部结果后重新组装/检查
 ```
 
-AgentLoop 对外仍不修改 Session。被阻止的请求没有进入客户端或 stream.onResponseStart，也不打印已请求的轮次；异常记录 step-1 次已完成模型请求和实际调度的工具数。库调用没有模型资料时默认 UNKNOWN，生产交互和 --prompt 显式注入选中模型策略。
+AgentLoop 不提交本次任务原消息；通过验收的旧历史摘要单独应用并由宿主先保存。被阻止的请求没有进入客户端或 stream.onResponseStart，也不打印已请求的轮次；异常记录 step-1 次已完成模型请求和实际调度的工具数。库调用没有模型资料时默认 UNKNOWN，生产交互和 --prompt 显式注入选中模型策略。
 
 交互端显示数量、预算和可选下一步（/model 切换大窗口、/new 或 /clear 新开），随后继续接受输入；本轮不作为成功对话提交，不更新自动标题。之前成功历史、完整调用配对及持久化格式不变。已执行的文件写入仍保留，超限不回滚或重放工具。预算按每次模型请求检查，不为预算在同一工具组中途切断；执行组仍按既有权限、参数和中断规则处理。下一次输入前预览会回到成功历史，因此失败任务的临时工具上下文不会偷偷写入新请求。
 
@@ -2541,12 +2541,101 @@ AgentLoop 对外仍不修改 Session。被阻止的请求没有进入客户端�
 
 ### 边界与后续
 
-当前 outputReserveTokens 是本地预算预留，不是模型官方输出上限，未自动新增 API max_tokens 或 max_completion_tokens；不同网关的输出参数兼容性后续单独接入。heuristic-v1 与服务端分词、网关实际窗口存在差异，配置预留/安全余量只能降低超限概率，不保证远端接受或限制模型实际输出。实际 usage 继续单独显示，没有自动反向调整估算或预算。
+当前 outputReserveTokens 是本地预算预留，不是模型官方输出上限；普通业务请求不自动新增 API 输出限制，摘要请求显式发送 max_tokens，不同网关的输出参数兼容性后续扩展。heuristic-v1 与服务端分词、网关实际窗口存在差异，配置预留/安全余量只能降低超限概率，不保证远端接受或限制模型实际输出。实际 usage 继续单独显示，没有自动反向调整估算或预算。
 
-尚无自动摘要、历史裁剪、失败任务事件持久化、自动重试或成本预算。后续在同一检查点接入摘要压缩：达到可配置压缩水位后准备更小请求视图，再估算/检查；原始完整成功历史保留，并完整保存近期工具调用组。当前预警比例先作为预警配置使用，不冒充已经实现的压缩触发器。
+已在同一检查点接入独立的摘要触发配置，先准备并保存更小请求视图，再估算/检查。完整成功历史留存，近期工具调用组完整保留。预警比例与压缩触发比例相互独立，默认均为 0.8。失败任务事件持久化、自动重试及成本预算待实现。
 
 ### 验证
 
 完整 mvn verify：698 项通过，失败、错误和跳过均为 0。本阶段新增 40 项覆盖全局来源/优先级/脱敏、模型字段及独立继承、精确边界、水位取整、Long 溢出、未知窗口、请求前/工具参数及结果增长后的超限、预警继续且每任务一次、实际调用计数、文件修改保留、历史不污染、切换模型继续和配置失败回退。
 
 生产 JAR 使用临时配置和本地 HTTP/SSE 服务验证：--check-config 默认值、全局环境覆盖、模型覆盖和非法组合；--prompt 首次超限未发 HTTP；工作区 read_file 后超限阻止下一请求，切换大模型恢复；接近水位正常请求且只提醒一次；未知窗口跳过检查。成功快照只有恢复后的完整任务，内部预算字段未写入请求或快照，未使用真实 .env、密钥或厂商服务。
+
+<a id="context-compaction"></a>
+
+## 24. 历史摘要压缩实现
+
+### 职责与文件
+
+压缩减少本次发送的历史信息量。Session 和磁盘仍保留全部成功 user/assistant/tool 原记录，ContextBuilder 负责请求视图，HistoryCompactor 负责选择、生成和验收摘要，SessionService 负责原子保存派生状态。长期记忆跨任务召回、失败任务事件和当前任务内部压缩不在本版范围。
+
+| 文件 | 职责 |
+|---|---|
+| config/CompactionSettings.java | 全局启用、水位、近期保留数、摘要输出、总调用数和总超时 |
+| context/HistoryCompactor.java | 以完整用户任务切分、适配模型预算分块、滚动摘要、候选验收 |
+| context/SummaryDocument.java | 八类字符串数组；严格 JSON、字段/条目/长度与输出 Token 校验 |
+| context/CompactionState.java | 覆盖的原始消息条数、SHA-256 源指纹、摘要和生成时间 |
+| resources/prompts/compact.md | 独立摘要 system 指令；旧历史只作资料，区分执行/建议/验证 |
+| prompt/PromptLoader.java | 从 classpath 加载摘要指令，每次压缩读取，不覆盖会话 base 快照 |
+| context/ContextBuilder.java | 校验源指纹，只在请求视图替代已覆盖前缀，单列摘要 Token |
+| session/SessionSnapshot.java、SessionService.java | v3 摘要与原文同一快照，沿用文件锁、revision、原子替换和 dirty 重试 |
+| agent/AgentLoop.java、cli/SessionLauncher.java | 每次发送前触发、持久化回调、/compact 和状态展示 |
+| llm/LlmRequest.java、ChatCompletionsClient.java | 可选 maxOutputTokens 映射 max_tokens，旧业务请求继续省略此字段 |
+
+### 配置与预算
+
+来源沿用环境变量覆盖共享配置目录 `.env`，启动时读取；修改后重启。模型窗口和输出/安全预留继续按当前 `(profile, modelId)` 计算，切换模型即时重建策略。
+
+| 配置 | 默认 | 范围/意义 |
+|---|---|---|
+| CODEY_CONTEXT_COMPACTION_ENABLED | true | 是否启用自动和手动压缩 |
+| CODEY_CONTEXT_COMPACTION_TRIGGER_RATIO | 0.8 | 输入预算触发比例，(0,1]，最多 6 位小数 |
+| CODEY_CONTEXT_COMPACTION_TARGET_RATIO | 0.4 | 整个新请求的目标比例，严格小于触发比例 |
+| CODEY_CONTEXT_KEEP_RECENT_TURNS | 3 | 2 或 3 个完整已完成用户任务；3 在目标空间不足时降至 2 |
+| CODEY_CONTEXT_SUMMARY_MAX_TOKENS | 4096 | 每次摘要输出上限，128..16384 |
+| CODEY_CONTEXT_COMPACTION_MAX_CALLS | 8 | 一次压缩最多 1..32 次摘要请求，与业务模型轮次独立 |
+| CODEY_CONTEXT_COMPACTION_TIMEOUT_SECONDS | 60 | 一次压缩总时限 1..300 秒，所有分块共享 |
+
+```text
+inputBudget = contextWindow - outputReserveTokens - safetyMarginTokens
+trigger     = ceil(inputBudget × compactionTriggerRatio)
+target      = floor(inputBudget × compactionTargetRatio)
+fixed       = system + tools + 近期保留原文 + 当前任务 + 协议估算
+summaryCap  ≤ min(summaryMaxTokens, 当前模型输出预留, inputBudget - fixed - 256)
+```
+
+256 是摘要包装预留；目标空间足够时，summaryCap 进一步降到 target - fixed - 256。小于 128 时跳过。40% 针对整体输入，剩余 20% 也不是专门给摘要的固定区域。触发比例与预算预警比例独立，底栏百分比继续以总窗口为分母。
+
+容量未知时自动和手动摘要都跳过，普通请求仍按原 UNKNOWN 规则执行。没有足够旧轮次时不勉强丢弃近期原文。固定内容已占较多预算时，40% 作为目标，硬输入预算是验收底线。
+
+### 发送前流程
+
+```text
+AgentLoop 每一步组装已有摘要 + 近期原文 + 当前任务 + tools
+  → 未到触发水位：沿原请求继续
+  → 到水位：选原始历史前缀，边界必须是完整用户任务
+      → 优先保留 3 轮，必要时 2 轮；当前任务完整保留
+      → 旧摘要 + 新覆盖原文，序列化为历史资料
+      → 按当前输入预算二分选择最大片段，避开 Unicode 代理对
+      → compact.md + 滚动摘要 + 当前片段，非流式 generate、无 tools
+      → max_tokens 限制输出；剩余总时限内等待；逐片形成新滚动摘要
+      → stop/无工具、严格 JSON、长度/Token 通过
+      → 最终重建请求：必须比原来小且符合硬输入预算
+      → 应用摘要状态 → 宿主保存成功后 → 再次预算检查 → 业务模型请求
+```
+
+消息是 JSON 历史资料，超长单条消息可跨文本片段；这与业务请求的工具消息配对无关，摘要请求自身只有 system + user。摘要提示词明确片段可能不完整，要求保留既有约束、不补造缺失信息。后续压缩读取旧摘要与新覆盖原文，已覆盖大段历史不重复加入来源。
+
+八个字段分别为 goals、constraints、facts、decisions、changes、verification、openIssues、nextSteps；每字段最多 64 条，每条最多 8192 字符，总 JSON 最多 65536 字符，至少一项非空。只接受纯 JSON 或完整 json 围栏，拒绝重复/未知/缺失键、非字符串项及尾随内容。模型新近信息通常优先，旧约束只有明确替代后才作废；事实正确性仍依赖模型，程序结构校验不作事实担保。
+
+摘要放在第一条保留 user 的历史资料前缀，原 user 文本完整保留为后缀，不加入 system。近期 assistant/tool 消息不变，当前任务保持原样。TokenBreakdown 单列 summary，history 只统计未覆盖原文，避免重复计数。
+
+### 持久化、恢复与失败边界
+
+v1 文本、v2 工具消息继续加载；无摘要保存为 v2，首次成功摘要保存为 v3。v3 的 messages 仍为全量原始成功记录，新增 compaction：coveredMessages（不含 system 的严格前缀条数）、sourceHash、summary、createdAt。保存及恢复校验完整历史、前缀任务边界和 SHA-256 指纹；摘要没有权限授予作用，指纹只检查来源一致性。
+
+摘要覆盖旧的已成功历史，因此可以先单独保存，即使之后业务 HTTP 失败也继续有效；当前失败任务不会混进摘要或原始成功记录。写盘失败时保留 dirty 待重试并停止业务请求，沿用原文件与 revision 保护。保存大小仍受 16 MiB 限制，压缩不缩减原始日志文件。
+
+任何分块 HTTP/截断/结构/Token/总超时/次数/最终预算失败，均放弃整次候选；已成功的中间滚动结果不应用。保留旧摘要和原请求，继续硬预算检查：尚有空间时允许业务调用，超限则明确阻止。同一任务中有实际摘要调用后失败，不在后续 ReAct 步反复尝试。中断取消等待并沿原中断通道退出；工作线程只返回候选，迟到响应不能更新 Session。
+
+`/compact` 跳过自动水位条件，仍受启用、容量、完整轮次、预算和时间限制；不增加用户轮次，不请求标题。`/context`/`/status`/底栏只预览和统计，不触发摘要网络请求。恢复会话或切换模型复用摘要与原文，按新窗口重新估算，必要时下一次业务请求再压缩。
+
+摘要请求使用当前模型的同一个客户端，非流式，不挂工具；普通聊天仍流式。摘要 API 输出上限只发送 max_tokens，某些推理模型会把推理用量纳入这个参数，也有网关不支持它；拒绝或 length 时按失败流程处理，未做自动兼容重试。摘要调用不占业务轮次或最近业务 usage，但仍会产生厂商调用费用，本版尚未汇总费用。
+
+当前任务内部、极大的近期单轮、system/tools 占用过大仍可能超限；保留两轮不是强行截短单轮。摘要可能遗漏或漂移，完整原文保留用于后续查阅和改进。长期记忆、项目规则、精确 tokenizer、自动重试、成本预算及失败事件日志后续实现。
+
+### 验证
+
+完整 `mvn verify`：744 项通过，失败、错误、跳过均为 0。压缩阶段新增 46 项，覆盖全局设置来源及范围、严格 JSON/大小约束、保留 3/2 完整轮次与工具组、前缀增量、分块/代理对、总超时/调用数、截断与无效响应拒绝、无实际缩小拒绝、中断、未知容量、写盘失败重试、v3 指纹验证、原文留存、业务计数不受摘要影响、CLI 预览/手动压缩/恢复/切模型。
+
+生产 JAR 使用临时配置和本地 HTTP/SSE 验证摘要非流式且有 max_tokens、业务流式且无新增输出字段、近期工具调用结果成组、自动及手动摘要、全量原文与摘要同存 v3、恢复和切模型不请求网络、业务 HTTP 失败保留已保存摘要、无效摘要时按原预算继续或阻止。本地替身只验证机制与协议，真实厂商的摘要质量、延迟和参数兼容性需另行实测。

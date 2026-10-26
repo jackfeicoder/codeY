@@ -15,6 +15,8 @@ import io.github.jackfeicoder.codey.context.TokenEstimator;
 import io.github.jackfeicoder.codey.context.ContextSnapshot;
 import io.github.jackfeicoder.codey.context.ContextBudgetPolicy;
 import io.github.jackfeicoder.codey.config.ContextBudgetSettings;
+import io.github.jackfeicoder.codey.config.CompactionSettings;
+import io.github.jackfeicoder.codey.context.HistoryCompactor;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
 import io.github.jackfeicoder.codey.llm.LlmRequest;
@@ -116,6 +118,7 @@ public final class SessionLauncher {
     /** 全局默认值在启动时注入；模型切换后重新解析单模型覆盖值。 */
     private final ContextBudgetSettings budgetSettings;
     private ContextBudgetPolicy budgetPolicy = ContextBudgetPolicy.unknown();
+    private final CompactionSettings compactionSettings;
 
     /** 输入、模型工厂和存储可替换，测试无需真实终端、用户目录或厂商凭证。 */
     public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
@@ -184,9 +187,21 @@ public final class SessionLauncher {
                            ConsoleInput input, PrintWriter output, PrintWriter errors, Options options,
                            ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog,
                            int maxIterations, PermissionSettings permissionSettings, ContextBudgetSettings budgetSettings) {
+        this(startup, settings, store, models, basePrompt, input, output, errors, options, tools, debug, modelCatalog,
+                maxIterations, permissionSettings, budgetSettings, new CompactionSettings());
+    }
+
+    /** 摘要设置在宿主启动时注入；恢复后的摘要不需要额外模型请求即可展示。 */
+    public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
+                           Function<String, ModelChoice> models, Supplier<String> basePrompt,
+                           ConsoleInput input, PrintWriter output, PrintWriter errors, Options options,
+                           ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog,
+                           int maxIterations, PermissionSettings permissionSettings, ContextBudgetSettings budgetSettings,
+                           CompactionSettings compactionSettings) {
         if (maxIterations < 1 || maxIterations > AgentLoop.MAX_STEPS) throw new IllegalArgumentException("Agent steps must be within 1..100.");
         this.maxIterations = maxIterations;
         this.budgetSettings = java.util.Objects.requireNonNull(budgetSettings, "budgetSettings");
+        this.compactionSettings = java.util.Objects.requireNonNull(compactionSettings, "compactionSettings");
         this.startup = startup.toAbsolutePath().normalize();
         this.settings = settings;
         this.store = store;
@@ -250,6 +265,8 @@ public final class SessionLauncher {
                         printStatus();
                     } else if (command.equals("/context")) {
                         printContext();
+                    } else if (command.equals("/compact")) {
+                        compact();
                     } else if (command.matches("/list\\s+model")) {
                         listModels();
                     } else if ("/model".equals(command)) {
@@ -584,7 +601,8 @@ public final class SessionLauncher {
                 return response;
             }
         };
-        ChatCli chat = new ChatCli(new AgentLoop(observed, tools, maxIterations, debug, contexts, this::updateContext, budgetPolicy), active.session(),
+        ChatCli chat = new ChatCli(new AgentLoop(observed, tools, maxIterations, debug, contexts, this::updateContext, budgetPolicy,
+                new HistoryCompactor(selectedClient, budgetPolicy, compactionSettings, contexts, debug), this::saveCompaction), active.session(),
                 new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions), input, output, errors);
         if (chat.answer(line)) {
             active.captureTurn();
@@ -645,8 +663,9 @@ public final class SessionLauncher {
         output.println("最近实际输入：" + (runtimeStatus.lastInputTokens() == null ? "未知" : runtimeStatus.lastInputTokens() + " tok")
                 + "（服务商最近一次响应的 usage；不与当前估算相加）。");
         output.println("上下文容量来源：" + (model == null ? "未配置" : model.capabilities().source())
-                + "；已启用已知容量的请求前预算检查，自动压缩尚未接入。");
+                + "；已启用已知容量的请求前预算检查。");
         printBudget();
+        printCompaction();
         output.println("文件授权 " + (permissions == null ? 0 : permissions.grantCount()) + "；拒绝记录 "
                 + (permissions == null ? 0 : permissions.denialCount()) + "。/permissions revoke 可撤销。");
         output.println("文件权限限制来自内置工具路径检查，当前没有进程/网络沙箱。");
@@ -656,7 +675,7 @@ public final class SessionLauncher {
     private void previewContext() {
         if (active == null) return;
         var toolContext = new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions);
-        updateContext(contexts.build(active.session().messages(), List.of(), tools.definitions(toolContext), workMode, 1, maxIterations));
+        updateContext(contexts.build(active.session().messages(), List.of(), tools.definitions(toolContext), workMode, 1, maxIterations, active.session().compaction()));
     }
 
     /** 同步估算和预算；请求展示交给现有模型调用/输入刷新位置，避免重复刷状态。 */
@@ -679,7 +698,7 @@ public final class SessionLauncher {
                         java.math.RoundingMode.HALF_UP).toPlainString() + "%";
         output.println("  输入预算占用：" + (value.inputBudget() == null ? "" : "≈") + percent + "；剩余："
                 + (value.remainingTokens() == null ? "?" : value.remainingTokens()) + " tok；" + value.label());
-        output.println("  输出预留为本地预算参数，不是模型输出硬上限；未自动添加 max_tokens，估算仍可能与服务端分词不同。");
+        output.println("  输出预留为本地预算参数；普通任务不自动添加 max_tokens，摘要请求单独限制输出。估算与服务端分词可能不同。");
     }
 
     /** 只打印分类计数，避免把历史正文、文件内容和提示词整段刷到控制台。 */
@@ -692,15 +711,40 @@ public final class SessionLauncher {
         output.println("  基础提示词：≈" + tokens.basePrompt() + " tok");
         output.println("  运行时模式/轮次指令：≈" + tokens.runtimeInstructions() + " tok");
         output.println("  成功历史（含过去工具调用与结果）：≈" + tokens.history() + " tok");
+        output.println("  历史摘要及标记：≈" + tokens.summary() + " tok");
         output.println("  本次用户输入：≈" + tokens.userInput() + " tok");
         output.println("  本次模型正文/工具调用：≈" + tokens.assistant() + " tok");
         output.println("  本次工具结果：≈" + tokens.toolResults() + " tok");
         output.println("  可用工具定义（名称/描述/完整 JSON Schema，" + snapshot.request().tools().size() + " 个）：≈" + tokens.toolDefinitions() + " tok");
         output.println("  消息边界/协议开销：≈" + tokens.protocolOverhead() + " tok");
         output.println("  总计：≈" + tokens.total() + " tok；" + runtimeStatus.right());
-        output.println("发送前会加入当前输入，并在每次 ReAct 请求前重新组装和估算；完整历史原样保留。");
+        output.println("发送前加入当前输入，每次 ReAct 请求前重新组装；原始历史完整保存，请求可使用摘要。");
         printBudget();
-        output.println("已知容量超过输入预算时阻止下一次模型请求；尚无历史裁剪或自动压缩，项目规则、记忆、MCP、Skill 尚未接入。");
+        printCompaction();
+        output.println("压缩后仍超限时阻止下一次模型请求；项目规则、长期记忆、MCP、Skill 尚未接入。");
+    }
+
+    private void saveCompaction() { active.captureCompaction(); active.save(); }
+
+    /** 手动摘要不新增用户轮次，也不触发标题生成；失败只报告原因，旧摘要继续有效。 */
+    private void compact() {
+        if (active == null) { output.println("请先选择或新建会话。"); return; }
+        var context = new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions);
+        var outcome = new HistoryCompactor(model.chat(), budgetPolicy, compactionSettings, contexts, debug)
+                .prepare(active.session(), List.of(), tools.definitions(context), workMode, 1, maxIterations, true);
+        if (outcome.changed()) saveCompaction();
+        updateContext(outcome.context());
+        output.println("手动压缩：" + outcome.reason() + "；摘要调用 " + outcome.summaryCalls() + " 次。");
+    }
+
+    private void printCompaction() {
+        output.println("  自动压缩：" + (compactionSettings.enabled() ? "开启" : "关闭") + "；触发/目标："
+                + compactionSettings.triggerRatio().multiply(java.math.BigDecimal.valueOf(100)).stripTrailingZeros().toPlainString() + "%/"
+                + compactionSettings.targetRatio().multiply(java.math.BigDecimal.valueOf(100)).stripTrailingZeros().toPlainString()
+                + "% 输入预算；优先保留 " + compactionSettings.keepRecentTurns() + " 个完整用户轮次。");
+        var state = active == null ? null : active.session().compaction();
+        output.println("  当前摘要：" + (state == null ? "尚无" : "覆盖原始历史前 " + state.coveredMessages() + " 条消息")
+                + "；/compact 手动压缩；原始消息保留。");
     }
     private boolean confirmFull() {
         try { return approvalHandler.confirmFull(); }

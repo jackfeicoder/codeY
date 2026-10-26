@@ -37,6 +37,13 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** 非流式 HTTP 集成测试：启动本地服务 → 构造假配置 → 调用客户端 → 检查结果 → 关闭资源。 */
 class ChatCompletionsClientTest {
+    @Test void explicitSummaryLimitIsEncodedWhileNormalRequestsKeepOriginalWireContract() {
+        client().generate(new LlmRequest(request().messages(), List.of(), false, 512));
+        assertEquals(512, capturedBody.get().path("max_tokens").asInt());
+        assertFalse(capturedBody.get().has("tools")); assertFalse(capturedBody.get().has("stream_options"));
+        client().generate(request()); assertFalse(capturedBody.get().has("max_tokens"));
+        assertThrows(IllegalArgumentException.class, () -> new LlmRequest(request().messages(), List.of(), false, 0));
+    }
     /** 构造和检查测试 JSON 的解析器。 */
     private final ObjectMapper mapper = new ObjectMapper();
     /** 跨线程保存实际收到的请求 JSON，供主测试线程断言。 */

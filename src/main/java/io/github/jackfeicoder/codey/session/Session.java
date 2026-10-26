@@ -2,17 +2,20 @@ package io.github.jackfeicoder.codey.session;
 
 import java.util.ArrayList;
 import java.util.List;
+import io.github.jackfeicoder.codey.context.CompactionState;
 
 /**
  * 单次运行中的会话：保存基础指令与成功完成的文本/工具对话轮次。
  * 请求快照包含当前问题，但只有收到可保存的回答后才提交本轮，失败不污染历史。
- * 当前由 CLI 单线程使用；持久化交给 SessionService/SessionStore，不负责长期记忆或压缩。
+ * 当前由 CLI 单线程使用；保管已验收的摘要状态，生成交给 HistoryCompactor，持久化交给 SessionService。
  */
 public final class Session {
     /** 清空会话时仍保留的基础系统消息。 */
     private final Message systemMessage;
     /** 保存 system 和完整轮次，可包含 assistant/tool 消息组，不直接暴露。 */
     private final List<Message> history = new ArrayList<>();
+    /** 派生的摘要覆盖信息，和原始 history 分开；成功压缩后才替换。 */
+    private CompactionState compaction;
 
     /** 使用非空白基础提示词创建会话，系统消息始终位于第一项。 */
     public Session(String basePrompt) {
@@ -27,6 +30,7 @@ public final class Session {
     public static Session restore(SessionSnapshot snapshot) {
         Session session = new Session(snapshot.systemPrompt());
         session.history.addAll(snapshot.messages());
+        session.compaction = snapshot.compaction();
         return session;
     }
 
@@ -35,7 +39,14 @@ public final class Session {
         return List.copyOf(history);
     }
 
-    /** 在历史副本末尾追加当前问题，供 LlmRequest 使用；此时不修改会话。 */
+    public CompactionState compaction() { return compaction; }
+    /** 只接受与当前原始前缀匹配的摘要，不删除或重写消息。 */
+    public void applyCompaction(CompactionState state) {
+        java.util.Objects.requireNonNull(state).validate(history.subList(1, history.size()));
+        compaction = state;
+    }
+
+    /** 原始历史便捷视图，不应用摘要；生产请求统一走 ContextBuilder，此时不修改会话。 */
     public List<Message> messagesFor(String input) {
         // 先校验输入，再构造本次请求独立的消息列表。
         Message user = userMessage(input);
@@ -68,6 +79,7 @@ public final class Session {
     public void clear() {
         history.clear();
         history.add(systemMessage);
+        compaction = null;
     }
 
     /** 校验问题并保留原始文本，不修改用户输入的空格或换行。 */
