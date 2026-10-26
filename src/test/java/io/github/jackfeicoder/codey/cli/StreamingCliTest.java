@@ -99,13 +99,14 @@ class StreamingCliTest {
             }
         };
         var out = new PrintWriter(output); var store = new JsonSessionStore(directory.resolve("sessions"));
-        var input = new ConsoleInput(new BufferedReader(new StringReader("问题\n/exit\n")), out);
+        var input = new ConsoleInput(new BufferedReader(new StringReader("问题\n/status\n/exit\n")), out);
         int exit = new SessionLauncher(directory, new SessionSettings(directory.resolve("data"), null, false), store,
                 profile -> new SessionLauncher.ModelChoice("fixture model-a", client, client), () -> "base", input,
                 out, new PrintWriter(errors), new SessionLauncher.Options(null, true, "stream", null, null), new ToolRegistry(),
                 DebugPrinter.NONE, List::of, 20, new PermissionSettings()).run();
         assertEquals(0, exit); assertEquals(1, streamCalls.get()); assertEquals("", errors.toString());
-        assertTrue(output.toString().contains("CodeY> 流式回答")); assertTrue(output.toString().contains("上次输入 321"));
+        assertTrue(output.toString().contains("CodeY> 流式回答")); assertTrue(output.toString().contains("已用 ≈"));
+        assertTrue(output.toString().contains("最近实际输入：321 tok"));
         try (var files = Files.walk(directory)) {
             Path snapshot = files.filter(path -> path.getFileName().toString().equals("session.json")).findFirst().orElseThrow();
             JsonNode messages = new ObjectMapper().readTree(Files.readString(snapshot)).get("messages");

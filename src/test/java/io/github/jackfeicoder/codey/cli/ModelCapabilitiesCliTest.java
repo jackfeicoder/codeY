@@ -65,9 +65,9 @@ class ModelCapabilitiesCliTest {
         writeCapacity(128000, 1000000);
         var store = run("/status\nfirst\n/model fixture org/model-b\n/status\nsecond\n/model other org/model-a\n/status\n/exit\n", null, ignored -> { });
         String text = output.toString();
-        assertTrue(text.contains("fixture org/model-a | 上次输入 ? tok / 上限 128000"), text);
-        assertTrue(text.contains("fixture org/model-b | 上次输入 ? tok / 上限 1000000"), text);
-        assertTrue(text.contains("other org/model-a | 上次输入 ? tok / 上限 ?"), text);
+        assertTrue(text.matches("(?s).*fixture org/model-a \\| 已用 ≈[0-9.]+ / 128K \\(0.0%\\).*"), text);
+        assertTrue(text.matches("(?s).*fixture org/model-b \\| 已用 ≈[0-9.]+ / 1M \\(0.0%\\).*"), text);
+        assertTrue(text.matches("(?s).*other org/model-a \\| 已用 ≈[0-9.]+ / \\? \\(\\?%\\).*"), text);
         assertTrue(text.contains("models.json（本地配置）"));
         assertTrue(text.contains("未启用 token 预算检查"));
         assertEquals("", errors.toString());
@@ -80,12 +80,13 @@ class ModelCapabilitiesCliTest {
         var store = run("first\n/model fixture org/model-a\n/status\n/exit\n", null, ignored -> {
             try { writeCapacity(256000, 1000000); } catch (IOException failed) { throw new UncheckedIOException(failed); }
         });
-        assertTrue(output.toString().contains("fixture org/model-a | 上次输入 ? tok / 上限 256000"));
+        assertTrue(output.toString().matches("(?s).*fixture org/model-a \\| 已用 ≈[0-9.]+ / 256K \\(0.0%\\).*"));
         String id = store.list().sessions().get(0).id();
         writeCapacity(512000, 1000000);
         output.getBuffer().setLength(0);
         run("/status\n/exit\n", id, ignored -> fail("Browsing/resume must not call a model"));
-        assertTrue(output.toString().contains("上限 512000"));
+        assertTrue(output.toString().contains("/ 512K (0.0%)"));
+        assertTrue(output.toString().contains("已用 ≈"));
         assertEquals(1, requests.size());
         assertEquals(2, store.load(id).messages().size());
     }
@@ -98,7 +99,9 @@ class ModelCapabilitiesCliTest {
         });
         assertTrue(errors.toString().contains("models.json"));
         assertFalse(errors.toString().contains("secret-fixture"));
-        assertTrue(output.toString().contains("fixture org/model-a | 上次输入 123 tok / 上限 128000"));
+        assertTrue(output.toString().contains("fixture org/model-a | 已用 ≈"));
+        assertTrue(output.toString().contains("/ 128K (0.0%)"));
+        assertTrue(output.toString().contains("最近实际输入：123 tok"));
         assertEquals("fixture org/model-a", store.list().sessions().get(0).profileAlias());
         assertEquals(2, store.list().sessions().get(0).messages().size());
     }

@@ -761,11 +761,11 @@ POSIX 平台复制模式位；尚未完整保留 ACL、扩展属性和全部时�
 
 ```text
 AgentLoop.run(session, input, context)
-  → messages = Session.messagesFor(input) 的可变副本
+  → history = Session.messages() 快照；currentTurn = [当前 user]
   → 每步检查线程中断
   → registry.definitions(context) 筛选本次可用工具
-  → 剩余 3/2 次时在 system 副本提醒预算；最后一次 toolCallsAllowed=false
-  → client.generate(new LlmRequest(requestMessages, definitions, !finalRound))
+  → ContextBuilder 组合 history/currentTurn/definitions，叠加 PLAN/轮次指令并估算
+  → 观察器更新状态 → client.generateStream(snapshot.request())（非流式入口使用 generate）
       ├─ 无工具调用、正文非空白且 finish_reason=stop/length
       │    → 追加最终 assistant → 返回 COMPLETED
       └─ 工具调用且 finish_reason=tool_calls
@@ -925,7 +925,7 @@ Main（无参数或 --chat）
       ├─ 聊天 exit：保存并返回列表；列表 exit：退出程序
       ├─ /clear：保存旧会话，新建 ID，保留旧记录
       ├─ 会话命令：分页、改名、切换；不作为普通问题发送
-      └─ 普通问题：ChatCli.answer → AgentLoop → Session.messagesFor → LlmRequest → generate
+      └─ 普通问题：ChatCli.answer → AgentLoop → ContextBuilder → LlmRequest → generateStream
           ├─ 工具请求：执行各工具、回填关联结果、继续 generate
           ├─ 最终回答：completeAgentTurn → 显示 → captureTurn/save → 首轮标题任务
           └─ 模型失败/中断/预算结束仍无文本：提示，不提交残缺本轮
@@ -1461,10 +1461,12 @@ write_file、edit_file、权限审批与 ReAct/Plan 已实现；继续加入 exe
 ### M4：上下文工程
 
 - [x] 按供应商和模型 ID 配置最大上下文，切换时加载并显示；未知值明确标识。
+- [x] 每次 Agent 请求前统一组装完整历史、本次工具组和可用定义；运行时指令不写入历史。
+- [x] Token 分类估算、输入前预览、/context 和底栏占比；与实际 usage 分开。
 
 统一 ContextBuilder，加入规则、历史、工具输出预算和摘要。规则约定文件名及优先级在本阶段确定。
 
-- [ ] 每次模型调用前重新构建上下文，新增规则或 Skill 内容及时生效。
+- [ ] 新增项目规则或 Skill 的加载与注入（请求前组装入口已实现）。
 - [ ] 预算包含系统提示词、工具 schema、历史和预留输出；估算与实际 usage 分开。
 - [ ] 压缩保留近期完整工具调用组、当前目标和项目约束。
 - [ ] 完整事件历史留存，请求压缩不破坏源记录。
@@ -1985,7 +1987,7 @@ ConsoleApprovalHandler 复用 ConsoleInput，仅明确 y/yes 批准，其他输�
 
 实际命令 `/permissions [ask|auto|full|revoke]`、`/mode [react|plan]`、`/status` 均已接入命令目录与参数补全；无参数命令在交互终端显示选择输入，在管道仅显示当前状态。multi 明确未启用。PermissionSettings 从相同配置目录的 .env 和环境读取 CODEY_PERMISSION_MODE（默认 ask）与 CODEY_ALLOW_PIPED_APPROVALS（默认 false）；无原生交互终端且未显式开启管道审批时，不读取下一条聊天作为批准。显式开启管道审批后，调用方负责按交互顺序提供 y/n。
 
-RuntimeStatus 保存模式、模型及上次响应 promptTokens，缺失为未知；StatusRenderer 按终端显示列宽对齐并转义控制字符，窄屏优先保留模式。ConsoleInput 在原生终端用 JLine Status 显示底栏，管道显示普通单行；响应后更新，关闭时移除。模型窗口现已通过 models.json 配置；精确请求前估算仍未实现。右侧标注“上次输入 ... tok / 上限 ...”，未配置上限为 ?，不是当前上下文占用、压缩阈值或累计费用。鼠标菜单、统一事件总线和 RunCoordinator 抽象未提前实现。
+RuntimeStatus 保存模式、模型、上下文估算和最近实际 promptTokens；StatusRenderer 按终端显示列宽对齐并转义控制字符，窄屏优先保留模式。ConsoleInput 在原生终端用 JLine Status 显示底栏，管道显示普通单行，关闭时移除。模型窗口由 models.json 配置；当前采用 heuristic-v1 本地估算而非精确分词。右侧“已用 ≈... / ... (...)”以 K/M 显示，百分比为原始估算 / 配置容量，未知容量为 ?%。/context 显示拆分，/status 单独显示实际 usage。输入前与每次 ReAct 请求前重新组装；没有预算拦截或压缩。鼠标菜单、统一事件总线和 RunCoordinator 抽象未提前实现。
 
 终端展示通过 `cli/ConsoleTheme` 集中管理，ConsoleInput 配置输入分隔线、用户/命令高亮与候选选中样式；ChatCli 展示回答，ConsoleApprovalHandler 展示黄色审批提示，SessionLauncher 使用同一主题展示帮助与错误。DebugPrinter 只产生 REQUEST/TOOL/ERROR 三类简洁进度，由 ConsoleInput 注入的接收器决定颜色和缩进，AgentLoop 不依赖终端库。黄色“思考中 · 等待模型响应”是请求状态，不展示推理正文或等待动画；模型正文由 ConsoleStreamOutput 随 SSE 片段即时显示。
 
@@ -2040,7 +2042,7 @@ OpenAI 官方文档将 sandbox（实际文件/网络限制）、approval policy�
 | config/PermissionSettings.java | 从宿主配置/环境选择默认模式和管道审批开关 |
 | tool/PreparedToolOperation.java、ToolAccess.java | 准备后的操作与可信类别，审批在副作用之前；未知工具默认需审 |
 | agent/WorkMode.java | react/plan/multi 名称，multi 不开放执行 |
-| cli/RuntimeStatus.java、StatusRenderer.java | 模式/模型/上次输入 token 状态及终端宽度渲染 |
+| cli/RuntimeStatus.java、StatusRenderer.java | 模式/模型/估算已用量、容量和百分比；实际 usage 单独保留，按终端列宽渲染 |
 
 现有 ToolDefinition 的 name/description/JSON Schema 是模型使用说明，不足以做可信权限分类。新增操作类别等元数据由宿主 Java 实现提供，不接受模型在 arguments 中声明 safe=true、permission=full 或 approved=true 来改变权限。
 
@@ -2278,7 +2280,7 @@ CODEY_LLM_STREAM_INCLUDE_USAGE=true
 
 ### 功能与边界
 
-这是上下文模块的第一步，仅提供每个模型的最大上下文元数据。未实现请求前 Token 估算、输出预留、输入预算校验、压缩阈值或自动摘要。当前完整历史继续按原流程发送；配置容量不保证请求能被远端接受，也不改变 HTTP 请求内容、权限或消息持久化格式。
+本节记录上下文模块第一步：每个模型的最大上下文元数据。后续已实现请求组装与本地 Token 估算，见[组装与估算](#context-assembly)；输出预留、输入预算校验、压缩阈值和自动摘要仍待实现。当前完整历史原样发送；配置容量不保证请求能被远端接受，也不改变 HTTP 请求内容、权限或消息持久化格式。
 
 同一个 Profile 的不同模型独立配置，不同 Profile 下相同模型 ID 也相互独立。模型选择仍由 .env、启动覆盖与最后选择决定；models.json 不注册模型，不替代 API Key、BASE_URL 或 MODEL 列表，不向模型提问其容量，也未查询厂商元数据。
 
@@ -2326,14 +2328,124 @@ Main 模型工厂
 
 每次 --check-config、--prompt 或模型工厂调用均重新加载文件；进入/恢复会话和 /model（包括重选同一模型）都会走模型工厂。原会话中的已加载值保持到下一次选择，没有文件监听；编辑后重选或重启。--list-models 和会话列表仍可用于浏览，不额外校验此文件。容量文件损坏时切换失败，现有模型、用量、容量和历史保留；恢复会话按当前文件重新取值，不把旧窗口锁定到快照。
 
---check-config 在本地打印配置上限、来源和“预算尚未启用”说明，无模型 HTTP 请求。--prompt 只校验和加载，不增加正文/底栏，不启用按容量阻断。聊天 /status 显示“上次输入”与模型上限，并明确容量来源和未接入预算保护。上次实际输入不是本次估算、累计 token 或使用百分比。
+--check-config 在本地打印配置上限、来源和“预算尚未启用”说明，无模型 HTTP 请求。--prompt 校验并加载容量，不增加正文/底栏，不启用按容量阻断；Agent 请求同样经过 ContextBuilder。聊天 /status 显示“已用 ≈估算”与模型上限，使用 K/M 缩写并显示估算占容量百分比，同时单列最近实际 usage，明确容量来源和未接入预算保护。
 
 ### 后续接入
 
-后续 ContextBuilder 读取选中模型容量，再结合输出预留、安全余量计算可用输入预算和触发水位；TokenEstimator 提供估算与分类。未知容量不能冒充真实窗口；输出上限、供应商能力发现及自动摘要在后续阶段逐项接入。当前不新增 ContextBuilder 空壳或改变原始会话提交边界。
+ContextBuilder/TokenEstimator 现已提供统一请求视图与分类估算。后续预算阶段再结合选中模型容量、输出预留及安全余量计算可用输入和触发水位。未知容量保持未知；输出上限、供应商能力发现及自动摘要后续逐项接入，继续保留原始会话提交边界。
 
 ### 验证
 
 完整 mvn verify：640 项通过，失败/错误/跳过均为 0。本阶段新增 32 项测试，覆盖同供应商多模型、跨供应商同名模型、ID 大小写和斜杠、旧 default 别名、共享目录、缺失/空文件内容/未匹配、重新加载、重复键与字段拼写、非正整数和越界、异常 UTF-8/文件大小/条目数、目录错误、脱敏、模型切换与恢复、失败保留旧状态、已知容量底栏宽度/颜色。CLI 使用真实本地会话库与模型替身，原有消息请求和保存不变。
 
 生产 JAR 另通过 6 组隔离本地 HTTP/SSE 验证：--check-config 无 HTTP；同供应商不同容量与跨供应商未知；实际聊天切换、SSE 与历史保存；恢复时加载当前配置且不重放模型调用；错误文件在 --check-config/--prompt 入口报配置错误且不泄露正文；容量值当前不启用预算保护，缺文件仍回退未知。使用临时 .env、数据目录与容量文件，不读取真实用户配置或使用厂商凭证。
+
+<a id="configured-model-capacities"></a>
+
+### 本地规格配置记录（2026-10-26）
+
+按用户要求，读取 .env 中供应商别名和模型 ID，使用下列公开官方资料填写本地 models.json。只提取模型清单，没有输出或使用 API Key，没有向厂商推理或鉴权接口发请求。表中是静态参考规格，不是对具体账号、转发别名或网关容量的实测；实际路由若有更低限制，应修正本地配置。占位 gateway/local 的 YOUR_MODEL 未配置。
+
+| Profile | modelId | 配置 token 数 | 依据 |
+|---|---|---:|---|
+| deepseek | deepseek-flash | 1,048,576 | [DeepSeek 官方 Models 示例](https://api-docs.deepseek.com/zh-cn/api/list-models/)，当前示例指向 V4.1 Flash |
+| qwen | qwen3.8-flash | 1,000,000 | [百炼官方模型详情](https://help.aliyun.com/zh/model-studio/qwen3-8-flash) |
+| qwen | qwen3.8-27b | 1,000,000 | [百炼托管版详情](https://help.aliyun.com/zh/model-studio/qwen3-8-27b)，与开源原生 262,144 不同 |
+| qwen | qwen3.8-max | 1,000,000 | [百炼官方模型详情](https://help.aliyun.com/zh/model-studio/qwen3-8-max) |
+| qwen | kimi-k3 | 1,048,576 | [百炼官方模型详情](https://help.aliyun.com/zh/model-studio/kimi-k3) |
+| qwen | deepseek-v4.1-flash | 1,000,000 | [百炼同名托管模型详情](https://help.aliyun.com/zh/model-studio/deepseek-v4-1-flash)，与原厂 1,048,576 区分 |
+| qwen | glm-5.3 | 1,048,576 | [百炼官方模型详情](https://help.aliyun.com/zh/model-studio/glm-5-3) |
+| qwen | qwen3.8-omni-flash | 65,536 | [官方同名模型详情](https://help.aliyun.com/zh/model-studio/qwen3-8-omni-flash)；保守值，存在下述官方资料冲突 |
+| sensenova | deepseek-flash | 1,048,576 | 参考上述 DeepSeek 官方同名模型；转发别名实际映射未验证 |
+| sensenova | deepseek-v4-flash | 1,048,576 | 参考 [DeepSeek V4 Flash 官方配置](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/raw/main/config.json) 的 max_position_embeddings，网关上限未验证 |
+| sensenova | sensenova-6.8-flash-lite | 262,144 | [SenseNova 官方文档](https://platform.sensenova.ai/docs#list-models)，模型列表示例 context_length=262144；从官方公开文档页面脚本读取 |
+| sensenova | glm-5.2 | 1,048,576 | 参考 [智谱官方模型配置](https://huggingface.co/zai-org/GLM-5.2/raw/main/config.json)，路由上限未验证 |
+| sensenova | kimi-k3 | 1,048,576 | 参考 [Moonshot 官方模型仓库](https://github.com/MoonshotAI/Kimi-K3) 的 Context Length，路由上限未验证 |
+| agentrouter | deepseek-v4-flash | 1,048,576 | 参考上述 DeepSeek V4 Flash 原厂配置，路由上限未验证 |
+| modelscope | deepseek-ai/DeepSeek-V4.1-Flash | 1,048,576 | 参考 [DeepSeek 官方模型配置](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/raw/main/config.json) 的 text_config.max_position_embeddings |
+| modelscope | stepfun-ai/Step-3.7-Flash | 262,144 | 参考 [阶跃官方模型配置](https://huggingface.co/stepfun-ai/Step-3.7-Flash/raw/main/config.json) 的 text_config.max_position_embeddings |
+
+qwen3.8-omni-flash 的[官方概述](https://help.aliyun.com/zh/model-studio/qwen-omni)写 1M，官方同名详情页写 65,536，两者不一致。暂用较小详情值，明确这是保守配置，不宣称已验证真实最大窗口；后续有明确版本/地域规格或实际接口容量时再修正。
+
+以下条目维持未知，没有为它们编造正整数或改写 .env：
+
+| Profile / modelId | 原因 |
+|---|---|
+| qwen / qwen3.8-omni-flash-realtime | [官方 Realtime 说明](https://help.aliyun.com/zh/model-studio/realtime)给出 196,608 的总输入上限；它不是已确认的输入输出总窗口，且当前 CLI 未接 Realtime 协议 |
+| qwen / qwen-mt-uni | [官方模型说明](https://docs.bailian.console.aliyun.com/zh/model-studio/qwen-mt-uni)为专用全模态翻译，限制按文件/页数/时长描述，未确认通用聊天 token 总窗口 |
+| sensenova / sensenova-u1.5-lite | [SenseNova U1.5 官方仓库](https://github.com/OpenSenseNova/SenseNova-U1)主要提供图像生成与编辑；未确认该调用 ID 的通用聊天窗口 |
+| sensenova / sensenova-u1.5-fast | 未确认此精确调用 ID 对应的官方聊天窗口，保留未知 |
+
+已通过现有生产 JAR 的真实 ModelCapabilitiesLoader 对全部 20 个非占位配置做隔离 --check-config：16 项匹配配置值，4 项显示 unknown。验证使用临时假地址和 AUTH=none，不使用用户密钥、不发送模型 HTTP 请求。仅修改本地配置与两份文档，无需重新编译。
+
+
+2026-10-26 展示调整：先统一 K/M 与百分比，后续组装阶段将底栏升级为“已用 ≈118.5K / 1.05M (11.3%)”。K=1000、M=1000000；K 最多一位、M 最多两位小数，HALF_UP 舍入并去尾零；百万边界避免显示 1000K。百分比用原始计数与容量经 BigDecimal 计算，保留一位小数，不对未知值填零，也不钳制超过 100% 的结果。窄屏先缩短模型名和空格，保留已用、容量、比例及模式。估算与实际 usage 的区分见下节。
+
+<a id="context-assembly"></a>
+
+## 22. 请求上下文组装与 Token 估算（2026-10-26）
+
+### 职责与目录
+
+本阶段统一普通 Agent 请求的组装入口，提供输入前预览与逐次请求统计。Session 保存原始成功历史，ContextBuilder 创建发送视图，AgentLoop 负责请求/工具循环，LLM 层负责 HTTP 编码和 SSE。标题生成是独立短任务，继续直接构造自己的 LlmRequest，不把全部聊天上下文发送给标题模型。
+
+```text
+context/
+  ContextBuilder.java     校验并合并 history/currentTurn，叠加运行时规则，构造请求和统计
+  ContextSnapshot.java    不可变 LlmRequest + TokenBreakdown，统计只用于本地展示
+  TokenEstimator.java     heuristic-v1：文本、调用数据、schema 和消息协议开销估算
+  package-info.java       包边界说明
+```
+
+ContextBuilder.build(history, currentTurn, tools, mode, step, maxSteps) 不依赖终端、密钥、存储或实际模型客户端。currentTurn 为空表示预览；非空时必须只有一个未结束的用户任务，每组 assistant tool_calls 后已有且只有一个对应 tool 结果。历史仍由 MessageHistory 按完整成功轮次校验。调用 ID 可在不同历史任务间复用，同一任务内重复或悬空结果在请求前报错。请求中的消息顺序原样保留，不做静默丢弃。
+
+### 实际组装内容
+
+| 部分 | 来源及形式 | 本阶段行为 |
+|---|---|---|
+| 基础 system | 新会话读取 resources/prompts/base.md，恢复读取快照 systemPrompt | 请求首条，只注入一次 |
+| 运行时指令 | PLAN 只读提示、剩余 3/2 次模型请求提醒、最终请求收尾指令 | 只叠加到请求 system 副本，不写回 Session |
+| 成功历史 | 已完成任务的 user、assistant 正文/工具调用、tool 结果和最终回答 | 全量保留，包括过去读到的文件内容 |
+| 本次任务 | 当前 user，加本次 ReAct 已产生的 assistant 调用及 tool 结果 | 工具回填后逐次增长，每次请求重新组装 |
+| 可用工具定义 | ToolRegistry.definitions(ToolContext) 筛选 | 独立 tools 数组：type/function/name/description/parameters JSON Schema，不再复制为 md 提示词 |
+| 工具选择控制 | 最后一次请求 toolCallsAllowed=false | LLM 层发 tool_choice=none；原 Agent 执行防线继续生效 |
+
+模型 ID、URL、认证、stream 和 stream_options 仍由客户端按配置编码，不注入 messages；估算数字不进入 HTTP。工作区在工具筛选和真实路径执行时生效，当前不自动读取整个工作区、注入目录树或加载项目规则文件。权限审批仍由 Java policy 执行，提示词不授予工具权限。记忆、MCP、Skill 和项目规则待后续模块接入。
+
+### 数据流与持久化边界
+
+```text
+打开/恢复会话、输入下一条命令前
+  → SessionLauncher.previewContext
+  → 历史 + 空 currentTurn + 当前工作区/模式可用工具 → ContextBuilder
+  → RuntimeStatus → 输入框底栏（预览不含下一条尚未提交的输入）
+
+用户提交问题 → AgentLoop 保存 history 快照，currentTurn=[user]
+  → 每次循环：筛选 tools → ContextBuilder.build → ContextSnapshot
+  → 观察器更新估算 → LlmClient.generateStream / generate
+      ├─ tool_calls：执行并追加原始 assistant 和全部 tool，重新 build
+      └─ 最终回答：追加 assistant → AgentResult(currentTurn) → Session/Store
+  → 回到输入前预览，此时完整刚结束任务归入历史
+```
+
+AgentResult 直接返回独立 currentTurn，不再用请求列表的 historySize 下标截取。未来裁剪请求视图时，也不会误把裁剪后视图当作原始历史提交。运行时规则和 Token 统计不持久化；恢复无需模型请求即可重新估算。失败任务保持既有不提交语义，下一次输入重新预览成功历史；已执行文件操作仍不会自动回滚。
+
+### 算法、拆分和显示
+
+heuristic-v1 为纯本地、确定性的启发式估算。ASCII 约 3 字符/token，其他 Unicode 按码点对应 UTF-8 字节数乘 2/3 估算，向上取整。消息正文之外计入 tool_call_id、调用名称/ID/原始 JSON 参数及调用包装估算；工具定义计入完整 function 包装 JSON，覆盖描述和 schema。消息角色/边界按每条约 4 token 加回复起始 3 token 估算，最后的 none 控制另外计入。它不是精确 tokenizer、HTTP 字节统计或所有模型的硬上界，后续容量保护需要输出预留、安全余量和真实 usage 校准。
+
+TokenBreakdown 八项互不重复：basePrompt、runtimeInstructions、history、userInput、assistant、toolResults、toolDefinitions、protocolOverhead。history 只统计历史正文及调用数据，当前 assistant 包含本次正文和调用参数，消息角色/边界统一归协议开销；过去的工具调用/结果只计入 history。尚未生成的输出不计入当前输入估算；回填后的工具结果和最终答案在下一次请求/预览中才进入统计。
+
+/context 为纯本地命令，展示预览各项原始估算、总量、可用工具数量、容量和比例，不输出消息全文、不调用模型或执行工具，不保存为用户消息；初始列表尚无活动会话时给出选择提示。PLAN 隐藏写工具、无工作区隐藏文件工具后，预览按同样筛选结果变化。命令登记于 CommandCatalog，/help 和 Tab 共用。
+
+底栏优先显示本地“已用 ≈估算 / 容量 (百分比)”。≈ 也适用于由此计算的百分比。/status 单独列出最近一次服务商 usage.promptTokens，缺失或刚恢复为未知；不把实际值加到估算，不以 totalTokens 或累计调用费用充当当前输入。切换模型清除旧实际 usage，按新容量和原历史重新估算比例；窗口未知时仍显示估算，分母和比例保持未知。终端窄屏保留模式与尽可能完整的用量，工具/文本流式正文中途不插入统计行。
+
+### 当前限制和下一步
+
+尚无输入预算拦截、输出 Token 预留、80% 水位或自动压缩；即使估算超过容量，当前仍按完整历史正常发起请求，由服务商决定是否接受。单文件/工具输出上限及任务模型请求次数等已有保护继续有效，含义不等于上下文容量预算。下一阶段先确定输入预算 = 模型窗口 - 输出预留 - 安全余量，再在每次发送前检查，并接入保留近期完整工具组的摘要压缩。完整成功历史继续留存，压缩仅作用于请求视图。
+
+### 验证
+
+完整 mvn verify：658 项通过，失败/错误/跳过为 0。本阶段新增 18 项，覆盖完整消息/schema 计数、不可变请求、PLAN/轮次指令、不完整/重复/悬空工具组、Unicode 与大文本、每次 ReAct 请求重估、失败不污染历史、输入前预览、模式工具筛选、恢复时不调用模型、未知容量、估算与实际 usage 分开、窄屏颜色和比例；原 Agent/权限/流式/持久化测试继续通过。
+
+生产 JAR 另连接隔离本地 SSE 服务：第一次返回 read_file，第二次收到配对工具结果并给出最终回答；确认 HTTP 仅有原业务字段、7 份工具定义、统计不进入请求/快照、完整 user/assistant/tool/assistant 持久化、/status 实际 usage 独立显示。随后新进程恢复会话，/context 和底栏重新估算，实际 usage 保持未知，服务调用总数仍为 2。未读取真实 .env、厂商密钥或发送厂商请求。

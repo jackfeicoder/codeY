@@ -26,13 +26,16 @@ public final class StatusRenderer {
             case FULL -> ConsoleTheme.Tone.ERROR;
         };
         left.style(ConsoleTheme.style(permissionTone)).append(status.permissionMode().value());
-        String count = status.lastInputTokens() == null ? "?" : status.lastInputTokens().toString();
+        String count = status.usedTokensText();
         String capacity = status.contextWindowText();
+        String percent = status.usagePercentText();
         int budget = Math.max(0, columns - 1 - left.columnLength() - 2);
-        boolean compact = budget < new AttributedString("上次输入 " + count + " tok / 上限 " + capacity).columnLength() + 7;
-        String prefix = compact ? "上次 " : "上次输入 ";
-        String suffix = compact ? " tok / " : " tok / 上限 ";
-        int modelBudget = Math.max(0, budget - new AttributedString(prefix + count + suffix + capacity).columnLength() - 3);
+        boolean compact = budget < new AttributedString("已用 " + count + " / " + capacity + " (" + percent + ")").columnLength() + 7;
+        String prefix = compact ? "已用" : "已用 ";
+        String separator = compact ? "/" : " / ";
+        String percentagePrefix = compact ? "(" : " (";
+        int modelBudget = Math.max(0, budget - new AttributedString(prefix + count + separator + capacity
+                + percentagePrefix + percent + ")").columnLength() - 3);
         AttributedString model = new AttributedString(ConsoleApprovalHandler.clean(status.model()));
         if (model.columnLength() > modelBudget) {
             model = modelBudget < 2 ? AttributedString.EMPTY : new AttributedStringBuilder()
@@ -41,12 +44,17 @@ public final class StatusRenderer {
         var right = new AttributedStringBuilder()
                 .style(ConsoleTheme.style(ConsoleTheme.Tone.COMMAND)).append(model.toString())
                 .style(ConsoleTheme.style(ConsoleTheme.Tone.MUTED)).append(model.isEmpty() ? "" : " | ").append(prefix)
-                .style(status.lastInputTokens() == null ? ConsoleTheme.style(ConsoleTheme.Tone.MUTED)
+                .style(status.usedTokens() == null ? ConsoleTheme.style(ConsoleTheme.Tone.MUTED)
                         : AttributedStyle.DEFAULT.foreground(AttributedStyle.MAGENTA).bold())
                 .append(count)
-                .style(ConsoleTheme.style(ConsoleTheme.Tone.MUTED)).append(suffix)
+                .style(ConsoleTheme.style(ConsoleTheme.Tone.MUTED)).append(separator)
                 .style(ConsoleTheme.style(status.contextWindow() == null ? ConsoleTheme.Tone.MUTED : ConsoleTheme.Tone.COMMAND))
-                .append(capacity);
+                .append(capacity)
+                .style(ConsoleTheme.style(ConsoleTheme.Tone.MUTED)).append(percentagePrefix)
+                .style(status.usedTokens() == null || status.contextWindow() == null
+                        ? ConsoleTheme.style(ConsoleTheme.Tone.MUTED)
+                        : AttributedStyle.DEFAULT.foreground(AttributedStyle.MAGENTA).bold())
+                .append(percent).style(ConsoleTheme.style(ConsoleTheme.Tone.MUTED)).append(")");
         return layout(left.toAttributedString(), right.toAttributedString(), columns);
     }
 

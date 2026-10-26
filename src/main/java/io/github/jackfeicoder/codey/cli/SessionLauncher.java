@@ -10,6 +10,8 @@ import io.github.jackfeicoder.codey.config.ModelPreferenceStore;
 import io.github.jackfeicoder.codey.config.ModelProfiles;
 import io.github.jackfeicoder.codey.config.ModelCapabilities;
 import io.github.jackfeicoder.codey.config.ProfileSelection;
+import io.github.jackfeicoder.codey.context.ContextBuilder;
+import io.github.jackfeicoder.codey.context.TokenEstimator;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
 import io.github.jackfeicoder.codey.llm.LlmRequest;
@@ -106,6 +108,8 @@ public final class SessionLauncher {
     private WorkMode workMode = WorkMode.REACT;
     private PermissionService permissions;
     private final RuntimeStatus runtimeStatus = new RuntimeStatus();
+    /** 输入前预览与 Agent 实际请求共用同一组装器，避免两套用量计算逻辑。 */
+    private final ContextBuilder contexts = new ContextBuilder();
 
     /** 输入、模型工厂和存储可替换，测试无需真实终端、用户目录或厂商凭证。 */
     public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
@@ -227,6 +231,8 @@ public final class SessionLauncher {
                         changeWorkMode(command.substring(5).strip());
                     } else if (command.equals("/status")) {
                         printStatus();
+                    } else if (command.equals("/context")) {
+                        printContext();
                     } else if (command.matches("/list\\s+model")) {
                         listModels();
                     } else if ("/model".equals(command)) {
@@ -554,7 +560,10 @@ public final class SessionLauncher {
                 return response;
             }
         };
-        ChatCli chat = new ChatCli(new AgentLoop(observed, tools, maxIterations, debug), active.session(),
+        ChatCli chat = new ChatCli(new AgentLoop(observed, tools, maxIterations, debug, contexts, snapshot -> {
+            runtimeStatus.context(snapshot);
+            input.refreshStatus();
+        }), active.session(),
                 new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions), input, output, errors);
         if (chat.answer(line)) {
             active.captureTurn();
@@ -611,12 +620,41 @@ public final class SessionLauncher {
     private void printStatus() {
         output.println("工作模式：" + workMode.value() + "；权限：" + permissionMode.value());
         output.println("模型与用量：" + runtimeStatus.right());
-        output.println("Token 是服务商报告的上次请求输入量，不是当前上下文估算或累计消耗。");
+        output.println("已用为当前上下文的本地估算（≈），百分比为估算输入 / 配置容量，不是累计消耗；/context 查看拆分。");
+        output.println("最近实际输入：" + (runtimeStatus.lastInputTokens() == null ? "未知" : runtimeStatus.lastInputTokens() + " tok")
+                + "（服务商最近一次响应的 usage；不与当前估算相加）。");
         output.println("上下文容量来源：" + (model == null ? "未配置" : model.capabilities().source())
                 + "；未启用 token 预算检查、输出预留或自动压缩。");
         output.println("文件授权 " + (permissions == null ? 0 : permissions.grantCount()) + "；拒绝记录 "
                 + (permissions == null ? 0 : permissions.denialCount()) + "。/permissions revoke 可撤销。");
         output.println("文件权限限制来自内置工具路径检查，当前没有进程/网络沙箱。");
+    }
+
+    /** 输入前只估算已存消息；当前尚未提交的输入不在预览中，不触发模型或工具执行。 */
+    private void previewContext() {
+        if (active == null) return;
+        var toolContext = new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions);
+        runtimeStatus.context(contexts.build(active.session().messages(), List.of(), tools.definitions(toolContext), workMode, 1, maxIterations));
+    }
+
+    /** 只打印分类计数，避免把历史正文、文件内容和提示词整段刷到控制台。 */
+    private void printContext() {
+        if (active == null) { output.println("请先选择或新建会话，再用 /context 查看上下文。"); return; }
+        previewContext();
+        var snapshot = runtimeStatus.context();
+        var tokens = snapshot.tokens();
+        output.println("上下文预览（尚未包含下一条用户输入），估算方法：" + TokenEstimator.METHOD);
+        output.println("  基础提示词：≈" + tokens.basePrompt() + " tok");
+        output.println("  运行时模式/轮次指令：≈" + tokens.runtimeInstructions() + " tok");
+        output.println("  成功历史（含过去工具调用与结果）：≈" + tokens.history() + " tok");
+        output.println("  本次用户输入：≈" + tokens.userInput() + " tok");
+        output.println("  本次模型正文/工具调用：≈" + tokens.assistant() + " tok");
+        output.println("  本次工具结果：≈" + tokens.toolResults() + " tok");
+        output.println("  可用工具定义（名称/描述/完整 JSON Schema，" + snapshot.request().tools().size() + " 个）：≈" + tokens.toolDefinitions() + " tok");
+        output.println("  消息边界/协议开销：≈" + tokens.protocolOverhead() + " tok");
+        output.println("  总计：≈" + tokens.total() + " tok；" + runtimeStatus.right());
+        output.println("发送前会加入当前输入，并在每次 ReAct 请求前重新组装和估算；完整历史原样保留。");
+        output.println("未启用 token 预算检查、输出预留、历史裁剪或自动压缩；项目规则、记忆、MCP、Skill 尚未接入。");
     }
     private boolean confirmFull() {
         try { return approvalHandler.confirmFull(); }
@@ -662,6 +700,7 @@ public final class SessionLauncher {
 
     /** 显示输入提示并处理所有输入阶段的 EOF 与 /exit。 */
     private String read(String prompt) throws IOException {
+        previewContext();
         output.flush();
         errors.flush();
         String line = input.readLine(prompt);

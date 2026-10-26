@@ -24,6 +24,7 @@ class CommandCompleterTest {
     void completesCommandsAndListArgumentWithoutLoadingModels() {
         var commandsOnly = new CommandCompleter(() -> { throw new AssertionError("No config lookup expected"); }, () -> true);
         assertEquals(List.of("/help"), values(commandsOnly, "/h"));
+        assertEquals(List.of("/context"), values(commandsOnly, "/con"));
         assertEquals(List.of("/mode", "/model", "/more_session"), values(commandsOnly, "/m"));
         assertEquals(List.of("ask", "auto"), values(commandsOnly, "/permissions a"));
         assertEquals(List.of("react", "plan"), values(commandsOnly, "/mode "));

@@ -4,6 +4,8 @@ import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
 import io.github.jackfeicoder.codey.llm.LlmRequest;
 import io.github.jackfeicoder.codey.llm.LlmResponse;
+import io.github.jackfeicoder.codey.context.ContextBuilder;
+import io.github.jackfeicoder.codey.context.ContextSnapshot;
 import io.github.jackfeicoder.codey.observability.DebugPrinter;
 import io.github.jackfeicoder.codey.session.Session;
 import io.github.jackfeicoder.codey.session.Message;
@@ -15,6 +17,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /** 单任务的 ReAct 风格循环：请求模型 → 顺序执行工具 → 回填结果 → 再请求，直到回答或预算耗尽。 */
 public final class AgentLoop {
@@ -34,6 +37,9 @@ public final class AgentLoop {
     private final int maxSteps;
     /** 在执行位置打印简洁进度，由 Main 提供输出；默认静默便于复用。 */
     private final DebugPrinter debug;
+    /** 集中组装请求；监听器只接收估算快照，业务循环不依赖 CLI。 */
+    private final ContextBuilder contexts;
+    private final Consumer<ContextSnapshot> onContext;
 
     /** 使用默认预算装配循环，注册工具由宿主负责。 */
     public AgentLoop(LlmClient client, ToolRegistry registry) { this(client, registry, DEFAULT_MAX_STEPS); }
@@ -45,12 +51,20 @@ public final class AgentLoop {
 
     /** 指定调试输出，旧构造方式保持静默，不增加事件调度接口。 */
     public AgentLoop(LlmClient client, ToolRegistry registry, int maxSteps, DebugPrinter debug) {
+        this(client, registry, maxSteps, debug, new ContextBuilder(), snapshot -> { });
+    }
+
+    /** 宿主可观察每次请求的上下文，包括工具回填后的请求；不改变会话提交规则。 */
+    public AgentLoop(LlmClient client, ToolRegistry registry, int maxSteps, DebugPrinter debug,
+                     ContextBuilder contexts, Consumer<ContextSnapshot> onContext) {
         this.client = Objects.requireNonNull(client, "client");
         this.registry = Objects.requireNonNull(registry, "registry");
         if (maxSteps < 1 || maxSteps > MAX_STEPS) throw new IllegalArgumentException("Agent steps must be within 1..100.");
         this.maxSteps = maxSteps;
         this.executor = new ToolExecutor(registry);
         this.debug = Objects.requireNonNull(debug, "debug");
+        this.contexts = Objects.requireNonNull(contexts, "contexts");
+        this.onContext = Objects.requireNonNull(onContext, "onContext");
     }
 
     /** 在独立消息副本上执行，不修改 Session；调用方只提交正常完成结果。 */
@@ -67,29 +81,18 @@ public final class AgentLoop {
 
     /** 实际循环使用请求副本，打印的数据不加入消息历史。 */
     private AgentResult execute(Session session, String input, ToolContext context, AgentStreamListener stream) {
-        int historySize = session.messages().size(); // 返回结果只截取新增的一轮，旧历史不重复保存。
-        var messages = new ArrayList<>(session.messagesFor(input));
+        if (input == null || input.isBlank()) throw new IllegalArgumentException("Session requires a nonblank user input.");
+        var history = session.messages(); // 原历史与本次任务分开，返回结果不依赖请求视图的下标。
+        var messages = new ArrayList<Message>();
+        messages.add(Message.user(input));
         Set<String> callIds = new HashSet<>(); // 同一任务内跨步骤检测重复调用 ID。
         int executions = 0;
         for (int step = 1; step <= maxSteps; step++) {
             checkInterrupted();
             boolean finalRound = step == maxSteps;
-            // 预算提示只改本次请求中的 system 副本，既不伪造用户消息，也不写入会话快照。
-            var requestMessages = new ArrayList<>(messages);
-            if (context.workMode() == WorkMode.PLAN) {
-                requestMessages.set(0, Message.system(messages.get(0).content()
-                        + "\n\n[当前工作模式：PLAN]\n只读探索并输出计划，不修改文件、不执行副作用操作。用户可用 /mode react 切换后实施。"));
-            }
-            int remaining = maxSteps - step + 1;
-            if (remaining <= 3) {
-                String instruction = finalRound
-                        ? "这是当前任务最后一次模型请求，工具调用已禁用。请依据已获得的信息直接回答，"
-                        + "明确尚未完成或尚未确认的部分，不要声称未执行的操作已完成，不要再请求工具。"
-                        : "当前任务最多允许 " + maxSteps + " 次模型请求，包括本次还剩 " + remaining
-                        + " 次。请优先使用已有证据，避免重复探索；信息足够时立即回答，最后一次请求将禁用工具并用于总结。";
-                requestMessages.set(0, Message.system(requestMessages.get(0).content() + "\n\n[运行时任务预算]\n" + instruction));
-            }
-            LlmRequest request = new LlmRequest(requestMessages, registry.definitions(context), !finalRound);
+            var snapshot = contexts.build(history, messages, registry.definitions(context), context.workMode(), step, maxSteps);
+            onContext.accept(snapshot); // 每次网络请求前更新估算，不向 HTTP 增加统计字段。
+            LlmRequest request = snapshot.request();
             debug.round(step);
             LlmResponse response;
             if (stream == null) response = client.generate(request);
@@ -110,11 +113,11 @@ public final class AgentLoop {
                 }
                 messages.add(response.message());
                 return new AgentResult(AgentResult.Status.COMPLETED,
-                        messages.subList(historySize, messages.size()), response, step, executions, finalRound);
+                        messages, response, step, executions, finalRound);
             }
             // 即使服务商忽略 tool_choice=none，也不执行最后一轮提出的工具，更不提交残缺回答。
             if (finalRound) return new AgentResult(AgentResult.Status.BUDGET_EXHAUSTED,
-                    messages.subList(historySize, messages.size()), null, step, executions, true);
+                    messages, null, step, executions, true);
             // 在执行任何工具前检查整组：截断或异常结束原因不触发工具副作用。
             if (!"tool_calls".equals(response.finishReason())
                     || response.toolCalls().size() > MAX_TOOL_CALLS_PER_STEP) {
@@ -135,7 +138,7 @@ public final class AgentLoop {
             }
         }
         return new AgentResult(AgentResult.Status.BUDGET_EXHAUSTED,
-                messages.subList(historySize, messages.size()), null, maxSteps, executions);
+                messages, null, maxSteps, executions);
     }
 
     /** 保留中断标志，统一沿现有 LLM 错误通道退出。 */

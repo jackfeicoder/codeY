@@ -55,7 +55,8 @@ class PermissionCliTest {
         assertEquals("b", Files.readString(directory.resolve("b.txt")));
         assertEquals(2, output.toString().lines().filter(line -> line.startsWith("待批准：")).count());
         assertTrue(output.toString().contains("文件授权 2"));
-        assertTrue(output.toString().contains("上次输入 123 tok / 上限 ?"));
+        assertTrue(output.toString().contains("已用 ≈"));
+        assertTrue(output.toString().contains("最近实际输入：123 tok"));
         assertEquals(12, store.list().sessions().get(0).messages().size());
     }
     @Test void ordinaryPipeDoesNotConsumeNextChatAsApproval() throws Exception {
@@ -124,6 +125,7 @@ class PermissionCliTest {
         run("/permissions\n/mode\n/status\n/mode multi\n/mode plan\n/permissions auto\n/permissions revoke\n/status\n/exit\n",
                 request -> { fail("Commands must not call a model"); return done(); }, new PermissionSettings(), null);
         assertTrue(output.toString().contains("工作模式：plan；权限：auto"));
-        assertTrue(output.toString().contains("上次输入 ? tok / 上限 ?"));
+        assertTrue(output.toString().contains("已用 ≈"));
+        assertTrue(output.toString().contains("/ ? (?%)"));
     }
 }
