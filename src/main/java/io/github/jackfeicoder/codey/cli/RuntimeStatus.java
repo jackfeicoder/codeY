@@ -5,6 +5,7 @@ import io.github.jackfeicoder.codey.policy.PermissionMode;
 import io.github.jackfeicoder.codey.llm.LlmResponse;
 import io.github.jackfeicoder.codey.config.ModelCapabilities;
 import io.github.jackfeicoder.codey.context.ContextSnapshot;
+import io.github.jackfeicoder.codey.context.ContextBudgetPolicy;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -18,15 +19,16 @@ public final class RuntimeStatus {
     private String model = "未选择模型";
     /** 可空，服务未报告时保持未知，不使用 totalTokens 代替。 */
     private Long lastInputTokens;
-    /** 本地配置的模型最大上下文；尚未扣除输出预留，也不代表已实现预算保护。 */
+    /** 本地配置的模型最大上下文；底栏仍展示总窗口，输入预算在 /context 单独列出。 */
     private Long contextWindow;
     /** 最近请求或输入前预览；统计不持久化，不加入模型请求。 */
     private ContextSnapshot context;
+    private ContextBudgetPolicy.Assessment budget;
     public void modes(WorkMode work, PermissionMode permission) { workMode = work; permissionMode = permission; }
     public void model(String value) { model(value, ModelCapabilities.unknown()); }
     /** 切换时同时替换容量并清除旧用量，避免小模型沿用上一个大模型的上限。 */
     public void model(String value, ModelCapabilities capabilities) {
-        model = value; contextWindow = capabilities.contextWindow(); lastInputTokens = null; context = null;
+        model = value; contextWindow = capabilities.contextWindow(); lastInputTokens = null; context = null; budget = null;
     }
     public void usage(LlmResponse.TokenUsage usage) { lastInputTokens = usage == null ? null : usage.promptTokens(); }
     public WorkMode workMode() { return workMode; }
@@ -34,8 +36,10 @@ public final class RuntimeStatus {
     public String model() { return model; }
     public Long lastInputTokens() { return lastInputTokens; }
     public Long contextWindow() { return contextWindow; }
-    public void context(ContextSnapshot value) { context = value; }
+    public void context(ContextSnapshot value) { context = value; budget = null; }
     public ContextSnapshot context() { return context; }
+    public void budget(ContextBudgetPolicy.Assessment value) { budget = value; }
+    public ContextBudgetPolicy.Assessment budget() { return budget; }
     public Long usedTokens() {
         if (context == null) return lastInputTokens;
         return context.tokens().total();
@@ -50,7 +54,7 @@ public final class RuntimeStatus {
     }
 
     /** 十进制缩写：K=1000、M=1000000；K 保留最多一位、M 最多两位，不影响原始统计值。 */
-    private static String formatTokens(Long value) {
+    static String formatTokens(Long value) {
         if (value == null) return "?";
         if (value < 1000) return value.toString();
         BigDecimal count = BigDecimal.valueOf(value);

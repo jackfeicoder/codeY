@@ -14,6 +14,23 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** 临时配置验证模型身份、可选文件、有界严格解析与错误脱敏，不读取真实 .env。 */
 class ModelCapabilitiesLoaderTest {
+    @Test void loadsOptionalBudgetOverridesAndPreservesLegacyDefaults() throws Exception {
+        write("{\"models\":[{\"profile\":\"fixture\",\"modelId\":\"a\",\"contextWindow\":128000,\"outputReserveTokens\":2048,\"safetyMarginTokens\":0}]}");
+        assertEquals(new ModelCapabilities(128000L, 2048L, 0L), load("fixture", "a"));
+        write("{\"models\":[{\"profile\":\"fixture\",\"modelId\":\"a\",\"contextWindow\":128000,\"outputReserveTokens\":2048}]}");
+        assertEquals(new ModelCapabilities(128000L, 2048L, null), load("fixture", "a"));
+        write("{\"models\":[{\"profile\":\"fixture\",\"modelId\":\"a\",\"contextWindow\":128000}]}");
+        assertEquals(new ModelCapabilities(128000L), load("fixture", "a"));
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"null", "1.5", "true", "\"secret-fixture\"", "-1", "9223372036854775808", "128000"})
+    void rejectsInvalidOptionalBudgetValues(String value) throws Exception {
+        for (String field : new String[]{"outputReserveTokens", "safetyMarginTokens"}) {
+            write("{\"models\":[{\"profile\":\"fixture\",\"modelId\":\"a\",\"contextWindow\":128000,\"" + field + "\":" + value + "}]}");
+            String message = assertThrows(ConfigException.class, () -> load("fixture", "a")).getMessage();
+            assertTrue(message.contains("models.json")); assertFalse(message.contains("secret-fixture"));
+        }
+    }
     @TempDir Path directory;
 
     private ModelCapabilities load(String alias, String id) {

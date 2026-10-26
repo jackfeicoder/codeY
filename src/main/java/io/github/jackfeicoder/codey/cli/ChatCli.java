@@ -2,6 +2,7 @@ package io.github.jackfeicoder.codey.cli;
 
 import io.github.jackfeicoder.codey.agent.AgentLoop;
 import io.github.jackfeicoder.codey.agent.AgentResult;
+import io.github.jackfeicoder.codey.context.ContextLimitException;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
 import io.github.jackfeicoder.codey.session.Session;
@@ -102,6 +103,12 @@ public final class ChatCli {
         var stream = new ConsoleStreamOutput(input.theme(), output, input::refreshStatus, true);
         AgentResult result;
         try { result = agent.run(session, line, context, stream); }
+        catch (ContextLimitException limited) {
+            if (stream.hasDisplayedText()) input.theme().line(errors, ConsoleTheme.Tone.WARNING,
+                    "以上流式内容为中间结果，本轮未保存。");
+            reportContextLimit(limited);
+            return false;
+        }
         catch (RuntimeException failed) {
             if (stream.hasDisplayedText()) input.theme().line(errors, ConsoleTheme.Tone.WARNING,
                     "以上流式内容尚未确认为完整结果，本轮未保存。");
@@ -126,5 +133,14 @@ public final class ChatCli {
         output.flush();
         errors.flush();
         return true;
+    }
+
+    /** 上下文拦截保持失败不提交语义，并准确告知已发生的调用和文件副作用。 */
+    private void reportContextLimit(ContextLimitException limited) {
+        input.theme().line(errors, ConsoleTheme.Tone.ERROR, "上下文预算超限：" + limited.getMessage());
+        input.theme().line(errors, ConsoleTheme.Tone.WARNING, "可切换更大上下文的模型，或 /new、/clear 开启新会话；自动压缩尚未接入。");
+        if (context.hasWorkspace() && limited.toolCalls() > 0) input.theme().line(errors, ConsoleTheme.Tone.WARNING,
+                "本轮消息未保存；已执行的文件修改仍保留，重试前请检查当前文件。");
+        errors.flush();
     }
 }

@@ -6,6 +6,8 @@ import io.github.jackfeicoder.codey.llm.LlmRequest;
 import io.github.jackfeicoder.codey.llm.LlmResponse;
 import io.github.jackfeicoder.codey.context.ContextBuilder;
 import io.github.jackfeicoder.codey.context.ContextSnapshot;
+import io.github.jackfeicoder.codey.context.ContextBudgetPolicy;
+import io.github.jackfeicoder.codey.context.ContextLimitException;
 import io.github.jackfeicoder.codey.observability.DebugPrinter;
 import io.github.jackfeicoder.codey.session.Session;
 import io.github.jackfeicoder.codey.session.Message;
@@ -40,6 +42,8 @@ public final class AgentLoop {
     /** 集中组装请求；监听器只接收估算快照，业务循环不依赖 CLI。 */
     private final ContextBuilder contexts;
     private final Consumer<ContextSnapshot> onContext;
+    /** 当前模型的输入预算，独立于 maxSteps 模型请求次数预算。 */
+    private final ContextBudgetPolicy budget;
 
     /** 使用默认预算装配循环，注册工具由宿主负责。 */
     public AgentLoop(LlmClient client, ToolRegistry registry) { this(client, registry, DEFAULT_MAX_STEPS); }
@@ -57,6 +61,12 @@ public final class AgentLoop {
     /** 宿主可观察每次请求的上下文，包括工具回填后的请求；不改变会话提交规则。 */
     public AgentLoop(LlmClient client, ToolRegistry registry, int maxSteps, DebugPrinter debug,
                      ContextBuilder contexts, Consumer<ContextSnapshot> onContext) {
+        this(client, registry, maxSteps, debug, contexts, onContext, ContextBudgetPolicy.unknown());
+    }
+
+    /** 生产入口显式注入选中模型的预算策略；旧库调用没有模型资料时保持 UNKNOWN。 */
+    public AgentLoop(LlmClient client, ToolRegistry registry, int maxSteps, DebugPrinter debug,
+                     ContextBuilder contexts, Consumer<ContextSnapshot> onContext, ContextBudgetPolicy budget) {
         this.client = Objects.requireNonNull(client, "client");
         this.registry = Objects.requireNonNull(registry, "registry");
         if (maxSteps < 1 || maxSteps > MAX_STEPS) throw new IllegalArgumentException("Agent steps must be within 1..100.");
@@ -65,6 +75,7 @@ public final class AgentLoop {
         this.debug = Objects.requireNonNull(debug, "debug");
         this.contexts = Objects.requireNonNull(contexts, "contexts");
         this.onContext = Objects.requireNonNull(onContext, "onContext");
+        this.budget = Objects.requireNonNull(budget, "budget");
     }
 
     /** 在独立消息副本上执行，不修改 Session；调用方只提交正常完成结果。 */
@@ -87,11 +98,18 @@ public final class AgentLoop {
         messages.add(Message.user(input));
         Set<String> callIds = new HashSet<>(); // 同一任务内跨步骤检测重复调用 ID。
         int executions = 0;
+        boolean warned = false; // 一个用户任务最多输出一次预警，不把每轮都刷成同一提醒。
         for (int step = 1; step <= maxSteps; step++) {
             checkInterrupted();
             boolean finalRound = step == maxSteps;
             var snapshot = contexts.build(history, messages, registry.definitions(context), context.workMode(), step, maxSteps);
             onContext.accept(snapshot); // 每次网络请求前更新估算，不向 HTTP 增加统计字段。
+            var assessment = budget.evaluate(snapshot);
+            if (!assessment.canSend()) throw new ContextLimitException(assessment, step - 1, executions);
+            if (assessment.state() == ContextBudgetPolicy.State.WARNING && !warned) {
+                debug.contextWarning(assessment.estimatedInput(), assessment.inputBudget(), assessment.remainingTokens());
+                warned = true;
+            }
             LlmRequest request = snapshot.request();
             debug.round(step);
             LlmResponse response;

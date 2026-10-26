@@ -10,7 +10,7 @@ import java.util.Objects;
 /** 简洁运行进度：只显示模型轮次、工具名称、相关文件和失败类别，不展示上下文或正文。 */
 public final class DebugPrinter {
     /** 展示语义由 CLI 选择颜色，不让 AgentLoop 依赖终端库。 */
-    public enum Kind { REQUEST, TOOL, ERROR }
+    public enum Kind { REQUEST, TOOL, ERROR, WARNING }
     /** 默认静默，库调用和旧构造方式不强制打印；Main 显式启用控制台输出。 */
     public static final DebugPrinter NONE = new DebugPrinter();
     /** 宿主负责输出编码与样式；null 仅用于静默实例。 */
@@ -34,6 +34,12 @@ public final class DebugPrinter {
 
     /** 在请求前显示当前任务的模型调用序号，下一任务从 1 开始。 */
     public void round(int step) { line(Kind.REQUEST, "[第 " + step + " 轮] 请求模型"); }
+
+    /** 预警不代表停止或压缩；数字为原始估算，不输出提示词和文件正文。 */
+    public void contextWarning(long used, long budget, long remaining) {
+        line(Kind.WARNING, "[上下文预警] 估算输入 " + used + " / 输入预算 " + budget + " tok，剩余约 " + remaining
+                + " tok；本次请求继续，自动压缩尚未接入。");
+    }
 
     /** 只在实际进入执行器前显示工具名和文件，不展示模型尚未执行的调用组。 */
     public void tool(int step, ToolCall call) {

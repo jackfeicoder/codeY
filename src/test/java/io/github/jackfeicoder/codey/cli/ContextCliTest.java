@@ -54,13 +54,13 @@ class ContextCliTest {
         assertEquals(2, store.list().sessions().get(0).messages().size());
     }
 
-    @Test void resumeReestimatesHistoryWithoutNetworkOrPersistedUsageAndCapacityIsDisplayOnly() throws Exception {
-        var store = run("hello\n/exit\n", new SessionLauncher.Options(null, true, "fixture", null, null), 1L);
+    @Test void resumeReestimatesHistoryWithoutNetworkOrPersistedUsage() throws Exception {
+        var store = run("hello\n/exit\n", new SessionLauncher.Options(null, true, "fixture", null, null), 128000L);
         String id = store.list().sessions().get(0).id();
         output.getBuffer().setLength(0);
         run("/context\n/status\n/exit\n", new SessionLauncher.Options(null, false, null, id, null), null);
         String text = output.toString();
-        assertEquals(1, requests.size()); // 容量 1 未拦截首问；恢复/查看不额外请求模型。
+        assertEquals(1, requests.size()); // 恢复/查看不额外请求模型，未知容量明确跳过检查。
         assertTrue(text.matches("(?s).*成功历史（含过去工具调用与结果）：≈[1-9][0-9]* tok.*"));
         assertTrue(text.contains("完整 JSON Schema，0 个"));
         assertTrue(text.contains("最近实际输入：未知"));

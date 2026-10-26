@@ -19,7 +19,7 @@ public final class ModelCapabilitiesLoader {
     private static final int MAX_BYTES = 1024 * 1024;
     private static final int MAX_MODELS = 1024;
     /** 字段白名单使拼写错误明确报错，避免错误容量被静默当成未知。 */
-    private static final Set<String> MODEL_FIELDS = Set.of("profile", "modelId", "contextWindow");
+    private static final Set<String> MODEL_FIELDS = Set.of("profile", "modelId", "contextWindow", "outputReserveTokens", "safetyMarginTokens");
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -53,14 +53,15 @@ public final class ModelCapabilitiesLoader {
 
             Map<ProfileSelection, ModelCapabilities> entries = new HashMap<>();
             for (JsonNode item : root.path("models")) {
-                if (!item.isObject() || item.size() != MODEL_FIELDS.size()) throw invalid();
+                if (!item.isObject() || item.size() < 3 || item.size() > MODEL_FIELDS.size()) throw invalid();
                 var fields = item.fieldNames();
                 while (fields.hasNext()) if (!MODEL_FIELDS.contains(fields.next())) throw invalid();
                 if (!item.path("profile").isTextual() || !item.path("modelId").isTextual()
                         || !item.path("contextWindow").isIntegralNumber()
                         || !item.path("contextWindow").canConvertToLong()) throw invalid();
                 ProfileSelection key = new ProfileSelection(item.path("profile").textValue(), item.path("modelId").textValue());
-                var capacity = new ModelCapabilities(item.path("contextWindow").longValue());
+                var capacity = new ModelCapabilities(item.path("contextWindow").longValue(),
+                        optionalInteger(item, "outputReserveTokens"), optionalInteger(item, "safetyMarginTokens"));
                 if (entries.putIfAbsent(key, capacity) != null) throw invalid();
             }
             return entries.getOrDefault(selected, ModelCapabilities.unknown());
@@ -70,8 +71,15 @@ public final class ModelCapabilitiesLoader {
         }
     }
 
+    /** 可选字段省略时继承；显式 null、小数和溢出不是有效覆盖值。 */
+    private static Long optionalInteger(JsonNode item, String field) {
+        if (!item.has(field)) return null;
+        if (!item.get(field).isIntegralNumber() || !item.get(field).canConvertToLong()) throw invalid();
+        return item.get(field).longValue();
+    }
+
     private static ConfigException invalid() {
         return new ConfigException("Invalid or unreadable models.json; expected {\"models\":[{\"profile\":\"alias\","
-                + "\"modelId\":\"id\",\"contextWindow\":128000}]} with unique profile/modelId pairs and positive integer windows.");
+                + "\"modelId\":\"id\",\"contextWindow\":128000}]} with unique profile/modelId pairs, positive windows and optional integer outputReserveTokens/safetyMarginTokens.");
     }
 }

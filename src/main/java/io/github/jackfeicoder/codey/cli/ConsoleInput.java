@@ -176,6 +176,7 @@ public final class ConsoleInput implements AutoCloseable {
                         "● " + value.replace("请求模型", "思考中 · 等待模型响应…"));
                 case TOOL -> theme().line(destination, ConsoleTheme.Tone.TOOL, "  ↳ " + value.stripLeading());
                 case ERROR -> theme().line(destination, ConsoleTheme.Tone.ERROR, "  ! " + value.stripLeading());
+                case WARNING -> theme().line(destination, ConsoleTheme.Tone.WARNING, "  ! " + value.stripLeading());
             }
         });
     }

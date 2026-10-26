@@ -10,7 +10,7 @@
 
 工作区会话已注册 `list_files`、`search_file`、`grep_code` 与 `read_file`：模型可浏览目录、按名称定位或按正文关键词搜索，再读取内容。工具描述通过结构化 `tools` 字段发送，由 AgentLoop 执行并回填结果，继续请求最终回答。默认每个任务最多请求模型 20 次，最后一次禁用工具用于收尾；完成的工具消息组随会话保存，恢复时不自动重放。说明见 [正文搜索](docs/architecture.md#grep-code)、[文件定位](docs/architecture.md#search-file)、[目录工具](docs/architecture.md#list-files)、[读文件工具](docs/architecture.md#read-file) 和 [Agent 循环](docs/architecture.md#agent-loop)。
 
-另已注册 `write_file`（新建/完整覆盖）和 `edit_file`（精确局部替换）。默认 `react + ask`，只读自动执行，每个文件首次实际修改前确认，成功后本会话复用该文件授权。`/permissions ask|auto|full` 切换权限，`/permissions revoke` 撤销授权；`/mode react|plan` 切换工作模式，PLAN 在 full 下仍保持只读。原生终端底栏显示模式/权限、模型以及“已用 ≈用量 / 容量（百分比）”，`/context` 查看估算拆分，`/status` 查看来源和最近实际用量。数值用 K/M 缩写，上限可按模型配置，未配置显示 ?；进入会话及每次 ReAct 请求前均估算上下文，预算保护与压缩尚未接入。一次工具写入成功后，后续模型失败或消息未保存不会自动回滚文件。实现见 [写入和编辑](#file-writes)、[权限模块](#module-policy)、[上下文模块](#module-context)。
+另已注册 `write_file`（新建/完整覆盖）和 `edit_file`（精确局部替换）。默认 `react + ask`，只读自动执行，每个文件首次实际修改前确认，成功后本会话复用该文件授权。`/permissions ask|auto|full` 切换权限，`/permissions revoke` 撤销授权；`/mode react|plan` 切换工作模式，PLAN 在 full 下仍保持只读。原生终端底栏显示模式/权限、模型以及“已用 ≈用量 / 容量（百分比）”，`/context` 查看估算拆分，`/status` 查看来源和最近实际用量。数值用 K/M 缩写，上限可按模型配置，未配置显示 ?；进入会话及每次 ReAct 请求前均估算上下文，已知容量的请求前预算检查已启用，自动压缩尚未接入。一次工具写入成功后，后续模型失败或消息未保存不会自动回滚文件。实现见 [写入和编辑](#file-writes)、[权限模块](#module-policy)、[上下文模块](#module-context)。
 
 控制台显示简洁执行进度：调用轮次、工具名称和涉及的文件，模型正文随 SSE 分片到达即时显示；工具失败时补充错误码。流结束并校验完整响应后才执行工具，完整任务成功后保存历史，最终回答不会重复打印。聊天中输入 `exit` 返回会话列表，列表中 `exit` 退出；`/exit` 随时退出程序。
 
@@ -31,7 +31,7 @@
 | [会话管理模块](#module-session) | 已实现：内存历史、本地保存/恢复与标题 |
 | [工具模块](#module-tool) | 已实现六个文件工具及 execute_command，已接入模型、审批和 CLI |
 | [Agent 执行模块](#module-agent) | 已实现：工具循环、轮次预算、中断与完成状态 |
-| [上下文模块](#module-context) | 已实现模型容量配置与加载；统一组装、Token 估算、预算与压缩待实现 |
+| [上下文模块](#module-context) | 已实现模型容量、统一组装、Token 估算与输入预算检查；压缩待实现 |
 | [记忆模块](#module-memory) | 待实现：长期事实保存与召回 |
 | [MCP 模块](#module-mcp) | 待实现：外部工具协议与适配 |
 | [权限模块](#module-policy) | 已实现 ask/规则 auto/full、逐文件审批、撤销和拒绝拦截；审计及进程沙箱待实现 |
@@ -277,7 +277,7 @@ Main / SessionLauncher → PromptLoader.loadBase
 
 工具参数按 index 拼接，允许多个调用交错；完整流和整组调用校验通过后才交给原有执行器，不执行半截参数。无工具时省略 tools；最后一次请求保留 `tool_choice="none"`。正文提前显示不等于任务成功，异常时标注本轮未保存；之前已成功执行的工具副作用仍不回滚。不展示 reasoning_content、工具参数或 SSE 原始数据。
 
-兼容同一协议的服务共用客户端，无需按厂商新建实现；协议差异通过配置或 `LlmClient` 适配。服务忽略 stream 而返回完整 JSON 时解析同一响应，不额外重发。自动标题继续调用非流式 generate，不插入聊天正文。生成参数、自动重试、上下文预算与完整执行事件仍待实现。
+兼容同一协议的服务共用客户端，无需按厂商新建实现；协议差异通过配置或 `LlmClient` 适配。服务忽略 stream 而返回完整 JSON 时解析同一响应，不额外重发。自动标题继续调用非流式 generate，不插入聊天正文。生成参数、自动重试与完整执行事件仍待实现；上下文输入预算由 context 模块检查。
 
 **配置与使用**：两项均为全局设置，缺省 true，修改后重启 CodeY；现有多模型配置、历史会话和模型切换照常使用。
 
@@ -545,13 +545,13 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
       └─ 服务商仍返回工具：BUDGET_EXHAUSTED → 不执行、不追加该调用、不提交残缺历史
 ```
 
-**实现方式与边界**：默认最多请求模型 20 次，由 `CODEY_MAX_ITERATIONS` 配置，包含最终回答请求；临近上限通过临时 system 副本提醒，最后一次通过协议与执行器双重禁用工具。有效收尾回答与完整工具消息一并保存，CLI 提示预算受限；预算提示本身不进入历史。每个响应最多执行 16 个工具。整组执行前检查结束原因与跨步骤 ID 重复，截断的工具请求不执行。未知工具、业务参数错误与读取失败均回填关联错误，允许模型修正；网络/协议错误和线程中断沿 `LlmException` 退出，原历史保持完整。非空文本长度截断可保存并显示提示。空正文或纯空白且无工具调用时按 INVALID_RESPONSE 报错，不打印空 CodeY 回答、不提交本轮；不自动重试。COMPLETED 表示模型返回非空最终文本，并不证明代码修改或测试验收已完成。暂无线程外工具超时、任务总时间/Token 预算、重复无进展检测或执行中恢复。详见 [循环实现与验收](docs/architecture.md#agent-loop)。
+**实现方式与边界**：默认最多请求模型 20 次，由 `CODEY_MAX_ITERATIONS` 配置，包含最终回答请求；临近上限通过临时 system 副本提醒，最后一次通过协议与执行器双重禁用工具。有效收尾回答与完整工具消息一并保存，CLI 提示预算受限；预算提示本身不进入历史。每个响应最多执行 16 个工具。整组执行前检查结束原因与跨步骤 ID 重复，截断的工具请求不执行。未知工具、业务参数错误与读取失败均回填关联错误，允许模型修正；网络/协议错误和线程中断沿 `LlmException` 退出，原历史保持完整。非空文本长度截断可保存并显示提示。空正文或纯空白且无工具调用时按 INVALID_RESPONSE 报错，不打印空 CodeY 回答、不提交本轮；不自动重试。COMPLETED 表示模型返回非空最终文本，并不证明代码修改或测试验收已完成。暂无线程外工具超时、任务总时间/累计 Token 消耗预算、重复无进展检测或执行中恢复。详见 [循环实现与验收](docs/architecture.md#agent-loop)。
 
 <a id="module-context"></a>
 
-### 10. 上下文模块：context（容量、组装与估算已实现）
+### 10. 上下文模块：context（容量、组装、估算与预算检查已实现）
 
-**功能**：统一组装模型输入，保留完整成功历史和本次任务的工具消息；提供各部分 Token 估算、模型容量与百分比展示。新建/恢复会话后即可估算，每次 ReAct 请求前重新组装。当前不裁剪历史、不拦截超长请求、不生成摘要；项目指令、长期记忆、MCP 和 Skill 尚未接入。
+**功能**：统一组装模型输入，保留完整成功历史和本次任务的工具消息；提供各部分 Token 估算、模型容量与百分比展示。新建/恢复会话后即可估算，每次 ReAct 请求前重新组装。已知容量超过输入预算时阻止请求，尚无历史裁剪或摘要压缩；项目指令、长期记忆、MCP 和 Skill 尚未接入。
 
 **涉及文件**：
 
@@ -560,6 +560,9 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
 | [ContextBuilder.java](src/main/java/io/github/jackfeicoder/codey/context/ContextBuilder.java) | 合并基础 system、运行时指令、成功历史、本次任务消息和工具定义；校验调用/结果配对 |
 | [ContextSnapshot.java](src/main/java/io/github/jackfeicoder/codey/context/ContextSnapshot.java) | 不可变请求视图与 TokenBreakdown 分项统计，不写入会话或 HTTP |
 | [TokenEstimator.java](src/main/java/io/github/jackfeicoder/codey/context/TokenEstimator.java) | 本地 heuristic-v1 估算，覆盖文本、调用参数、工具结果、描述、完整 schema 和协议开销 |
+| [ContextBudgetSettings.java](src/main/java/io/github/jackfeicoder/codey/config/ContextBudgetSettings.java) | 加载全局输出预留、安全余量及预警比例，环境覆盖 .env |
+| [ContextBudgetPolicy.java](src/main/java/io/github/jackfeicoder/codey/context/ContextBudgetPolicy.java) | 解析当前模型覆盖值，计算输入预算、水位和剩余空间，返回正常/预警/超限/未知 |
+| [ContextLimitException.java](src/main/java/io/github/jackfeicoder/codey/context/ContextLimitException.java) | 记录本地超限判断及已实际发生的模型/工具次数，不伪装为 HTTP 错误 |
 | [ModelCapabilities.java](src/main/java/io/github/jackfeicoder/codey/config/ModelCapabilities.java)、[ModelCapabilitiesLoader.java](src/main/java/io/github/jackfeicoder/codey/config/ModelCapabilitiesLoader.java) | 读取可选 models.json，按供应商/模型 ID 精确匹配容量 |
 | [AgentLoop.java](src/main/java/io/github/jackfeicoder/codey/agent/AgentLoop.java) | 每次模型请求前调用 ContextBuilder，工具结果回填后重新估算 |
 | [SessionLauncher.java](src/main/java/io/github/jackfeicoder/codey/cli/SessionLauncher.java)、[RuntimeStatus.java](src/main/java/io/github/jackfeicoder/codey/cli/RuntimeStatus.java)、[StatusRenderer.java](src/main/java/io/github/jackfeicoder/codey/cli/StatusRenderer.java) | 输入前预览、/context 拆分、底栏估算/占比、/status 实际 usage |
@@ -586,11 +589,11 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
 
 填写时将 profile 对应到 CODEY_PROFILE_NAMES 的别名，modelId 与该供应商 MODEL 列表中的 ID 一致；按网关实际限制填写正整数 token 数。别名忽略大小写，模型 ID 区分大小写，支持斜杠等已有合法格式；同一供应商可多模型，同名模型在不同供应商下互不影响。旧 CODEY_LLM_* 格式使用 profile=default。容量条目不负责注册模型或验证远端能力。
 
-首次配置可以在 CMD 执行 `copy models.example.json models.json`，再修改占位数据；使用共享配置目录时，把文件放在该目录。文件缺失、models 为空或没有匹配条目时显示未知。模型 ID 拼写不匹配也会显示未知，不按名称推测容量。存在文件时严格拒绝错误格式、未知/重复字段、重复模型键和非正整数容量；目前只接受 profile/modelId/contextWindow，maxOutputTokens 等字段尚未接入。读取最多 1 MiB、1024 个条目，错误不回显原始内容。
+首次配置可以在 CMD 执行 `copy models.example.json models.json`，再修改占位数据；使用共享配置目录时，把文件放在该目录。文件缺失、models 为空或没有匹配条目时显示未知。模型 ID 拼写不匹配也会显示未知，不按名称推测容量。存在文件时严格拒绝错误格式、未知/重复字段、重复模型键和非正整数容量；必填字段为 profile/modelId/contextWindow，可选 outputReserveTokens/safetyMarginTokens 覆盖全局预算默认值；maxOutputTokens 等其他字段尚未接入。读取最多 1 MiB、1024 个条目，错误不回显原始内容。
 
-`--check-config` 显示容量与来源；--prompt 校验并加载元数据；进入/恢复会话以及每次 /model（含重选同一模型）重新读取。已打开会话不自动热更新，可重选模型或重启。重新加载失败保留原模型、容量和历史。修改容量不会覆盖服务商限制，也不会加入模型请求或会话快照。
+`--check-config` 显示容量与来源；--prompt 同样加载并执行输入预算检查；进入/恢复会话以及每次 /model（含重选同一模型）重新读取。已打开会话不自动热更新，可重选模型或重启。重新加载失败保留原模型、容量和历史。修改容量不会覆盖服务商限制，也不会加入模型请求或会话快照。
 
-底栏示例为“已用 ≈118.5K / 1.05M (11.3%)”，已用优先显示当前上下文本地估算，≈ 表示非精确分词。输入等待时包含已有历史、基础指令和可用工具，不含尚未提交的下一条问题；请求时加入当前问题及本次工具消息。上限取本地配置，已知青色、未知灰色。K=1000、M=1000000；K 最多一位、M 最多两位小数。百分比用原始估算总量 / 原始容量计算，保留一位小数，容量未知为 ?%，超过 100% 如实显示。最近一次服务商 usage.promptTokens 在 /status 中单独展示，不与估算相加，不是累计费用。尚未计算输出预留、压缩阈值或输入预算。详见 [容量实现](docs/architecture.md#model-capacity)与[组装实现](docs/architecture.md#context-assembly)。
+底栏示例为“已用 ≈118.5K / 1.05M (11.3%)”，已用优先显示当前上下文本地估算，≈ 表示非精确分词。输入等待时包含已有历史、基础指令和可用工具，不含尚未提交的下一条问题；请求时加入当前问题及本次工具消息。上限取本地配置，已知青色、未知灰色。K=1000、M=1000000；K 最多一位、M 最多两位小数。百分比用原始估算总量 / 原始容量计算，保留一位小数，容量未知为 ?%，超过 100% 如实显示。最近一次服务商 usage.promptTokens 在 /status 中单独展示，不与估算相加，不是累计费用。输入预算、输出预留、安全余量、预警水位和剩余空间可在 /context 查看；预警尚不触发压缩。详见 [容量实现](docs/architecture.md#model-capacity)与[组装实现](docs/architecture.md#context-assembly)。
 
 2026-10-26 本地配置已按当前 .env 的非敏感供应商/模型清单填充 16 个聊天条目，出处和保留未知的条目见设计文档的[本地规格配置记录](docs/architecture.md#configured-model-capacities)。采用精确整数区分 1,000,000 与 1,048,576；部分转发模型参考原厂规格，尚未验证网关实际上限。qwen3.8-omni-flash 官方详情与概述口径冲突，暂采用 65,536 的保守值。models.json 是本地忽略文件，其他机器仍需自行复制模板或按记录配置。
 
@@ -600,7 +603,7 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
 输入前：SessionLauncher → ContextBuilder（成功历史 + 当前可用工具，空 currentTurn）→ 底栏预览
 发送时：AgentLoop → ContextBuilder（history + currentTurn + tools + mode/step）
   → 校验完整历史及工具配对 → 组装 system/messages/tools → TokenEstimator → ContextSnapshot
-  → 观察器更新底栏 → LlmRequest → LlmClient → 模型
+  → 观察器更新底栏 → ContextBudgetPolicy 判断：超限报错，允许后 LlmRequest → LlmClient → 模型
   → 有工具：本次任务追加 assistant + tool，下一轮重新组装
   → 最终回答：原始本次完整消息提交 Session → 持久化；返回输入前预览
 /context：显示当前预览分项，不调用模型、不展示消息正文、不保存为用户消息
@@ -608,7 +611,25 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
 
 **组装内容**：基础 system（新会话来自 prompts/base.md，恢复用该会话快照）只注入一次；PLAN 和临近轮次上限的指令只叠加到本次 system 副本；历史包含 user、assistant 正文/调用及 tool 结果；本次任务包含当前 user 和已完成的工具消息组。可用工具以独立 tools 数组发送，内容为名称、描述和 parameters JSON Schema，不另拼一份提示词。模型 ID、URL、认证和流式字段仍由 LLM 客户端处理，不把 API Key 加进 messages。工作区影响工具筛选及执行根目录，当前不自动注入目录树或项目规则文件。
 
-**估算与边界**：heuristic-v1 对 ASCII 约按 3 字符/token、非 ASCII 按 UTF-8 字节数的 2/3 估算，并计入调用 ID/参数、消息边界和工具 schema；这是统一启发式算法，不是各模型 tokenizer，也不代表精确 HTTP 字节数或硬性上界。统计分为基础指令、运行时指令、成功历史、本次输入、本次 assistant、当前工具结果、可用工具定义、协议开销；旧工具消息归历史，不重复计入本次。未来预算需增加安全余量、输出预留和准确度校准。当前完整历史原样发送，失败不保存残缺任务，摘要/裁剪和长期记忆后续实现。
+**估算与边界**：heuristic-v1 对 ASCII 约按 3 字符/token、非 ASCII 按 UTF-8 字节数的 2/3 估算，并计入调用 ID/参数、消息边界和工具 schema；这是统一启发式算法，不是各模型 tokenizer，也不代表精确 HTTP 字节数或硬性上界。统计分为基础指令、运行时指令、成功历史、本次输入、本次 assistant、当前工具结果、可用工具定义、协议开销；旧工具消息归历史，不重复计入本次。已加入输出预留与安全余量，后续仍需用实际 usage 校准估算准确度。当前完整历史原样发送，失败不保存残缺任务，摘要/裁剪和长期记忆后续实现。
+
+**预算配置与检查**：现有 .env 和三字段 models.json 仍可使用。全局默认值如下，修改后重启；单个模型的两个可选预留字段可在 models.json 覆盖全局值，重选模型或重启后生效。
+
+```dotenv
+CODEY_CONTEXT_OUTPUT_RESERVE_TOKENS=8192
+CODEY_CONTEXT_SAFETY_MARGIN_TOKENS=4096
+CODEY_CONTEXT_WARNING_RATIO=0.8
+```
+
+```json
+{"models":[{"profile":"example_provider","modelId":"EXAMPLE_MODEL_SMALL","contextWindow":128000,"outputReserveTokens":8192,"safetyMarginTokens":4096}]}
+```
+
+输入预算 = contextWindow - outputReserveTokens - safetyMarginTokens。上例输入预算为 115712，80% 预警水位向上取整为 92570 Token；预警继续请求，一条用户任务最多提醒一次；估算等于输入预算仍允许，严格超过才阻止。比例针对输入预算，底栏原百分比仍针对总窗口，/context 和 /status 分开显示两者。已知容量要求预留合计小于窗口；小窗口模型应配置更小的预留。容量未知时显示未知并跳过容量检查，不按名称猜测。
+
+实际流程：ContextBuilder 组装/估算 → ContextBudgetPolicy.evaluate → 超限抛 ContextLimitException，否则请求 LLM。交互和 --prompt 使用同一检查点，工具结果回填后也重新判断。超限消息显示已实际发生的模型/工具次数；被阻止的请求不计数、不重发、不保存残缺本轮。CLI 可继续用 /model 切换更大窗口或 /new、/clear 新建；旧成功历史保留，已执行文件修改不回滚。切模型的预算配置错误在替换/保存前报错，保留旧模型、usage 和默认偏好。
+
+输出预留是本地输入预算参数，不是厂商最大输出声明，也未自动加入 API max_tokens；服务端分词/窗口与本地资料仍可能不同，因此当前检查不是精确容量保证。预算数值不进入模型正文或会话快照，没有自动摘要、历史裁剪或自动重试。详见[预算管理设计](docs/architecture.md#context-budget)。
 
 <a id="module-memory"></a>
 
@@ -742,7 +763,7 @@ codeY/
 | M1 | LLM 调用与 SSE 流式输出 | 普通/流式调用与连续对话已完成，本地 HTTP/SSE 验证通过；真实平台兼容性待验证 |
 | M2 | Agent 循环与只读工具 | list_files、search_file、grep_code、read_file、tools 请求、基础循环与工具历史已完成；正则与语义检索后续扩展 |
 | M3 | 修改代码、执行命令与验证闭环 | write_file/edit_file、execute_command、审批与 ReAct/Plan 已完成；持久审计、验证证据与失败恢复待实现 |
-| M4 | 上下文预算与历史压缩 | 模型容量、请求组装、Token 估算和 /context 已实现；预算拦截与压缩待实现 |
+| M4 | 上下文预算与历史压缩 | 模型容量、组装、估算、输入预算检查和 /context 已实现；自动压缩待实现 |
 | M5 | 会话恢复与项目记忆 | 文本/工具对话保存恢复已实现；执行中恢复与长期记忆待实现 |
 | M6 | MCP 工具接入 | 待实现 |
 | M7 | 固定任务评估与项目展示 | 待实现 |
@@ -846,6 +867,8 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/c
 2026-10-26 模型容量阶段：完整 `mvn verify` 共 640 项通过，失败/错误/跳过均为 0。新增 32 项覆盖精确模型身份、共享目录、未知容量、严格配置校验/脱敏、有界读取、动态重选/恢复、切换失败保留状态和底栏容量。生产 JAR 另通过 6 组隔离本地 HTTP/SSE 验证：配置检查不联网、不同模型容量匹配、聊天切换与历史、恢复时重载、错误配置在请求前拦截、容量元数据不改变业务请求且缺文件兼容。没有调用真实厂商或读取真实 .env。
 
 2026-10-26 上下文组装阶段：完整 `mvn verify` 共 658 项通过，失败/错误/跳过均为 0；新增 18 项覆盖完整消息组/调用配对、分类估算、Unicode、逐次工具回填、失败历史隔离、输入前预览、恢复、模式筛选、/context 和估算/实际来源区分。生产 JAR 通过隔离本地 SSE 两次请求联测：7 个工具 schema、read_file 结果关联、最终完整消息保存、恢复后离线重新估算。未使用真实厂商或用户密钥。
+
+2026-10-26 上下文预算阶段：完整 `mvn verify` 共 698 项通过，失败/错误/跳过均为 0；新增 40 项覆盖配置来源/覆盖/脱敏、可选模型字段、整数与水位边界、未知容量、首次/工具回填后超限、预警继续且单任务一次、文件副作用保留、失败不提交、模型切换与回退。生产 JAR 通过隔离本地 HTTP/SSE 验证：--check-config 默认/覆盖/错误、--prompt 在 HTTP 前拦截、工具结果阻止下一请求、切大模型恢复、预警继续、未知窗口跳过；没有使用真实厂商、用户配置或密钥。
 
 流式阶段完整构建 `mvn verify` 共 608 项测试通过，无失败、错误或跳过。命令阶段新增 32 项测试，覆盖真实隔离进程的正常/非零退出、双流输出与截断、超时/中断清理、stdin EOF、Windows 参数及批处理优先、审批/拒绝/PLAN/NONE、参数冻结、目录/程序变更、输出预算与配置；另通过 6 组本地 HTTP 生产 JAR 验证，包括 ask/auto 每次实际执行 Maven 版本命令、非零结果回填、管道审批不可用、PLAN 和无工作区。本次 UI 新增 4 项测试，覆盖真实 JLine 输入框与回答展示、ANSI 不进入模型消息/历史、纯文本管道和 NO_COLOR、长模型名下的模式/token 保留及颜色属性；另在开启配色的虚拟终端下验证 Tab/方向键。权限阶段新增 35 项测试，覆盖默认 ask、按文件授权/撤销/拒绝、直接工具调用、未知工具、自动规则/人工回退、审批期间冲突、准备后参数变化、PLAN+full、会话恢复、管道不误读、配置和 token 状态。终端测试使用真实 JLine 编辑器配合虚拟终端，验证底栏与窗口缩窄；厂商请求使用替身。权限阶段另通过 7 组本地 HTTP JAR 验证：生产六工具与首次批准/授权复用、恢复不恢复批准或重放写入、管道默认不误读下一条聊天、full 显式确认和 PLAN 拦截、auto 普通写入/敏感目标拒绝及跨工具重试拦截、撤销后重新批准、无工作区两个入口隐藏工具。全部配置、会话与工作区隔离，未读取真实 .env 或调用真实厂商。原有写入、搜索、会话、配置及协议回归全部保留。
 

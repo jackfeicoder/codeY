@@ -12,6 +12,9 @@ import io.github.jackfeicoder.codey.config.ModelCapabilities;
 import io.github.jackfeicoder.codey.config.ProfileSelection;
 import io.github.jackfeicoder.codey.context.ContextBuilder;
 import io.github.jackfeicoder.codey.context.TokenEstimator;
+import io.github.jackfeicoder.codey.context.ContextSnapshot;
+import io.github.jackfeicoder.codey.context.ContextBudgetPolicy;
+import io.github.jackfeicoder.codey.config.ContextBudgetSettings;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
 import io.github.jackfeicoder.codey.llm.LlmRequest;
@@ -110,6 +113,9 @@ public final class SessionLauncher {
     private final RuntimeStatus runtimeStatus = new RuntimeStatus();
     /** 输入前预览与 Agent 实际请求共用同一组装器，避免两套用量计算逻辑。 */
     private final ContextBuilder contexts = new ContextBuilder();
+    /** 全局默认值在启动时注入；模型切换后重新解析单模型覆盖值。 */
+    private final ContextBudgetSettings budgetSettings;
+    private ContextBudgetPolicy budgetPolicy = ContextBudgetPolicy.unknown();
 
     /** 输入、模型工厂和存储可替换，测试无需真实终端、用户目录或厂商凭证。 */
     public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
@@ -168,8 +174,19 @@ public final class SessionLauncher {
                            ConsoleInput input, PrintWriter output, PrintWriter errors, Options options,
                            ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog,
                            int maxIterations, PermissionSettings permissionSettings) {
+        this(startup, settings, store, models, basePrompt, input, output, errors, options, tools, debug,
+                modelCatalog, maxIterations, permissionSettings, new ContextBudgetSettings());
+    }
+
+    /** 完整生产装配入口，配置读取仍在 Main；预览和实际请求共用已选模型策略。 */
+    public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
+                           Function<String, ModelChoice> models, Supplier<String> basePrompt,
+                           ConsoleInput input, PrintWriter output, PrintWriter errors, Options options,
+                           ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog,
+                           int maxIterations, PermissionSettings permissionSettings, ContextBudgetSettings budgetSettings) {
         if (maxIterations < 1 || maxIterations > AgentLoop.MAX_STEPS) throw new IllegalArgumentException("Agent steps must be within 1..100.");
         this.maxIterations = maxIterations;
+        this.budgetSettings = java.util.Objects.requireNonNull(budgetSettings, "budgetSettings");
         this.startup = startup.toAbsolutePath().normalize();
         this.settings = settings;
         this.store = store;
@@ -428,7 +445,11 @@ public final class SessionLauncher {
         String last = lastProfile();
         String profile = startupProfile != null ? startupProfile : last != null ? last : savedProfile;
         while (!exiting) {
-            try { return models.apply(profile); }
+            try {
+                ModelChoice selected = models.apply(profile);
+                new ContextBudgetPolicy(selected.capabilities(), budgetSettings); // 验证后再创建/保存新会话。
+                return selected;
+            }
             catch (ConfigException invalid) {
                 input.theme().line(errors, ConsoleTheme.Tone.ERROR, "Configuration error: " + invalid.getMessage());
                 String choice = read("输入可用的供应商 [模型ID]（/back 返回）> ");
@@ -450,6 +471,7 @@ public final class SessionLauncher {
         }
         active = candidate;
         model = selected;
+        budgetPolicy = new ContextBudgetPolicy(selected.capabilities(), budgetSettings);
         // 替换会话清除旧批准；full 不自动扩散到另一个会话，工作模式回到 ReAct。
         if (permissions != null && permissionMode == PermissionMode.FULL) permissionMode = PermissionMode.ASK;
         workMode = WorkMode.REACT;
@@ -503,8 +525,10 @@ public final class SessionLauncher {
     private void switchModel(String profile) {
         if (active == null) { output.println("请先 /new 或 /resume 进入一个会话，再切换模型。"); return; }
         ModelChoice selected = models.apply(profile); // 不套用启动覆盖，也不发探测请求。
+        var nextBudget = new ContextBudgetPolicy(selected.capabilities(), budgetSettings);
         active.switchProfile(selected.profile());
         model = selected;
+        budgetPolicy = nextBudget;
         runtimeStatus.model(selected.profile(), selected.capabilities());
         rememberModel(selected.profile());
         output.println("已切换模型：" + selected.profile() + "；原会话和消息历史已保留。");
@@ -560,10 +584,7 @@ public final class SessionLauncher {
                 return response;
             }
         };
-        ChatCli chat = new ChatCli(new AgentLoop(observed, tools, maxIterations, debug, contexts, snapshot -> {
-            runtimeStatus.context(snapshot);
-            input.refreshStatus();
-        }), active.session(),
+        ChatCli chat = new ChatCli(new AgentLoop(observed, tools, maxIterations, debug, contexts, this::updateContext, budgetPolicy), active.session(),
                 new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions), input, output, errors);
         if (chat.answer(line)) {
             active.captureTurn();
@@ -624,7 +645,8 @@ public final class SessionLauncher {
         output.println("最近实际输入：" + (runtimeStatus.lastInputTokens() == null ? "未知" : runtimeStatus.lastInputTokens() + " tok")
                 + "（服务商最近一次响应的 usage；不与当前估算相加）。");
         output.println("上下文容量来源：" + (model == null ? "未配置" : model.capabilities().source())
-                + "；未启用 token 预算检查、输出预留或自动压缩。");
+                + "；已启用已知容量的请求前预算检查，自动压缩尚未接入。");
+        printBudget();
         output.println("文件授权 " + (permissions == null ? 0 : permissions.grantCount()) + "；拒绝记录 "
                 + (permissions == null ? 0 : permissions.denialCount()) + "。/permissions revoke 可撤销。");
         output.println("文件权限限制来自内置工具路径检查，当前没有进程/网络沙箱。");
@@ -634,7 +656,30 @@ public final class SessionLauncher {
     private void previewContext() {
         if (active == null) return;
         var toolContext = new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions);
-        runtimeStatus.context(contexts.build(active.session().messages(), List.of(), tools.definitions(toolContext), workMode, 1, maxIterations));
+        updateContext(contexts.build(active.session().messages(), List.of(), tools.definitions(toolContext), workMode, 1, maxIterations));
+    }
+
+    /** 同步估算和预算；请求展示交给现有模型调用/输入刷新位置，避免重复刷状态。 */
+    private void updateContext(ContextSnapshot snapshot) {
+        runtimeStatus.context(snapshot);
+        runtimeStatus.budget(budgetPolicy.evaluate(snapshot));
+    }
+
+    /** 总窗口占比与输入预算占比分开；未知不填零，超限显示实际负的剩余空间。 */
+    private void printBudget() {
+        var value = runtimeStatus.budget();
+        if (value == null) { output.println("输入预算：尚未选择会话/模型。"); return; }
+        output.println("  输入预算：" + (value.inputBudget() == null ? "?" : value.inputBudget()) + " tok（"
+                + RuntimeStatus.formatTokens(value.inputBudget()) + "；窗口 - 输出预留 - 安全余量）");
+        output.println("  输出预留：" + value.outputReserveTokens() + " tok；安全余量：" + value.safetyMarginTokens() + " tok");
+        output.println("  预警比例：" + budgetSettings.warningRatio().multiply(java.math.BigDecimal.valueOf(100)).stripTrailingZeros().toPlainString()
+                + "% 输入预算；预警水位：" + (value.warningThreshold() == null ? "?" : value.warningThreshold()) + " tok");
+        String percent = value.inputBudget() == null ? "?%" : java.math.BigDecimal.valueOf(value.estimatedInput())
+                .multiply(java.math.BigDecimal.valueOf(100)).divide(java.math.BigDecimal.valueOf(value.inputBudget()), 1,
+                        java.math.RoundingMode.HALF_UP).toPlainString() + "%";
+        output.println("  输入预算占用：" + (value.inputBudget() == null ? "" : "≈") + percent + "；剩余："
+                + (value.remainingTokens() == null ? "?" : value.remainingTokens()) + " tok；" + value.label());
+        output.println("  输出预留为本地预算参数，不是模型输出硬上限；未自动添加 max_tokens，估算仍可能与服务端分词不同。");
     }
 
     /** 只打印分类计数，避免把历史正文、文件内容和提示词整段刷到控制台。 */
@@ -654,7 +699,8 @@ public final class SessionLauncher {
         output.println("  消息边界/协议开销：≈" + tokens.protocolOverhead() + " tok");
         output.println("  总计：≈" + tokens.total() + " tok；" + runtimeStatus.right());
         output.println("发送前会加入当前输入，并在每次 ReAct 请求前重新组装和估算；完整历史原样保留。");
-        output.println("未启用 token 预算检查、输出预留、历史裁剪或自动压缩；项目规则、记忆、MCP、Skill 尚未接入。");
+        printBudget();
+        output.println("已知容量超过输入预算时阻止下一次模型请求；尚无历史裁剪或自动压缩，项目规则、记忆、MCP、Skill 尚未接入。");
     }
     private boolean confirmFull() {
         try { return approvalHandler.confirmFull(); }

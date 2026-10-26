@@ -69,7 +69,7 @@ class ModelCapabilitiesCliTest {
         assertTrue(text.matches("(?s).*fixture org/model-b \\| 已用 ≈[0-9.]+ / 1M \\(0.0%\\).*"), text);
         assertTrue(text.matches("(?s).*other org/model-a \\| 已用 ≈[0-9.]+ / \\? \\(\\?%\\).*"), text);
         assertTrue(text.contains("models.json（本地配置）"));
-        assertTrue(text.contains("未启用 token 预算检查"));
+        assertTrue(text.contains("已启用已知容量的请求前预算检查"));
         assertEquals("", errors.toString());
         assertEquals(List.of(Message.system("base"), Message.user("first"), Message.assistant("answer"), Message.user("second")), requests.get(1).messages());
         assertEquals(4, store.list().sessions().get(0).messages().size());

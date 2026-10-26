@@ -3,7 +3,9 @@
     {
       "profile": "example_provider",
       "modelId": "EXAMPLE_MODEL_SMALL",
-      "contextWindow": 128000
+      "contextWindow": 128000,
+      "outputReserveTokens": 8192,
+      "safetyMarginTokens": 4096
     },
     {
       "profile": "example_provider",
