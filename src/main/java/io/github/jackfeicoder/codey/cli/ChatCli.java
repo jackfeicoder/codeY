@@ -1,6 +1,7 @@
 package io.github.jackfeicoder.codey.cli;
 
 import io.github.jackfeicoder.codey.agent.AgentLoop;
+import io.github.jackfeicoder.codey.agent.AgentResult;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
 import io.github.jackfeicoder.codey.session.Session;
@@ -98,7 +99,14 @@ public final class ChatCli {
 
     /** 执行一条任务；true 表示完整消息组已提交，持久化入口随后保存。 */
     public boolean answer(String line) {
-        var result = agent.run(session, line, context); // 失败或预算退出不会污染已提交历史。
+        var stream = new ConsoleStreamOutput(input.theme(), output, input::refreshStatus, true);
+        AgentResult result;
+        try { result = agent.run(session, line, context, stream); }
+        catch (RuntimeException failed) {
+            if (stream.hasDisplayedText()) input.theme().line(errors, ConsoleTheme.Tone.WARNING,
+                    "以上流式内容尚未确认为完整结果，本轮未保存。");
+            throw failed;
+        }
         if (!result.completed()) {
             input.theme().line(errors, ConsoleTheme.Tone.ERROR, "Agent stopped [BUDGET_EXHAUSTED] after " + result.modelCalls()
                     + " model requests and " + result.toolCalls() + " tool calls. This turn was not saved.");
@@ -108,7 +116,7 @@ public final class ChatCli {
         }
         session.completeAgentTurn(result.turnMessages());
         var response = result.response();
-        input.theme().assistant(output, response.text());
+        if (!stream.lastResponseHadText()) input.theme().assistant(output, response.text());
         if (result.budgetLimited()) {
             input.theme().line(errors, ConsoleTheme.Tone.WARNING, "本轮已到模型请求上限，回答基于现有信息；需要进一步调查可继续追问。");
         }

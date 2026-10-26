@@ -36,6 +36,7 @@ target/
 .env
 .env.*
 !.env.example
+/models.json
 .codey/
 logs/
 *.db

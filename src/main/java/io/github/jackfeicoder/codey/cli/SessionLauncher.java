@@ -8,9 +8,12 @@ import io.github.jackfeicoder.codey.config.ConfigException;
 import io.github.jackfeicoder.codey.config.SessionSettings;
 import io.github.jackfeicoder.codey.config.ModelPreferenceStore;
 import io.github.jackfeicoder.codey.config.ModelProfiles;
+import io.github.jackfeicoder.codey.config.ModelCapabilities;
 import io.github.jackfeicoder.codey.config.ProfileSelection;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
+import io.github.jackfeicoder.codey.llm.LlmRequest;
+import io.github.jackfeicoder.codey.llm.LlmResponse;
 import io.github.jackfeicoder.codey.observability.DebugPrinter;
 import io.github.jackfeicoder.codey.session.SessionException;
 import io.github.jackfeicoder.codey.session.SessionService;
@@ -33,13 +36,21 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.function.Consumer;
 
 /** 会话入口状态机：全局历史分页/选择 → 工作区与标题 → 连续对话，模型配置按需校验。 */
 public final class SessionLauncher {
     /** 启动时的可选覆盖；无覆盖时显示历史列表。 */
     public record Options(String workspace, boolean noWorkspace, String title, String resume, String profile) { }
     /** profile 保存“供应商 模型ID”（兼容旧单别名）；标题客户端使用独立短超时。 */
-    public record ModelChoice(String profile, LlmClient chat, LlmClient title) { }
+    public record ModelChoice(String profile, LlmClient chat, LlmClient title,
+                              ModelCapabilities capabilities) {
+        /** 原调用者没有容量资料时保留未知，避免将模型规格写死在 CLI。 */
+        public ModelChoice(String profile, LlmClient chat, LlmClient title) {
+            this(profile, chat, title, ModelCapabilities.unknown());
+        }
+        public ModelChoice { java.util.Objects.requireNonNull(capabilities, "capabilities"); }
+    }
 
     /** 每次展示/追加的记录数。 */
     private static final int PAGE_SIZE = 10;
@@ -438,7 +449,7 @@ public final class SessionLauncher {
         workMode = WorkMode.REACT;
         if (permissions != null) permissions.revoke();
         permissions = new PermissionService(permissionMode, active.snapshot().workspace(), approvalHandler);
-        runtimeStatus.model(selected.profile());
+        runtimeStatus.model(selected.profile(), selected.capabilities());
         updateModes();
         startupProfile = null; // 后续新建与恢复使用最近选择，不重复套用启动覆盖。
         rememberModel(selected.profile());
@@ -488,7 +499,7 @@ public final class SessionLauncher {
         ModelChoice selected = models.apply(profile); // 不套用启动覆盖，也不发探测请求。
         active.switchProfile(selected.profile());
         model = selected;
-        runtimeStatus.model(selected.profile());
+        runtimeStatus.model(selected.profile(), selected.capabilities());
         rememberModel(selected.profile());
         output.println("已切换模型：" + selected.profile() + "；原会话和消息历史已保留。");
     }
@@ -528,12 +539,20 @@ public final class SessionLauncher {
     private void answer(String line) {
         // 模型客户端/模式在任务开始时固定，运行中不消费切换命令；状态只观察响应。
         final var selectedClient = model.chat();
-        LlmClient observed = request -> {
-            runtimeStatus.usage(null); // 请求失败或未报告 usage 时，不把旧模型计数冒充最新请求。
-            var response = selectedClient.generate(request);
-            if (response != null) runtimeStatus.usage(response.usage());
-            input.refreshStatus();
-            return response;
+        LlmClient observed = new LlmClient() {
+            @Override public LlmResponse generate(LlmRequest request) {
+                runtimeStatus.usage(null);
+                var response = selectedClient.generate(request);
+                if (response != null) runtimeStatus.usage(response.usage());
+                input.refreshStatus(); return response;
+            }
+            @Override public LlmResponse generateStream(LlmRequest request, Consumer<String> onText) {
+                runtimeStatus.usage(null); input.refreshStatus();
+                var response = selectedClient.generateStream(request, onText);
+                if (response != null) runtimeStatus.usage(response.usage());
+                // 正文先收尾，ConsoleStreamOutput.onResponseEnd 再刷新底栏，避免管道状态插入正文中间。
+                return response;
+            }
         };
         ChatCli chat = new ChatCli(new AgentLoop(observed, tools, maxIterations, debug), active.session(),
                 new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions), input, output, errors);
@@ -592,7 +611,9 @@ public final class SessionLauncher {
     private void printStatus() {
         output.println("工作模式：" + workMode.value() + "；权限：" + permissionMode.value());
         output.println("模型与用量：" + runtimeStatus.right());
-        output.println("Token 是服务商报告的上次请求输入量，不是当前上下文估算或累计消耗；模型上下文上限尚未配置。");
+        output.println("Token 是服务商报告的上次请求输入量，不是当前上下文估算或累计消耗。");
+        output.println("上下文容量来源：" + (model == null ? "未配置" : model.capabilities().source())
+                + "；未启用 token 预算检查、输出预留或自动压缩。");
         output.println("文件授权 " + (permissions == null ? 0 : permissions.grantCount()) + "；拒绝记录 "
                 + (permissions == null ? 0 : permissions.denialCount()) + "。/permissions revoke 可撤销。");
         output.println("文件权限限制来自内置工具路径检查，当前没有进程/网络沙箱。");

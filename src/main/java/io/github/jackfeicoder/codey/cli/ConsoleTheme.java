@@ -73,6 +73,20 @@ public final class ConsoleTheme {
         output.flush();
     }
 
+    /** 流式回答的固定标签只打印一次；正文由流展示器即时安全输出。 */
+    public void beginAssistant(PrintWriter output, boolean label) {
+        if (label) {
+            if (interactive) { output.println(); output.println(text(Tone.ASSISTANT, "● CodeY")); }
+            else output.print("CodeY> ");
+        }
+        output.flush();
+    }
+    public void endAssistant(PrintWriter output) {
+        output.println();
+        if (interactive) output.println();
+        output.flush();
+    }
+
     /** ANSI 长度不参与宽度计算；横线少占一列，避免最右列触发终端自动换行。 */
     public String separator(int columns) {
         return text(Tone.MUTED, "─".repeat(Math.max(1, columns - 1)));

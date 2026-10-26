@@ -1,0 +1,14 @@
+{
+  "models": [
+    {
+      "profile": "example_provider",
+      "modelId": "EXAMPLE_MODEL_SMALL",
+      "contextWindow": 128000
+    },
+    {
+      "profile": "example_provider",
+      "modelId": "EXAMPLE_MODEL_LARGE",
+      "contextWindow": 1000000
+    }
+  ]
+}

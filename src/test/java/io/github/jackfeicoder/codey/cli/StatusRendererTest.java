@@ -9,6 +9,23 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** 状态栏宽度、终端控制字符与 token 来源标记；不依赖真实 API 或桌面窗口。 */
 class StatusRendererTest {
+    @Test void knownWindowIsRenderedAndReplacedWithUnknownOnSwitch() {
+        var status = new RuntimeStatus();
+        status.model("供应商/很长的模型名😀".repeat(20), new io.github.jackfeicoder.codey.config.ModelCapabilities(1000000L));
+        status.usage(new LlmResponse.TokenUsage(12345L, 1L, 12346L));
+        for (int width : new int[]{60, 100, 180}) {
+            var line = StatusRenderer.styled(status, width);
+            assertTrue(line.columnLength() <= width - 1);
+            assertTrue(line.toString().contains("1000000"), line.toString());
+            assertTrue(line.toString().contains("12345"), line.toString());
+            assertEquals(ConsoleTheme.style(ConsoleTheme.Tone.COMMAND), line.styleAt(line.toString().indexOf("1000000")));
+        }
+        status.usage(null);
+        assertEquals(1000000L, status.contextWindow());
+        status.model("fixture unknown");
+        assertNull(status.contextWindow());
+        assertTrue(status.right().endsWith("上限 ?"));
+    }
     @Test void styledFooterPreservesFirstLetterAndTokensBeforeLongModelName() {
         var status = new RuntimeStatus();
         status.model("供应商/超长模型😀".repeat(30));

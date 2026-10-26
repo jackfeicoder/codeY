@@ -1,6 +1,6 @@
 # CodeY 架构设计
 
-> 版本：0.1，日期：2026-10-23。当前已实现配置、消息、基础提示词、非流式调用、可选工作区、本地会话管理、六个文件工具、execute_command 本地命令、AgentLoop、ask/规则 auto/full、会话文件授权、ReAct/Plan 切换和终端状态栏。完成的工具消息组可保存和恢复；执行中恢复、SSE、专用网络/删除工具、OS 进程沙箱、持久审计及多 Agent 仍待实现。验证使用本地替身与临时文件，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
+> 版本：0.1，日期：2026-10-26。当前已实现配置、消息、基础提示词、普通与 SSE 流式调用、可选工作区、本地会话管理、六个文件工具、execute_command 本地命令、AgentLoop、ask/规则 auto/full、会话文件授权、ReAct/Plan 切换、终端状态栏及按模型配置上下文容量。Token 估算、预算与压缩仍待实现。完成的工具消息组可保存和恢复；执行中恢复、专用网络/删除工具、OS 进程沙箱、持久审计及多 Agent 仍待实现。验证使用本地替身与临时文件，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
 
 ## 阅读导航
 
@@ -16,7 +16,9 @@
 - [简洁控制台进度与 exit 返回列表](#console-debug)
 - [模型切换、目录、帮助与最后使用默认](#model-commands)
 - [Windows CMD 全局启动](#global-cmd)
-- [已实现的非流式 LLM 调用](#llm)
+- [LLM 普通与流式调用](#llm)
+- [SSE 流式实现与验证](#streaming)
+- [模型上下文容量配置与加载](#model-capacity)
 - [已实现的 Session 与连续对话](#session-chat)
 - [代码阅读顺序与当前调用流程](#code-guide)
 - [Prompt 模块设计与文件约定](#prompt-design)
@@ -43,10 +45,10 @@ Harness 在本项目中指运行核心及其策略：Agent 循环、上下文构
 | 语言 | Java 17 | M0；本机可用，records 等能力足够支持首版 |
 | 工程 | Maven 单模块 | M0；按包组织，降低初期装配成本 |
 | CLI | JLine 3.30.17 + JDK 标准输入输出 | 原生终端补全、候选选择；管道/测试保留逐行输入 |
-| HTTP | JDK HttpClient | M1 已实现非流式请求；共享连接客户端，单次配置绑定 |
+| HTTP | JDK HttpClient | 已实现普通 JSON / SSE 请求；共享连接客户端，单次配置绑定 |
 | JSON | Jackson 2.18.2 | M1 已实现消息映射与响应解析 |
 | 日志 | 初期标准输出；后续 SLF4J | M1/M3；模型内容与日志分流，避免输出密钥 |
-| 测试 | JUnit 5.10.2 + JDK HttpServer | 配置、消息及非流式 HTTP 测试已实现，默认不调用真实模型 |
+| 测试 | JUnit 5.10.2 + JDK HttpServer | 配置、消息及普通 HTTP / SSE 测试已实现，默认不调用真实模型 |
 | 状态存储 | 用户目录 JSON 快照，后续 JSONL 事件 | 会话选择阶段先恢复文本；M5 补工具执行状态 |
 | MCP | JSON-RPC + stdio | M6；先支持一条传输链，HTTP 后续增加 |
 
@@ -248,7 +250,7 @@ MCP 工具经适配器进入同一 ToolRegistry/ToolExecutor，复用权限、�
 
 ## 9. 实现验证与已知边界
 
-- 当前验收 Maven 构建、可执行 JAR、配置/消息/提示词/Session/HTTP/Agent 测试，以及 --prompt、--chat 和工具闭环的本地 HTTP 请求；真实服务商调用和 SSE 后续验证。
+- 当前验收 Maven 构建、可执行 JAR、配置/消息/提示词/Session/HTTP/Agent 测试，以及 --prompt、--chat 和工具闭环的本地 HTTP 请求；SSE 已本地验证，真实服务商调用后续验证。
 - LLM 接入用本地 HTTP/SSE 替身验证，不使用真实密钥作为默认测试前提。
 - 工具使用临时工作区验证路径、分页、错误和超时；命令用无网络的测试程序。
 - 上下文验证工具调用组完整性、预算和规则保留；恢复验证副作用不会被盲目重放。
@@ -260,7 +262,7 @@ MCP 工具经适配器进入同一 ToolRegistry/ToolExecutor，复用权限、�
 
 ## 10. 模块职责与接口契约
 
-> 以下含目标设计。当前已实现 CLI、配置、提示词、消息/工具、AgentLoop/AgentResult、Session/MessageHistory 及快照/存储/服务、可选工作区和非流式 LLM。其余具体类型按阶段实现。
+> 以下含目标设计。当前已实现 CLI、配置、提示词、消息/工具、AgentLoop/AgentResult、Session/MessageHistory 及快照/存储/服务、可选工作区和普通/流式 LLM。其余具体类型按阶段实现。
 
 ### 模块边界
 
@@ -271,7 +273,7 @@ MCP 工具经适配器进入同一 ToolRegistry/ToolExecutor，复用权限、�
 | config | 加载、选择并验证配置 | LlmConfig、ModelProfiles、AuthMode、SessionSettings | 密钥不进入日志、会话或仓库 |
 | workspace | 可选工作区与真实目录校验 | WorkspaceBinding、WorkspaceResolver | 不改变 .env 来源，不代替工具权限 |
 | agent | 执行循环、预算、取消、完成判定 | AgentLoop、RunContext、AgentResult、RunBudget | 一次 run 的状态独立，明确退出原因 |
-| llm | 请求编码、HTTP、SSE、响应组装 | LlmClient、LlmRequest、LlmResponse、StreamListener | 总返回完整结果；展示回调不影响返回值 |
+| llm | 请求编码、HTTP、SSE、响应组装 | LlmClient、LlmRequest、LlmResponse、ChatStreamDecoder | 总返回完整结果；展示回调不影响返回值 |
 | tool | 定义、注册、调度、参数验证 | Tool、ToolDefinition、ToolCall、ToolResult、ToolRegistry、ToolExecutor | Agent 依赖执行器，工具不反向调用 Agent |
 | tool.builtin | 文件搜索、读取、修改、命令 | ReadFileTool、SearchTextTool、WriteFileTool、ExecuteCommandTool | 输出有边界，所有路径基于工作区解析 |
 | context | 选择和组织本轮输入 | ContextBuilder、ContextSnapshot、TokenEstimator、HistoryCompactor | 不把长记忆与会话副本重复堆入请求 |
@@ -333,7 +335,7 @@ List<Message> history = List.of(
 
 Chat Completions 适配器已显式映射 role.wireValue()、tool_calls、tool_call_id，并把 ToolCall 转成接口要求的 function 结构；不依赖 record 的默认 JSON 形状。跨消息的调用 ID 匹配、全部结果回填和工具调用组完整性由后续 Session/Agent 层检查，当前 Message 仅校验单条消息。
 
-当前消息内容采用文本，已接入 JSON 映射、真实只读工具与完整历史配对校验；流式工具参数组装待实现。相关测试覆盖普通对话、多个调用的结果关联、角色约束、空工具输出、重复 ID 和防御性复制。
+当前消息内容采用文本，已接入 JSON 映射、真实只读工具与完整历史配对校验；流式工具参数按 index 聚合，完整流校验后执行。相关测试覆盖普通对话、多个调用的结果关联、角色约束、空工具输出、重复 ID 和防御性复制。
 
 <a id="tool-foundation"></a>
 
@@ -788,7 +790,7 @@ AgentLoop 本身不修改 Session。COMPLETED 返回仅本轮的 user、所有 a
 
 v2 磁盘格式支持 `user → (assistant tool_calls → 全部 tool 结果)* → assistant 最终回答`。调用 ID 在一条用户任务内唯一；每组结果可按不同顺序保存，但必须全部匹配且每个仅一次。历史不能夹入 system、额外 tool、下一用户问题或缺失最终回答。v1 仅允许旧文本轮次，恢复并保存时升级 v2。恢复只是加载原始工具结果进入上下文，不重放旧调用。
 
-边界：默认最多 20 次模型请求，包含最后一次仅文本请求；AgentSettings 从同一配置目录的 .env 和环境加载 CODEY_MAX_ITERATIONS，范围 1～100，Main 同时接入交互与 --prompt 入口。最大值为 20 时最多 19 轮可执行工具；设为 1 时只回答。运行设置启动时固定，修改后需重启。每次最多 16 个工具，因此单任务调度次数有界；toolCalls 计入未知工具和校验失败等执行器调用。但尚无总时间/Token 预算、重复无进展检测、工具超时或完整审计日志。COMPLETED 只表示最终文本响应，不代表修改/测试验收已通过。中间步骤显示轮次、工具与文件摘要，事件回调和 SSE 后续加入。
+边界：默认最多 20 次模型请求，包含最后一次仅文本请求；AgentSettings 从同一配置目录的 .env 和环境加载 CODEY_MAX_ITERATIONS，范围 1～100，Main 同时接入交互与 --prompt 入口。最大值为 20 时最多 19 轮可执行工具；设为 1 时只回答。运行设置启动时固定，修改后需重启。每次最多 16 个工具，因此单任务调度次数有界；toolCalls 计入未知工具和校验失败等执行器调用。但尚无总时间/Token 预算、重复无进展检测、工具超时或完整审计日志。COMPLETED 只表示最终文本响应，不代表修改/测试验收已通过。中间步骤显示轮次、工具与文件摘要，AgentStreamListener 接入正文展示；完整事件轨迹仍待实现。
 
 运行配置与收尾实现（已实现）：
 
@@ -851,12 +853,14 @@ exit 不发送给模型，不新增消息或会话；返回列表后可 /new、�
 
 <a id="llm"></a>
 
-### 已实现的非流式 LLM 调用
+### LLM 普通与流式调用
 
 | 文件 | 职责 |
 |---|---|
-| LlmClient.java | 定义 generate(LlmRequest)，供 Agent 和标题生成使用 |
-| ChatCompletionsClient.java | HTTP 传输、显式 JSON 映射、完整响应解析 |
+| LlmClient.java | 定义 generate 和 generateStream，均返回完整结果；流式方法额外回调正文 |
+| ChatCompletionsClient.java | HTTP JSON / SSE 传输、总超时与取消、显式映射和完整响应解析 |
+| ChatStreamDecoder.java | 有界 SSE 帧解析、正文回调、工具分片合并及正常结束校验 |
+| StreamingSettings.java | 全局流式与 usage 开关，默认开启，环境覆盖 .env |
 | LlmRequest.java | 防御性复制非空消息与 tools 定义；toolCallsAllowed=false 时禁用工具，模型配置由客户端提供 |
 | LlmResponse.java | assistant 消息、结束原因和可空 TokenUsage |
 | LlmException.java | HTTP、网络、超时、中断、请求/响应错误与模型拒绝结果分类 |
@@ -871,7 +875,7 @@ LlmResponse response = client.generate(new LlmRequest(List.of(
 System.out.println(response.text());
 ```
 
-实际执行：读取选中的 LlmConfig → 构建 model/messages/stream=false JSON → 向 BASE_URL 后追加 /chat/completions 发送 POST → 检查 HTTP 状态 → 解析 choices[0].message、finish_reason、usage → 返回 LlmResponse。
+上述显式 generate 为非流式路径，标题也使用它。CLI 聊天和 --prompt 默认改走 generateStream，见 [流式实现](#streaming)。非流式实际执行：读取选中的 LlmConfig → 构建 model/messages/stream=false JSON → 向 BASE_URL 后追加 /chat/completions 发送 POST → 检查 HTTP 状态 → 解析 choices[0].message、finish_reason、usage → 返回 LlmResponse。
 
 实现规则：
 
@@ -882,7 +886,7 @@ System.out.println(response.text());
 - 保留 finish_reason，length 表示截断；tool_calls 结束但没有调用时视为不完整响应。旧式 function_call、图片内容和非 function 工具类型暂不支持。
 - usage 或某计数字段缺失时为 null；拒绝非法或负数计数，不把未知值计为零。
 - HTTP 错误保留状态码；不输出原始响应、请求或可能包含内容的 Jackson 异常。不自动重试，isRetryable 仅为后续策略提供分类提示。
-- 当前请求包含 messages 和可选 tools schema；生成参数和流式能力后续加入。
+- 当前请求包含 messages 和可选 tools schema；流式额外设置 stream=true 与可选 stream_options。其他生成参数后续加入。
 
 CLI 用法（CMD/PowerShell）：
 
@@ -1012,7 +1016,8 @@ Main.main(args)
 
 ```java
 interface LlmClient {
-    LlmResponse generate(LlmRequest request); // 当前接口，流式/取消接口后续扩展
+    LlmResponse generate(LlmRequest request); // 非流式完整结果，标题采用此路径
+    LlmResponse generateStream(LlmRequest request, Consumer<String> onText); // 正文增量 + 完整结果；默认实现回退 generate
 }
 
 interface Tool {
@@ -1040,7 +1045,7 @@ interface SessionStore {
 2. 按 SSE 事件边界收集 data 行，支持事件分片和多行 data。
 3. 解析文本 delta；tool_calls 按索引组装 name 和 arguments。
 4. 只有完整响应通过检查后，才执行工具。部分 JSON 参数不会直接执行。
-5. 明确 finish_reason、正常终止和提前 EOF 的处理策略。服务商差异通过适配或配置显式处理。
+5. 同时要求 finish_reason 和 [DONE]；提前 EOF 视为协议错误，不执行该响应的工具。服务商差异通过适配或配置显式处理。
 6. 回调输出文本增量，返回值保留完整文本与工具调用；请求结束关闭流。
 
 初期只支持一种兼容 Chat Completions 的请求格式。兼容不代表所有提供商行为相同，新增提供商时补充协议样例。
@@ -1382,7 +1387,7 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 
 ## 12. 开发路线与验收标准
 
-> 当前：非流式对话、六个文件工具的 Agent 循环、完整工具对话保存/恢复、工作区选择和标题已完成。交互审批与 ReAct/Plan 已接入；SSE、命令工具、审计与执行中恢复继续推进。
+> 当前：普通/流式对话、六个文件工具与命令工具的 Agent 循环、完整工具对话保存/恢复、工作区选择和标题已完成。交互审批与 ReAct/Plan 已接入；持久审计与执行中恢复继续推进。
 
 ### M0：工程骨架
 
@@ -1411,10 +1416,10 @@ Remove-Item Env:CODEY_ACTIVE_PROFILE
 - [x] 连续两轮保持历史顺序，使用本地接口验证交互 JAR。
 - [ ] 使用真实平台配置验证非流式调用与提供商实际兼容性。
 - [x] 支持 /model、/help、/list model 与最后选择默认，切换在任务输入边界生效。
-- [ ] 流式输出接通后验证最终文本与流式展示一致。
-- [ ] 测试多行 SSE、拆分参数、正常结束、提前 EOF，并补充流式错误和超时场景。
+- [x] 流式输出接通后验证最终文本与流式展示一致。
+- [x] 测试多行 SSE、拆分参数、正常结束、提前 EOF，并补充流式错误和超时场景。
 - [ ] 支持取消并关闭响应流；日志不输出 API Key。
-- [ ] 加入流式能力后更新独立启动验证。
+- [x] 加入流式能力后更新独立启动验证。
 
 产出证据：脱敏请求/响应、流式样例、协议测试结果。面试：HTTP、SSE、超时、适配。
 
@@ -1454,6 +1459,8 @@ write_file、edit_file、权限审批与 ReAct/Plan 已实现；继续加入 exe
 产出证据：修改 diff、失败/成功测试记录、最终 AgentResult。面试：进程管理、副作用、完成判定。
 
 ### M4：上下文工程
+
+- [x] 按供应商和模型 ID 配置最大上下文，切换时加载并显示；未知值明确标识。
 
 统一 ContextBuilder，加入规则、历史、工具输出预算和摘要。规则约定文件名及优先级在本阶段确定。
 
@@ -1978,9 +1985,9 @@ ConsoleApprovalHandler 复用 ConsoleInput，仅明确 y/yes 批准，其他输�
 
 实际命令 `/permissions [ask|auto|full|revoke]`、`/mode [react|plan]`、`/status` 均已接入命令目录与参数补全；无参数命令在交互终端显示选择输入，在管道仅显示当前状态。multi 明确未启用。PermissionSettings 从相同配置目录的 .env 和环境读取 CODEY_PERMISSION_MODE（默认 ask）与 CODEY_ALLOW_PIPED_APPROVALS（默认 false）；无原生交互终端且未显式开启管道审批时，不读取下一条聊天作为批准。显式开启管道审批后，调用方负责按交互顺序提供 y/n。
 
-RuntimeStatus 保存模式、模型及上次响应 promptTokens，缺失为未知；StatusRenderer 按终端显示列宽对齐并转义控制字符，窄屏优先保留模式。ConsoleInput 在原生终端用 JLine Status 显示底栏，管道显示普通单行；响应后更新，关闭时移除。当前没有模型窗口配置或精确请求前估算，右侧标注“上次输入 ... tok / 上限 ?”，不是当前上下文占用、压缩阈值或累计费用。鼠标菜单、统一事件总线和 RunCoordinator 抽象未提前实现。
+RuntimeStatus 保存模式、模型及上次响应 promptTokens，缺失为未知；StatusRenderer 按终端显示列宽对齐并转义控制字符，窄屏优先保留模式。ConsoleInput 在原生终端用 JLine Status 显示底栏，管道显示普通单行；响应后更新，关闭时移除。模型窗口现已通过 models.json 配置；精确请求前估算仍未实现。右侧标注“上次输入 ... tok / 上限 ...”，未配置上限为 ?，不是当前上下文占用、压缩阈值或累计费用。鼠标菜单、统一事件总线和 RunCoordinator 抽象未提前实现。
 
-终端展示通过 `cli/ConsoleTheme` 集中管理，ConsoleInput 配置输入分隔线、用户/命令高亮与候选选中样式；ChatCli 展示回答，ConsoleApprovalHandler 展示黄色审批提示，SessionLauncher 使用同一主题展示帮助与错误。DebugPrinter 只产生 REQUEST/TOOL/ERROR 三类简洁进度，由 ConsoleInput 注入的接收器决定颜色和缩进，AgentLoop 不依赖终端库。黄色“思考中 · 等待模型响应”是请求状态，无推理正文、动画或 SSE。
+终端展示通过 `cli/ConsoleTheme` 集中管理，ConsoleInput 配置输入分隔线、用户/命令高亮与候选选中样式；ChatCli 展示回答，ConsoleApprovalHandler 展示黄色审批提示，SessionLauncher 使用同一主题展示帮助与错误。DebugPrinter 只产生 REQUEST/TOOL/ERROR 三类简洁进度，由 ConsoleInput 注入的接收器决定颜色和缩进，AgentLoop 不依赖终端库。黄色“思考中 · 等待模型响应”是请求状态，不展示推理正文或等待动画；模型正文由 ConsoleStreamOutput 随 SSE 片段即时显示。
 
 StatusRenderer.styled 使用属性串排版并保留颜色：react 青色、plan 紫色、ask 黄、auto 绿、full 红，模型青色、已知 token 紫色、未知量灰色。底栏左侧留白，宽度不足先压缩模型名、再使用简短用量标签，极窄窗口只保留模式；按显示列而不是 UTF-16 长度裁剪。颜色/边框不写入模型上下文或会话，NO_COLOR 关闭主题着色，非交互输出保留旧文本协议。模型正文在着色展示时转义 ANSI/控制序列并保留完整文本、缩进和换行；这是展示处理，不修改已提交消息。
 
@@ -2080,7 +2087,7 @@ OpenAI 官方文档将 sandbox（实际文件/网络限制）、approval policy�
 ### 实施进度与后续边界
 
 1. 已完成现有工具检查、逐文件人工审批及会话授权、拒绝回填、有限预览、模式切换与终端状态；默认 ReAct + ask，只读自动执行。
-2. 已接规则版独立审查接口和测试；模型审查器、持久审计、精确上下文计数/窗口配置后续实现。
+2. 已接规则版独立审查接口和测试；模型审查器、持久审计、精确上下文计数后续实现，窗口配置已接入 models.json。
 3. execute_command 已接入逐次审批、超时与进程结果；联网和 MCP 各自实现时接入统一策略；Shell 子进程访问范围要靠容器/操作系统沙箱等实际约束，设置 ProcessBuilder.directory() 不限制文件或网络访问，也不能只靠命令字符串黑名单。
 
 验收至少覆盖：默认 ReAct + ask；普通只读不询问；ask 首次修改 A 文件需确认，同会话后续写/编辑/删除 A 复用展示过的授权，修改 B 需另确认；需审操作先审批再落盘；拒绝/EOF/中断/未知操作不产生副作用；批准范围不串文件/操作类别/会话；预览与实际修改一致；等待首次审批时原文件变化重新确认；规则禁止与 PLAN 只读约束在 full 下仍有效；后续敏感读取策略应覆盖 grep_code 等入口（当前尚未实现）；auto 审查失败转人工且不默认允许；恢复不重放批准或写入；网络/删除专用工具和进程沙箱未实现时如实展示能力范围，execute_command 的进程访问范围单独说明。
@@ -2102,6 +2109,8 @@ OpenAI 官方文档将 sandbox（实际文件/网络限制）、approval policy�
 ### 功能与模块
 
 execute_command 是进程工具，用于运行编译、测试及诊断程序。程序定位、进程控制、工具协议和权限协调分别处理，工具内部不调用 LLM、不自动编辑代码或重试。
+
+2026-10-24 补充调用策略：只有已确认的项目任务且确需运行程序时才使用；先参考项目配置、结构或已有脚本，目录绑定不等于项目。独立 HTML/CSS/JS 等单文件任务使用文件工具完成修改与静态检查，“测试一下”不触发运行时探测、安装、构建项目初始化或服务器启动。项目内修改单个文件仍使用项目已有验证方式，任务分类不按文件数量判断。静态检查不冒充运行测试或浏览器验证；COMMAND_NOT_FOUND 根据已有证据处理，不连续猜测 node/python/系统解释器，系统程序也未找到时报告环境/程序查找问题。指导同时写入工具 description 与 base.md，由模型选择调用；本次未增加 Java 项目识别或项目类型硬拦截，不把提示词约束描述为权限保证。
 
 | 文件 | 职责 |
 |---|---|
@@ -2190,4 +2199,141 @@ ask/auto 下每个命令都人工审批，不因名字看似只读而自动放�
 
 测试通过真实隔离 Java 子进程覆盖正常/非零退出、stdout/stderr、大日志、EOF、超时后代清理、中断释放、Windows argv/批处理、审批/拒绝/PLAN/NONE、参数冻结、目录/程序变化和最小预算；AgentLoop 替身验证非零结果按原 callId 回填后进入下一轮。配置测试使用临时 .env，CLI 的生产工具注册另用本地 HTTP 替身验证，不需要真实厂商凭证。历史会话保留原 system 快照，新 base.md 的命令指导在新会话生效，工具定义仍由当前 Registry 提供。
 
-最新验证：完整 `mvn verify` 为 577 项，失败/错误/跳过均为 0。命令阶段新增 32 项；本机 Windows + JDK 17 的 argv、批处理、超时和中断用真实隔离子进程验证。另通过 6 组本地 HTTP 生产 JAR 场景，ask/auto 各两次实际 `mvn --version` 均逐次批准，结果和历史回填正常；验证 Java 非零退出、管道审批不可用不误读下一条问题、PLAN 强制拦截和无工作区隐藏工具。Maven 版本检查不构建用户项目、不下载依赖，所有会话/配置/工作区隔离，不使用真实厂商凭证。
+命令阶段验证：当时完整 `mvn verify` 为 577 项，失败/错误/跳过均为 0。命令阶段新增 32 项；本机 Windows + JDK 17 的 argv、批处理、超时和中断用真实隔离子进程验证。另通过 6 组本地 HTTP 生产 JAR 场景，ask/auto 各两次实际 `mvn --version` 均逐次批准，结果和历史回填正常；验证 Java 非零退出、管道审批不可用不误读下一条问题、PLAN 强制拦截和无工作区隐藏工具。Maven 版本检查不构建用户项目、不下载依赖，所有会话/配置/工作区隔离，不使用真实厂商凭证。
+
+
+<a id="streaming"></a>
+
+## 20. SSE 流式输出（2026-10-24 已实现）
+
+### 功能与代码职责
+
+聊天与 --prompt 默认使用真正的 HTTP 流式响应。正文分片一到就打印并 flush，不等待整段回复后模拟打字。每轮仍返回完整 LlmResponse，工具调用与历史保存保持原有契约。首版只展示 content，不展示 reasoning_content，也不回显提示词、原始 data 帧或工具参数。
+
+| 文件 | 职责 |
+|---|---|
+| config/StreamingSettings | 加载 enabled/includeUsage，全局生效，默认 true/true |
+| llm/LlmClient | generate 保留非流式；generateStream(request, Consumer) 增加正文展示回调并返回完整响应，默认实现兼容旧客户端 |
+| llm/ChatCompletionsClient | 编码 stream、使用 InputStream、管理响应头与正文总超时、取消读取、完整 JSON 兼容与最终 decode 校验 |
+| llm/ChatStreamDecoder | 解析 SSE 帧，聚合 content/tool_calls/finish_reason/usage，返回统一完整响应结构 |
+| agent/AgentStreamListener | 每轮开始、正文增量、每轮结束的轻量展示接口；结束回调本身不代表任务成功 |
+| agent/AgentLoop | 新增带 listener 的 run 重载，传递正文，整组工具仍在响应完成并校验后执行 |
+| cli/ConsoleStreamOutput | 懒加载回答标签、增量打印、控制字符转义、跨片段 Unicode/CRLF、段落收尾与底栏刷新 |
+| cli/ChatCli、SessionLauncher、Main | 注入配置、转发流式调用、避免重复打印最终全文，完成后提交历史；自动标题继续使用 generate |
+
+### 实际调用流程
+
+```text
+Main → StreamingSettings.load → ChatCompletionsClient(config, settings)
+  → SessionLauncher 的客户端包装器：清空上次 token → 转发 generateStream
+  → ChatCli / --prompt 创建 ConsoleStreamOutput → AgentLoop.run(..., listener)
+  → 每轮 onResponseStart → generateStream：请求 stream=true
+  → 等待响应头 → 读取线程消费 InputStream → SSE 帧 → content delta
+  → listener.onText → 控制台立即显示并 flush
+  → 完整 finish_reason + [DONE] → 聚合并 decode → LlmResponse
+  → 记录实际 usage → onResponseEnd 关闭正文段落并刷新底栏
+  → AgentLoop 校验整组 tool_calls → 原有审批/执行/回填 → 下一轮
+  → 非空最终回答 → 返回 AgentResult → 完整历史提交和本地保存
+```
+
+原三参数 AgentLoop.run 与显式 LlmClient.generate 保留非流式行为，方便原测试/库调用；CLI 两个入口选择新重载。标题生成走 generate，结果只用于标题，不流入聊天正文。最终回答已经流式显示时不再次打印整段。
+
+### 协议与工具参数
+
+按空行切分 SSE 事件，支持 LF/CRLF/CR、BOM、注释/心跳和多行 data。JSON 从 choices[0].delta 获取正文，usage 可由 choices=[] 的独立帧返回。tool_calls 按 index 分组，name/arguments 逐片追加，允许多个调用交错；ID 一经指定保持一致。处理依据为 [Chat Completions 流式事件定义](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events) 与 [Function calling 流式参数示例](https://developers.openai.com/api/docs/guides/function-calling)。
+
+当前仅支持单候选 index=0，每轮最多 16 个工具，工具索引需从 0 连续，函数名最多 64 个 UTF-16 单元，参数最多 64 Ki 单元。单 SSE 行/事件上限 128 Ki 单元，整个流上限 4 Mi 单元（含协议文本），防止坏帧无限增长。正文聚合后校验 Unicode；UTF-8 字节解码使用严格校验。
+
+必须收到非空 finish_reason 和 [DONE] 才返回完整响应；仅收到结束原因就断开仍按 INVALID_RESPONSE。聚合后复用原有 decode 校验 JSON 对象参数、工具 ID、角色与用量，再由 AgentLoop 校验整组结束状态与重复 ID。完整流之前不进入 ToolExecutor，即使 full 模式也不执行半截调用。整组有一项参数损坏时该组均不执行。
+
+### 超时、异常和持久化边界
+
+同一配置 timeout 覆盖响应头和整个正文流，持续发送心跳也不延长总时间。读取在线程中进行，主调用限时等待；失败时取消任务、关闭 InputStream、恢复中断标志，并通过共享锁关闭回调交付，避免错误提示后出现晚到片段。HTTP 错误保留状态码，异常不携带厂商原始正文或密钥。不自动重试。
+
+已显示正文属于实时预览，终端文字不会撤回。中途断流、格式错误或超时时收尾段落并标注“本轮未保存”，当前任务消息仍不提交；重新提问可继续使用此前成功历史。此前已完成的工具副作用保持原有语义，不因为后续流中断而自动回滚。只有完整最终回答和配对工具消息组提交后才保存会话。
+
+### 配置、展示与兼容性
+
+```dotenv
+CODEY_LLM_STREAM=true
+CODEY_LLM_STREAM_INCLUDE_USAGE=true
+```
+
+与现有配置共用 CODEY_CONFIG_DIR，环境覆盖 .env，缺省 true，显式空值或非 true/false 报 ConfigException。两项为全局启动设置，修改后重启，不随 /model 重载；无需修改每个供应商配置。流式可用于新旧会话，历史消息格式不变。
+
+默认请求 stream_options.include_usage；平台拒绝该字段时关闭 INCLUDE_USAGE。用量仅在完整响应后更新；缺失显示 ?，不靠字符数冒充 token，不表示当前上下文占用。平台不支持 SSE 时关闭 STREAM，使用原非流式协议。平台忽略 stream=true 而返回完整 JSON 时，解析同一响应体并回调一次，不重复发请求；此情况没有首片提前显示的效果。真实厂商的方言仍需各自验证。
+
+流式回答标签沿用绿色，正文使用终端默认前景色；首版不实现逐片 Markdown 高亮或推理正文。ConsoleStreamOutput 只保留待处理代理对、CRLF 与段落状态，完整文本由 LLM 聚合；展示转义控制字符不会改变保存的消息。管道和 NO_COLOR 保持纯文本。
+
+### 验证
+
+完整 mvn verify：608 项，失败/错误/跳过均为 0。其中新增 31 项流式测试，覆盖首片到达时序、中文/emoji 字节和字符分片、CR-only/CRLF、多行 SSE、交错工具参数、usage、缺少 finish_reason/[DONE]、无效第二项工具参数、HTTP 错误、超时、中断、JSON 兼容、无重复打印和会话保存。
+
+生产 JAR 另通过 8 组隔离本地 HTTP 验证：--prompt 首片提前可见；工具调用后继续对话与完整保存；断流预览不入历史；关闭 SSE；关闭 usage；自动标题仍静默非流式；超时后无晚到正文且下一问正常；full 下未完整的 write_file 流不产生文件副作用。全部使用临时配置、工作区与会话，无真实厂商请求或凭证。
+
+
+<a id="model-capacity"></a>
+
+## 21. 模型上下文容量配置与加载（2026-10-26 已实现）
+
+### 功能与边界
+
+这是上下文模块的第一步，仅提供每个模型的最大上下文元数据。未实现请求前 Token 估算、输出预留、输入预算校验、压缩阈值或自动摘要。当前完整历史继续按原流程发送；配置容量不保证请求能被远端接受，也不改变 HTTP 请求内容、权限或消息持久化格式。
+
+同一个 Profile 的不同模型独立配置，不同 Profile 下相同模型 ID 也相互独立。模型选择仍由 .env、启动覆盖与最后选择决定；models.json 不注册模型，不替代 API Key、BASE_URL 或 MODEL 列表，不向模型提问其容量，也未查询厂商元数据。
+
+### 文件与职责
+
+| 文件 | 作用 |
+|---|---|
+| config/ModelCapabilities.java | 不可变 record，contextWindow 为可空 Long；null=未知，已知值为正整数 token 数；source 标识本地配置 |
+| config/ModelCapabilitiesLoader.java | 共用 ConfigLoader.configurationDirectory，读取 models.json，校验整份文件并按 ProfileSelection 查找 |
+| models.example.json | 两个示例模型的模板，数值只是格式演示；实际文件 models.json 加入 Git 忽略 |
+| cli/Main.java | --check-config 展示；--prompt 加载/校验；聊天模型工厂在选择时加载容量 |
+| cli/SessionLauncher.java | ModelChoice 携带容量，进入/恢复/切换模型更新状态；三参数旧构造兼容为未知 |
+| cli/RuntimeStatus.java、StatusRenderer.java | 保留上次实际输入 token，新增配置上限与来源；已知容量青色，未知灰色 |
+
+### 格式与匹配
+
+配置文件位于环境 CODEY_CONFIG_DIR 指定目录，否则为启动目录；工作区不参与查找。配置值仅从 models.json 读取，当前没有容量的 .env 覆盖字段。配置示例中的名称与数值均需换成真实路由规格：
+
+```json
+{
+  "models": [
+    {"profile": "example_provider", "modelId": "EXAMPLE_MODEL_SMALL", "contextWindow": 128000},
+    {"profile": "example_provider", "modelId": "EXAMPLE_MODEL_LARGE", "contextWindow": 1000000}
+  ]
+}
+```
+
+Profile 使用现有别名规则并转小写，modelId 使用现有 ID 规则、剔除首尾空白并保留大小写；斜杠、冒号等按既有选择规则处理。旧单 Profile 配置的别名为 default。按 profile/modelId 二元键精确匹配，不对子串或厂商名称推断窗口。
+
+文件可提前登记未来模型，但 API 可选模型仍必须加入 .env 的 MODEL 列表。文件不存在、models=[] 或无匹配项返回 unknown，原有配置继续工作；存在文件时严格验证所有条目，未选中条目的错误也需修复。顶层只接受 models 数组，每项只接受 profile/modelId/contextWindow，未知字段、重复 JSON 键、归一化后重复的模型键、尾随 JSON、空标识、非整数、非正数和 Long 越界均报 ConfigException。首版未接入 maxOutputTokens 字段。
+
+文件最多 1 MiB、最多 1024 项，拒绝目录及链接等异常文件；有界读取，异常说明不带文件正文、填入值或底层 Jackson 异常。容量只校验合法整数范围，不宣称校验了平台真实规格；总窗口、最大输入及最大输出的差异后续接能力查询时归一化。
+
+### 调用流程与更新
+
+```text
+Main 模型工厂
+  → ConfigLoader.loadProfiles → activeProfile + activeConfig.model
+  → ModelCapabilitiesLoader.load(startup, environment, profile, modelId)
+  → configurationDirectory/models.json → 校验全部条目 → 精确查找/unknown
+  → ModelChoice(profile, chatClient, titleClient, capabilities)
+  → SessionLauncher 成功切换/恢复 → RuntimeStatus.model(profile, capabilities)
+  → 清除旧输入计数 → /status 与底栏展示新上限
+```
+
+每次 --check-config、--prompt 或模型工厂调用均重新加载文件；进入/恢复会话和 /model（包括重选同一模型）都会走模型工厂。原会话中的已加载值保持到下一次选择，没有文件监听；编辑后重选或重启。--list-models 和会话列表仍可用于浏览，不额外校验此文件。容量文件损坏时切换失败，现有模型、用量、容量和历史保留；恢复会话按当前文件重新取值，不把旧窗口锁定到快照。
+
+--check-config 在本地打印配置上限、来源和“预算尚未启用”说明，无模型 HTTP 请求。--prompt 只校验和加载，不增加正文/底栏，不启用按容量阻断。聊天 /status 显示“上次输入”与模型上限，并明确容量来源和未接入预算保护。上次实际输入不是本次估算、累计 token 或使用百分比。
+
+### 后续接入
+
+后续 ContextBuilder 读取选中模型容量，再结合输出预留、安全余量计算可用输入预算和触发水位；TokenEstimator 提供估算与分类。未知容量不能冒充真实窗口；输出上限、供应商能力发现及自动摘要在后续阶段逐项接入。当前不新增 ContextBuilder 空壳或改变原始会话提交边界。
+
+### 验证
+
+完整 mvn verify：640 项通过，失败/错误/跳过均为 0。本阶段新增 32 项测试，覆盖同供应商多模型、跨供应商同名模型、ID 大小写和斜杠、旧 default 别名、共享目录、缺失/空文件内容/未匹配、重新加载、重复键与字段拼写、非正整数和越界、异常 UTF-8/文件大小/条目数、目录错误、脱敏、模型切换与恢复、失败保留旧状态、已知容量底栏宽度/颜色。CLI 使用真实本地会话库与模型替身，原有消息请求和保存不变。
+
+生产 JAR 另通过 6 组隔离本地 HTTP/SSE 验证：--check-config 无 HTTP；同供应商不同容量与跨供应商未知；实际聊天切换、SSE 与历史保存；恢复时加载当前配置且不重放模型调用；错误文件在 --check-config/--prompt 入口报配置错误且不泄露正文；容量值当前不启用预算保护，缺文件仍回退未知。使用临时 .env、数据目录与容量文件，不读取真实用户配置或使用厂商凭证。

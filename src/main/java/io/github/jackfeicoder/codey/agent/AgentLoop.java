@@ -55,13 +55,18 @@ public final class AgentLoop {
 
     /** 在独立消息副本上执行，不修改 Session；调用方只提交正常完成结果。 */
     public AgentResult run(Session session, String input, ToolContext context) {
+        return run(session, input, context, null);
+    }
+
+    /** 可选增量展示入口；原入口继续走非流式，便于库调用与已有测试复用。 */
+    public AgentResult run(Session session, String input, ToolContext context, AgentStreamListener stream) {
         Objects.requireNonNull(session, "session");
         Objects.requireNonNull(context, "context");
-        return execute(session, input, context); // 最终回答、错误和预算提示继续由 CLI 展示。
+        return execute(session, input, context, stream); // 最终回答、错误和预算提示继续由 CLI 展示。
     }
 
     /** 实际循环使用请求副本，打印的数据不加入消息历史。 */
-    private AgentResult execute(Session session, String input, ToolContext context) {
+    private AgentResult execute(Session session, String input, ToolContext context, AgentStreamListener stream) {
         int historySize = session.messages().size(); // 返回结果只截取新增的一轮，旧历史不重复保存。
         var messages = new ArrayList<>(session.messagesFor(input));
         Set<String> callIds = new HashSet<>(); // 同一任务内跨步骤检测重复调用 ID。
@@ -86,7 +91,13 @@ public final class AgentLoop {
             }
             LlmRequest request = new LlmRequest(requestMessages, registry.definitions(context), !finalRound);
             debug.round(step);
-            LlmResponse response = client.generate(request);
+            LlmResponse response;
+            if (stream == null) response = client.generate(request);
+            else {
+                stream.onResponseStart(step);
+                try { response = client.generateStream(request, stream::onText); }
+                finally { stream.onResponseEnd(step); }
+            }
             checkInterrupted();
             if (response == null) throw invalid("Model returned no response.");
             if (response.toolCalls().isEmpty()) {

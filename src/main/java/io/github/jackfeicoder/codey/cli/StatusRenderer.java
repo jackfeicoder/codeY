@@ -27,11 +27,12 @@ public final class StatusRenderer {
         };
         left.style(ConsoleTheme.style(permissionTone)).append(status.permissionMode().value());
         String count = status.lastInputTokens() == null ? "?" : status.lastInputTokens().toString();
+        String capacity = status.contextWindowText();
         int budget = Math.max(0, columns - 1 - left.columnLength() - 2);
-        boolean compact = budget < new AttributedString("上次输入 " + count + " tok / 上限 ?").columnLength() + 7;
+        boolean compact = budget < new AttributedString("上次输入 " + count + " tok / 上限 " + capacity).columnLength() + 7;
         String prefix = compact ? "上次 " : "上次输入 ";
-        String suffix = compact ? " tok / ?" : " tok / 上限 ?";
-        int modelBudget = Math.max(0, budget - new AttributedString(prefix + count + suffix).columnLength() - 3);
+        String suffix = compact ? " tok / " : " tok / 上限 ";
+        int modelBudget = Math.max(0, budget - new AttributedString(prefix + count + suffix + capacity).columnLength() - 3);
         AttributedString model = new AttributedString(ConsoleApprovalHandler.clean(status.model()));
         if (model.columnLength() > modelBudget) {
             model = modelBudget < 2 ? AttributedString.EMPTY : new AttributedStringBuilder()
@@ -43,7 +44,9 @@ public final class StatusRenderer {
                 .style(status.lastInputTokens() == null ? ConsoleTheme.style(ConsoleTheme.Tone.MUTED)
                         : AttributedStyle.DEFAULT.foreground(AttributedStyle.MAGENTA).bold())
                 .append(count)
-                .style(ConsoleTheme.style(ConsoleTheme.Tone.MUTED)).append(suffix);
+                .style(ConsoleTheme.style(ConsoleTheme.Tone.MUTED)).append(suffix)
+                .style(ConsoleTheme.style(status.contextWindow() == null ? ConsoleTheme.Tone.MUTED : ConsoleTheme.Tone.COMMAND))
+                .append(capacity);
         return layout(left.toAttributedString(), right.toAttributedString(), columns);
     }
 

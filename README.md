@@ -6,13 +6,13 @@
 
 ## 当前进度
 
-当前已完成多模型配置、消息与基础提示词、非流式调用、本地会话保存/恢复、六个文件工具、execute_command 本地命令、Agent 循环、权限审批及 ReAct/Plan 切换。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。SSE、专用网络/删除工具、进程沙箱、多 Agent、长期记忆和 MCP 尚待实现；验证使用本地模拟模型，真实厂商兼容性需另行验证。
+当前已完成多模型配置、消息与基础提示词、普通与 SSE 流式调用、本地会话保存/恢复、六个文件工具、execute_command 本地命令、Agent 循环、权限审批及 ReAct/Plan 切换。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。专用网络/删除工具、进程沙箱、多 Agent、长期记忆和 MCP 尚待实现；验证使用本地模拟模型，真实厂商兼容性需另行验证。
 
 工作区会话已注册 `list_files`、`search_file`、`grep_code` 与 `read_file`：模型可浏览目录、按名称定位或按正文关键词搜索，再读取内容。工具描述通过结构化 `tools` 字段发送，由 AgentLoop 执行并回填结果，继续请求最终回答。默认每个任务最多请求模型 20 次，最后一次禁用工具用于收尾；完成的工具消息组随会话保存，恢复时不自动重放。说明见 [正文搜索](docs/architecture.md#grep-code)、[文件定位](docs/architecture.md#search-file)、[目录工具](docs/architecture.md#list-files)、[读文件工具](docs/architecture.md#read-file) 和 [Agent 循环](docs/architecture.md#agent-loop)。
 
-另已注册 `write_file`（新建/完整覆盖）和 `edit_file`（精确局部替换）。默认 `react + ask`，只读自动执行，每个文件首次实际修改前确认，成功后本会话复用该文件授权。`/permissions ask|auto|full` 切换权限，`/permissions revoke` 撤销授权；`/mode react|plan` 切换工作模式，PLAN 在 full 下仍保持只读。原生终端底栏显示模式/权限及模型/上次请求输入 token，`/status` 查看详情。上下文上限尚未知，不将上次 token 当作当前占用或累计消耗。一次工具写入成功后，后续模型失败或消息未保存不会自动回滚文件。实现见 [写入和编辑](#file-writes)、[权限模块](#module-policy)。
+另已注册 `write_file`（新建/完整覆盖）和 `edit_file`（精确局部替换）。默认 `react + ask`，只读自动执行，每个文件首次实际修改前确认，成功后本会话复用该文件授权。`/permissions ask|auto|full` 切换权限，`/permissions revoke` 撤销授权；`/mode react|plan` 切换工作模式，PLAN 在 full 下仍保持只读。原生终端底栏显示模式/权限及模型/上次请求输入 token，`/status` 查看详情。上下文上限可按模型配置，未配置显示 ?；上次 token 仍表示上次实际输入，当前占用估算和预算保护尚未接入。一次工具写入成功后，后续模型失败或消息未保存不会自动回滚文件。实现见 [写入和编辑](#file-writes)、[权限模块](#module-policy)。
 
-控制台显示简洁执行进度：调用轮次、工具名称和涉及的文件，最后展示模型回答；工具失败时补充错误码。聊天中输入 `exit` 返回会话列表，列表中 `exit` 退出；`/exit` 随时退出程序。
+控制台显示简洁执行进度：调用轮次、工具名称和涉及的文件，模型正文随 SSE 分片到达即时显示；工具失败时补充错误码。流结束并校验完整响应后才执行工具，完整任务成功后保存历史，最终回答不会重复打印。聊天中输入 `exit` 返回会话列表，列表中 `exit` 退出；`/exit` 随时退出程序。
 
 `/help` 查看全部交互命令，`/list model` 查看供应商与各模型 ID，`/model 供应商 模型ID` 切换当前模型并保留历史；`/model 供应商` 选择该供应商配置的第一个模型。交互终端支持 Tab 补全命令、供应商与模型，多个候选可用上下键选择。默认采用最后一次成功选择的供应商与模型，重启后继续使用；首次无记录时使用 `.env` 默认值，`--profile` 可覆盖启动选择。
 
@@ -26,12 +26,12 @@
 | [工作区模块](#module-workspace) | 已实现：可选目录绑定与路径解析 |
 | [提示词模块](#module-prompt) | 已实现：基础提示词资源加载 |
 | [消息模型模块](#module-message) | 已实现：四种消息角色与工具调用数据 |
-| [模型对话模块](#module-llm) | 已实现：非流式 Chat Completions |
+| [模型对话模块](#module-llm) | 已实现：Chat Completions 普通请求与 SSE 正文/工具分片聚合 |
 | [CLI 交互模块](#module-cli) | 已实现：启动选择、输入、分页与会话命令 |
 | [会话管理模块](#module-session) | 已实现：内存历史、本地保存/恢复与标题 |
 | [工具模块](#module-tool) | 已实现六个文件工具及 execute_command，已接入模型、审批和 CLI |
 | [Agent 执行模块](#module-agent) | 已实现：工具循环、轮次预算、中断与完成状态 |
-| [上下文模块](#module-context) | 待实现：请求组织、预算与压缩 |
+| [上下文模块](#module-context) | 已实现模型容量配置与加载；统一组装、Token 估算、预算与压缩待实现 |
 | [记忆模块](#module-memory) | 待实现：长期事实保存与召回 |
 | [MCP 模块](#module-mcp) | 待实现：外部工具协议与适配 |
 | [权限模块](#module-policy) | 已实现 ask/规则 auto/full、逐文件审批、撤销和拒绝拦截；审计及进程沙箱待实现 |
@@ -49,7 +49,7 @@
 
 ## 架构概览
 
-以下为目标架构。当前实现了配置、消息、内存 Session、本地 JSON 快照、会话恢复和 CLI 非流式对话；图中的 Agent、工具执行事件及长期记忆按路线逐步实现。
+以下为目标架构。当前实现了配置、消息、Session 本地保存/恢复、Agent 工具循环、权限审批与 CLI 流式对话；图中的 ContextBuilder、长期记忆、MCP 和完整执行事件按路线逐步实现。
 
 ```mermaid
 flowchart LR
@@ -95,12 +95,13 @@ Main → 注册工具 / 加载会话设置 → SessionLauncher 展示历史
   → 新建/恢复：选择工作区与模型配置，创建或恢复 SessionService
   → 用户问题 → ChatCli.answer → AgentLoop.run
   → Session.messagesFor + Registry.definitions → LlmRequest(messages, tools)
-  → ChatCompletionsClient.generate → 工具请求：Executor 执行 / 回填 → 再请求
+  → ChatCompletionsClient.generateStream → 正文增量展示 / 完整工具请求聚合
+  → 整体响应校验 → 工具请求：Executor 审批 / 执行 / 回填 → 再请求
   → 最终回答：Session.completeAgentTurn → SessionService.captureTurn/save
   → 首轮无手动标题：独立生成标题或保留首问摘要，再保存
 ```
 
-以上是当前已接通的只读工具闭环。下面是后续加入修改、验证、流式与上下文预算后的目标流程：
+以上已接通文件读写、命令执行和流式展示。加入上下文预算与验收证据后，目标流程为：
 
 1. 用户输入任务，创建独立的运行上下文并追加用户消息。
 2. 构建本轮上下文，加入规则、历史、相关记忆和工具定义。
@@ -109,7 +110,7 @@ Main → 注册工具 / 加载会话设置 → SessionLauncher 展示历史
 5. 如果模型返回最终回答，按任务类型检查验收证据；代码修改任务需要约定的编译或测试结果。
 6. 返回完整结果、验证摘要与明确状态：完成、未完成、失败、取消或预算耗尽。
 
-当前工具按顺序执行，会话保存完整文本/工具轮次；流式展示、完整执行事件、上下文筛选和长期记忆后续补充。
+当前正文流式展示，工具按顺序执行，会话保存完整文本/工具轮次；完整执行事件、上下文筛选和长期记忆后续补充。
 
 完整流程图、时序图和恢复策略见 [架构设计](docs/architecture.md)。
 
@@ -137,6 +138,10 @@ Main → 注册工具 / 加载会话设置 → SessionLauncher 展示历史
 | [SessionSettings.java](src/main/java/io/github/jackfeicoder/codey/config/SessionSettings.java) | 加载数据目录、建议工作区、自动标题设置，不保存模型凭证 |
 | [AgentSettings.java](src/main/java/io/github/jackfeicoder/codey/config/AgentSettings.java) | 启动时加载任务模型请求预算与目录工具默认深度，校验范围后由 Main 注入 |
 | [CommandSettings.java](src/main/java/io/github/jackfeicoder/codey/config/CommandSettings.java) | 命令默认/最大超时、输出保留预算及解码字符集，环境覆盖 .env |
+| [StreamingSettings.java](src/main/java/io/github/jackfeicoder/codey/config/StreamingSettings.java) | 加载流式与 usage 兼容开关，默认均为 true，环境覆盖 .env |
+| [ModelCapabilities.java](src/main/java/io/github/jackfeicoder/codey/config/ModelCapabilities.java) | 保存可空的最大上下文 token 数，缺配置表示未知；与密钥和请求分开 |
+| [ModelCapabilitiesLoader.java](src/main/java/io/github/jackfeicoder/codey/config/ModelCapabilitiesLoader.java) | 读取同配置目录 models.json，严格校验后按供应商别名和模型 ID 选择容量 |
+| [models.example.json](models.example.json) | 容量配置模板，别名、ID 和数值均为示例；运行时读取 models.json |
 | [ConfigException.java](src/main/java/io/github/jackfeicoder/codey/config/ConfigException.java) | 表达读取/字段校验错误，供 CLI 展示 |
 | [.env.example](.env.example) | 可填写字段模板；实际运行加载 `.env`，模板不作为有效配置 |
 
@@ -250,8 +255,9 @@ Main / SessionLauncher → PromptLoader.loadBase
 
 | 文件 | 职责 |
 |---|---|
-| [LlmClient.java](src/main/java/io/github/jackfeicoder/codey/llm/LlmClient.java) | 声明 `generate(LlmRequest)`，上层通过接口使用客户端 |
-| [ChatCompletionsClient.java](src/main/java/io/github/jackfeicoder/codey/llm/ChatCompletionsClient.java) | 当前 HTTP/JSON 实现，每个实例绑定一套模型配置 |
+| [LlmClient.java](src/main/java/io/github/jackfeicoder/codey/llm/LlmClient.java) | 声明完整响应 `generate` 与增量展示 `generateStream(request, onText)`，两者均返回完整响应 |
+| [ChatCompletionsClient.java](src/main/java/io/github/jackfeicoder/codey/llm/ChatCompletionsClient.java) | HTTP/JSON/SSE 实现，管理总超时、取消、完整响应校验，每实例绑定一套模型配置 |
+| [ChatStreamDecoder.java](src/main/java/io/github/jackfeicoder/codey/llm/ChatStreamDecoder.java) | 有界读取 SSE 帧，回调正文并按 index 聚合工具参数，验证流结束 |
 | [LlmRequest.java](src/main/java/io/github/jackfeicoder/codey/llm/LlmRequest.java) | 保存不可修改的消息与工具定义列表，拒绝重复名称；单参数构造兼容无工具请求 |
 | [LlmResponse.java](src/main/java/io/github/jackfeicoder/codey/llm/LlmResponse.java) | 保存 assistant 消息、结束原因、TokenUsage，提供文本/工具/截断判断 |
 | [LlmException.java](src/main/java/io/github/jackfeicoder/codey/llm/LlmException.java) | 区分 HTTP、网络、超时、中断、请求/响应格式和模型拒绝等错误 |
@@ -259,15 +265,28 @@ Main / SessionLauncher → PromptLoader.loadBase
 **调用流程**：
 
 ```text
-AgentLoop / SessionTitleGenerator
-  → LlmRequest → LlmClient.generate
-  → encode：model/messages/stream=false/可选 tools → POST BASE_URL/chat/completions
-  → 检查 HTTP 状态 → decode：首个 assistant/finish_reason/usage → LlmResponse
+聊天 / --prompt → AgentLoop → LlmClient.generateStream(request, onText)
+  → encode：stream=true + 可选 stream_options.include_usage → HTTP InputStream
+  → ChatStreamDecoder：正文 delta → ConsoleStreamOutput 即时刷新
+  → finish_reason + [DONE] → 聚合结果 → decode 校验 → 完整 LlmResponse
+  → AgentLoop 再决定执行工具或结束任务 → CLI 保存完整历史
+标题 / 显式 generate → stream=false → 完整 JSON → LlmResponse
 ```
 
-**实现方式与边界**：共享 JDK HttpClient，按认证模式添加 Bearer 头或不添加认证头；默认不跟随重定向。Jackson 显式映射消息与工具调用字段，拒绝重复 JSON 键、尾随内容和不完整工具参数。`sendAsync` 后限时等待完整响应，因此对调用者仍是同步非流式；超时取消 future，中断恢复线程标志。异常不附带原始服务商正文或可能泄露凭证的底层异常。
+**实现方式与边界**：共享 JDK HttpClient，按认证模式添加 Bearer 头或不添加认证头，默认不跟随重定向。Jackson 显式映射消息与工具调用字段，拒绝重复 JSON 键、尾随内容和不完整工具参数。流式方法调用期间逐片回调，返回时仍提供完整文本、工具调用、结束原因与可选用量；线程负责读取响应体，总超时覆盖响应头和完整流。超时/中断关闭流、取消读取并阻止晚到片段继续显示，中断恢复标志。异常不附带原始服务商正文或凭证。
 
-兼容同一协议的服务使用配置选择，无需按厂商名称新建实现；协议差异出现时通过新 `LlmClient` 适配。工具定义显式编码为 `tools[].type/function.name/description/parameters`，无工具时省略字段；普通轮次使用协议默认工具选择，最后一次请求设置 `tool_choice="none"` 用于收尾。生成参数、SSE 和自动重试尚未接入；`isRetryable()` 只是分类提示。Token 用量解析后可通过响应读取，CLI 尚未统一展示或统计。
+工具参数按 index 拼接，允许多个调用交错；完整流和整组调用校验通过后才交给原有执行器，不执行半截参数。无工具时省略 tools；最后一次请求保留 `tool_choice="none"`。正文提前显示不等于任务成功，异常时标注本轮未保存；之前已成功执行的工具副作用仍不回滚。不展示 reasoning_content、工具参数或 SSE 原始数据。
+
+兼容同一协议的服务共用客户端，无需按厂商新建实现；协议差异通过配置或 `LlmClient` 适配。服务忽略 stream 而返回完整 JSON 时解析同一响应，不额外重发。自动标题继续调用非流式 generate，不插入聊天正文。生成参数、自动重试、上下文预算与完整执行事件仍待实现。
+
+**配置与使用**：两项均为全局设置，缺省 true，修改后重启 CodeY；现有多模型配置、历史会话和模型切换照常使用。
+
+```dotenv
+CODEY_LLM_STREAM=true
+CODEY_LLM_STREAM_INCLUDE_USAGE=true
+```
+
+平台拒绝 stream_options 时将第二项设为 false；平台不支持 SSE 时将第一项设为 false。只接受 true/false，未返回用量显示 `?`；底栏在完整响应后更新上次输入 token，不把它当作实时上下文占用。首版流式正文使用终端默认前景色，不做逐片 Markdown 语法着色。协议边界、超时和验收见 [流式实现](docs/architecture.md#streaming)。
 
 <a id="module-cli"></a>
 
@@ -285,6 +304,7 @@ AgentLoop / SessionTitleGenerator
 | [ChatCli.java](src/main/java/io/github/jackfeicoder/codey/cli/ChatCli.java) | `answer()` 调用 AgentLoop、展示状态并提交完整成功轮次；`run()` 保留给内存调用者，生产入口使用 Launcher |
 | [ConsoleInput.java](src/main/java/io/github/jackfeicoder/codey/cli/ConsoleInput.java) | 原生终端使用 JLine 编辑与补全，管道/测试使用 BufferedReader，关闭时恢复终端状态 |
 | [ConsoleTheme.java](src/main/java/io/github/jackfeicoder/codey/cli/ConsoleTheme.java) | 按消息类型统一颜色、回答与命令排版；仅展示时转义控制字符，支持 NO_COLOR 与纯文本管道 |
+| [ConsoleStreamOutput.java](src/main/java/io/github/jackfeicoder/codey/cli/ConsoleStreamOutput.java) | 接收正文增量、即时刷新、跨片段处理 Unicode/换行与控制字符，关闭段落后刷新底栏 |
 | [CommandCatalog.java](src/main/java/io/github/jackfeicoder/codey/cli/CommandCatalog.java) | `/help` 与补全共享命令名称、用法和说明 |
 | [CommandCompleter.java](src/main/java/io/github/jackfeicoder/codey/cli/CommandCompleter.java) | 按输入词位置补全命令、供应商及该供应商下的模型，仅读取本地目录 |
 
@@ -300,7 +320,7 @@ Main 解析参数
 
 **实现方式与边界**：列表模式的普通文本匹配序号、完整标题或唯一 ID 前缀；聊天模式的普通文本就是问题，切换用 `/resume`。最近每批 10 条，分页持有稳定列表快照，`/sessions` 才刷新；重名与前缀冲突展示候选项。查看列表和历史预览不要求模型凭证，准备继续时才校验。交互终端使用 JLine 3.30.17 与 JNI provider，Tab 唯一匹配直接补全，多个匹配进入菜单，方向键或 Tab 选择、Enter 确认，再 Enter 执行。Ctrl+C 取消当前编辑，EOF 保存退出。路径/标题等辅助输入不提示命令，不启用 shell 转义或 `!` 历史展开。管道/IDE 无原生控制台时使用 UTF-8 逐行输入，不启用补全。未知斜杠命令不发模型请求。命令表和启动例子见 [构建与启动](#build-run)。
 
-**终端 UI**：主输入使用分隔线与 `❯` 提示，输入文字青色加粗，斜杠命令紫色；宽窗口右侧提示 Tab/方向键和 `/help`。命令菜单选中项使用青色背景，说明文字灰色，`/permissions`、`/mode` 候选带具体用途；`/help` 按窗口宽度分列或换行。模型等待提示黄色，工具摘要青色并缩进，错误红色；回答标签绿色，正文采用终端默认前景色，Markdown 标题与代码块轻量着色。等待提示仅表示正在请求模型，不展示模型内部推理，也未加入流式输出或动画。
+**终端 UI**：主输入使用分隔线与 `❯` 提示，输入文字青色加粗，斜杠命令紫色；宽窗口右侧提示 Tab/方向键和 `/help`。命令菜单选中项使用青色背景，说明文字灰色，`/permissions`、`/mode` 候选带具体用途；`/help` 按窗口宽度分列或换行。模型等待提示黄色，工具摘要青色并缩进，错误红色；回答标签绿色，正文采用终端默认前景色，流式正文即时显示，完整回答备用渲染器保留 Markdown 标题与代码块轻量着色。等待提示仅表示正在请求模型，不展示模型内部推理或等待动画。
 
 <a id="module-session"></a>
 
@@ -386,6 +406,8 @@ ToolCall → Registry.find → Executor 解析 JSON / 检查工作区
 <a id="execute-command"></a>
 
 **本地命令工具 execute_command**：启动单个程序，用于编译、测试和诊断；返回退出码及 stdout/stderr，不在工具内部自动修复或重试。
+
+**使用策略**：仅在已确认的项目任务中按需调用，先参考项目配置、结构或已有验证脚本；绑定一个目录不等于项目。独立 HTML/CSS/JS 等单文件任务只用文件工具修改和静态检查，用户说“测试一下”也不因此启动命令、安装运行时或创建构建项目。明确区分静态检查与运行/浏览器验证；项目内修改一个文件仍属于项目任务。程序未找到时按已有证据处理，不连续猜测多种运行时。这些指导同时放在工具 description 和 base.md；本次未增加 Java 项目类型识别/硬拦截，现有工作区/PLAN/审批检查继续执行。
 
 ```json
 {"command":"mvn","args":["test"],"workingDirectory":".","timeoutSeconds":60}
@@ -507,6 +529,7 @@ ToolCall("grep_code", {query, path?, filePattern?, caseSensitive?, maxResults?})
 |---|---|
 | [AgentLoop.java](src/main/java/io/github/jackfeicoder/codey/agent/AgentLoop.java) | `run(Session, input, context)` 在历史副本上请求模型、发送定义、校验工具组、顺序执行和回填 |
 | [AgentResult.java](src/main/java/io/github/jackfeicoder/codey/agent/AgentResult.java) | 保存状态、本轮消息、最终响应及模型/工具调用次数；结果列表不可修改 |
+| [AgentStreamListener.java](src/main/java/io/github/jackfeicoder/codey/agent/AgentStreamListener.java) | 定义每轮响应开始/正文增量/结束的展示回调，Agent 无需依赖终端库 |
 | [agent/package-info.java](src/main/java/io/github/jackfeicoder/codey/agent/package-info.java) | 循环包的职责及提交边界 |
 
 **调用流程**：
@@ -514,7 +537,7 @@ ToolCall("grep_code", {query, path?, filePattern?, caseSensitive?, maxResults?})
 ```text
 Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
   → run：Session.messagesFor(input) 获取请求副本
-  → for 每个允许步骤：Registry.definitions(context) → LlmRequest → generate
+  → for 每个允许步骤：Registry.definitions(context) → LlmRequest → generateStream（CLI）/ generate（原接口）
       ├─ 最终文本：COMPLETED → CLI 展示 / Session 提交 / Store 保存
       └─ tool_calls：校验整组 → 追加 assistant → 执行各工具 / 追加各 tool → 下一步
   → 剩余 3/2 次时临时提醒预算；最后一次发送 tool_choice=none，只允许回答
@@ -522,15 +545,43 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
       └─ 服务商仍返回工具：BUDGET_EXHAUSTED → 不执行、不追加该调用、不提交残缺历史
 ```
 
-**实现方式与边界**：默认最多请求模型 20 次，由 `CODEY_MAX_ITERATIONS` 配置，包含最终回答请求；临近上限通过临时 system 副本提醒，最后一次通过协议与执行器双重禁用工具。有效收尾回答与完整工具消息一并保存，CLI 提示预算受限；预算提示本身不进入历史。每个响应最多执行 16 个工具。整组执行前检查结束原因与跨步骤 ID 重复，截断的工具请求不执行。未知工具、业务参数错误与读取失败均回填关联错误，允许模型修正；网络/协议错误和线程中断沿 `LlmException` 退出，原历史保持完整。非空文本长度截断可保存并显示提示。空正文或纯空白且无工具调用时按 INVALID_RESPONSE 报错，不打印空 CodeY 回答、不提交本轮；不自动重试。COMPLETED 表示模型返回非空最终文本，并不证明代码修改或测试验收已完成。暂无线程外工具超时、任务总时间/Token 预算、重复无进展检测、流式或执行中恢复。详见 [循环实现与验收](docs/architecture.md#agent-loop)。
+**实现方式与边界**：默认最多请求模型 20 次，由 `CODEY_MAX_ITERATIONS` 配置，包含最终回答请求；临近上限通过临时 system 副本提醒，最后一次通过协议与执行器双重禁用工具。有效收尾回答与完整工具消息一并保存，CLI 提示预算受限；预算提示本身不进入历史。每个响应最多执行 16 个工具。整组执行前检查结束原因与跨步骤 ID 重复，截断的工具请求不执行。未知工具、业务参数错误与读取失败均回填关联错误，允许模型修正；网络/协议错误和线程中断沿 `LlmException` 退出，原历史保持完整。非空文本长度截断可保存并显示提示。空正文或纯空白且无工具调用时按 INVALID_RESPONSE 报错，不打印空 CodeY 回答、不提交本轮；不自动重试。COMPLETED 表示模型返回非空最终文本，并不证明代码修改或测试验收已完成。暂无线程外工具超时、任务总时间/Token 预算、重复无进展检测或执行中恢复。详见 [循环实现与验收](docs/architecture.md#agent-loop)。
 
 <a id="module-context"></a>
 
-### 10. 上下文模块：context（待实现）
+### 10. 上下文模块：context（先接入模型容量）
 
 **功能（目标）**：组织基础规则、项目指令、历史、工具结果和记忆，控制 Token 预算，筛选与压缩长历史。
 
-**涉及文件**：目前只有 [context/package-info.java](src/main/java/io/github/jackfeicoder/codey/context/package-info.java)，ContextBuilder、预算和压缩类尚未实现。
+**涉及文件**：本包仍只有 [context/package-info.java](src/main/java/io/github/jackfeicoder/codey/context/package-info.java)。首步在配置层新增 ModelCapabilities/ModelCapabilitiesLoader，通过 Main、SessionLauncher.ModelChoice、RuntimeStatus 与 StatusRenderer 接通容量展示；ContextBuilder、Token 估算、预算和压缩尚未实现。
+
+**已实现的容量配置流程**：
+
+```text
+选择模型 → .env 解析实际 Profile + modelId
+  → ModelCapabilitiesLoader 读取 CODEY_CONFIG_DIR/models.json（未设置时用启动目录）
+  → 严格校验全部条目 → 精确匹配 → ModelCapabilities
+  → ModelChoice → RuntimeStatus → /status 与终端底栏
+```
+
+`models.json` 是可选的本地配置，已加入 Git 忽略；仓库提供 models.example.json。配置示例（数字不代表真实模型规格）：
+
+```json
+{
+  "models": [
+    {"profile": "example_provider", "modelId": "EXAMPLE_MODEL_SMALL", "contextWindow": 128000},
+    {"profile": "example_provider", "modelId": "EXAMPLE_MODEL_LARGE", "contextWindow": 1000000}
+  ]
+}
+```
+
+填写时将 profile 对应到 CODEY_PROFILE_NAMES 的别名，modelId 与该供应商 MODEL 列表中的 ID 一致；按网关实际限制填写正整数 token 数。别名忽略大小写，模型 ID 区分大小写，支持斜杠等已有合法格式；同一供应商可多模型，同名模型在不同供应商下互不影响。旧 CODEY_LLM_* 格式使用 profile=default。容量条目不负责注册模型或验证远端能力。
+
+首次配置可以在 CMD 执行 `copy models.example.json models.json`，再修改占位数据；使用共享配置目录时，把文件放在该目录。文件缺失、models 为空或没有匹配条目时显示未知。模型 ID 拼写不匹配也会显示未知，不按名称推测容量。存在文件时严格拒绝错误格式、未知/重复字段、重复模型键和非正整数容量；目前只接受 profile/modelId/contextWindow，maxOutputTokens 等字段尚未接入。读取最多 1 MiB、1024 个条目，错误不回显原始内容。
+
+`--check-config` 显示容量与来源；--prompt 校验并加载元数据；进入/恢复会话以及每次 /model（含重选同一模型）重新读取。已打开会话不自动热更新，可重选模型或重启。重新加载失败保留原模型、容量和历史。修改容量不会覆盖服务商限制，也不会加入模型请求或会话快照。
+
+底栏右侧仍是“上次输入 ... tok / 上限 ...”，上限取本地配置，已知容量青色、未知灰色；/status 显示来源。当前没有计算压缩阈值、输出预留或输入预算，没有自动限制请求长度。详见 [容量实现与验收](docs/architecture.md#model-capacity)。
 
 **调用流程（计划）**：Session/规则/工具定义/记忆 → ContextBuilder → 筛选与预算 → LlmRequest。
 
@@ -618,7 +669,7 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
 
 **调用流程**：Main 创建 DebugPrinter → AgentLoop 请求前打印轮次 → 执行工具前打印名称与 path → 失败打印错误码 → CLI 展示最终回答。
 
-原生终端由 ConsoleInput 使用 JLine Status 保留底栏，左侧工作模式/权限，右侧模型/上次请求输入 token；管道退化为普通单行，不发送 ANSI 控制码。SessionLauncher 观察模型响应更新状态，切换模型清除旧计数，`/status` 查看来源与授权数量。当前没有精确当前上下文估算或模型窗口配置，因此未知量显示 ?，不使用累计用量冒充占用。鼠标点击菜单尚未实现。
+原生终端由 ConsoleInput 使用 JLine Status 保留底栏，左侧工作模式/权限，右侧模型/上次请求输入 token；管道退化为普通单行，不发送 ANSI 控制码。SessionLauncher 观察模型响应更新状态，切换模型清除旧计数，`/status` 查看来源与授权数量。模型窗口由 models.json 按当前供应商/模型配置，未配置为 ?；当前没有精确请求前估算，不使用累计用量冒充占用。鼠标点击菜单尚未实现。
 
 底栏为 `react`（青色加粗）/`plan`（紫色加粗）、`ask`（黄色）/`auto`（绿色）/`full`（红色）；模型青色，已知输入 token 紫色，未知量灰色。左侧保留边距，按实际显示列宽对齐，长模型名先缩短以保留用量，极窄窗口优先模式，避免前缀挤出和右侧换行。设置 `NO_COLOR` 时关闭主题配色；管道保持原有文本格式。样式只属于展示，不写进模型请求、历史或工具参数。
 
@@ -665,10 +716,10 @@ codeY/
 | 阶段 | 目标 | 状态 |
 |---|---|---|
 | M0 | 工程、入口与设计文档 | 已完成 |
-| M1 | LLM 调用与 SSE 流式输出 | 进行中：配置、消息、非流式调用与连续对话已完成 |
+| M1 | LLM 调用与 SSE 流式输出 | 普通/流式调用与连续对话已完成，本地 HTTP/SSE 验证通过；真实平台兼容性待验证 |
 | M2 | Agent 循环与只读工具 | list_files、search_file、grep_code、read_file、tools 请求、基础循环与工具历史已完成；正则与语义检索后续扩展 |
-| M3 | 修改代码、执行命令与验证闭环 | write_file/edit_file、审批、ReAct/Plan 已完成；命令、审计、验证证据与失败恢复待实现 |
-| M4 | 上下文预算与历史压缩 | 待实现 |
+| M3 | 修改代码、执行命令与验证闭环 | write_file/edit_file、execute_command、审批与 ReAct/Plan 已完成；持久审计、验证证据与失败恢复待实现 |
+| M4 | 上下文预算与历史压缩 | 模型容量配置/加载/展示已实现；请求组装、Token 预算与压缩待实现 |
 | M5 | 会话恢复与项目记忆 | 文本/工具对话保存恢复已实现；执行中恢复与长期记忆待实现 |
 | M6 | MCP 工具接入 | 待实现 |
 | M7 | 固定任务评估与项目展示 | 待实现 |
@@ -722,7 +773,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --no-workspace
 java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --resume "项目开发"
 ```
 
-构建生成的 JAR 已包含 Jackson 与 JLine 运行依赖，直接使用 `java -jar` 即可。`--prompt` 执行无工作区任务；`--chat` 每轮发送基础提示词、成功历史和当前问题，工作区会话提供六个文件工具与 execute_command。两种入口展示简洁调用进度，都会向选中平台发送真实请求；输出被截断时提示 `finish_reason=length`。
+构建生成的 JAR 已包含 Jackson 与 JLine 运行依赖，直接使用 `java -jar` 即可。`--prompt` 执行无工作区任务；`--chat` 每轮发送基础提示词、成功历史和当前问题，工作区会话提供六个文件工具与 execute_command。两种入口默认流式输出正文，展示简洁调用进度，都会向选中平台发送真实请求；输出被截断时提示 `finish_reason=length`。
 
 启动列表接受已显示序号、完整标题或唯一 ID 前缀（至少 8 位）。进入会话后普通文本就是问题；重名/前缀冲突会显示候选项。每行一个问题，终端使用 Console 编码，重定向输入输出使用 UTF-8。
 
@@ -753,7 +804,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --resume "项目开发"
 java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/codeY --title 了解项目
 ```
 
-进入后输入“请看看配置功能是怎么实现的”。模型可用 `list_files` 了解结构，或用 `search_file` 按名称、`grep_code` 按正文定位，再用 `read_file` 阅读；目录探索有深度、扫描量与输出限制，需要时继续查看具体子目录。可在临时工作区继续输入“创建 notes/demo.txt，内容为 hello”，再输入“读取后仅把 hello 改成你好，保留其他内容”，验证 write_file/read_file/edit_file；实际工具选择由模型决定，控制台显示真实调用。当前尚无执行命令工具。旧会话保留旧系统提示词，`/new` 或 `/clear` 可加载最新工具使用指导。
+进入后输入“请看看配置功能是怎么实现的”。模型可用 `list_files` 了解结构，或用 `search_file` 按名称、`grep_code` 按正文定位，再用 `read_file` 阅读；目录探索有深度、扫描量与输出限制，需要时继续查看具体子目录。可在临时工作区继续输入“创建 notes/demo.txt，内容为 hello”，再输入“读取后仅把 hello 改成你好，保留其他内容”，验证 write_file/read_file/edit_file；实际工具选择由模型决定，控制台显示真实调用。项目可进一步使用 execute_command 运行已有编译/测试命令，遵循当前审批模式。旧会话保留旧系统提示词，`/new` 或 `/clear` 可加载最新工具使用指导。
 
 基础提示词位于 [src/main/resources/prompts/base.md](src/main/resources/prompts/base.md)。PromptLoader 从 classpath 按 UTF-8 读取全文，Main 将其作为 system 消息注入请求；所有模型 Profile 共用。修改提示词后执行 `mvn package` 更新 JAR。资源缺失或空白时会在发送请求前报告提示词错误。设计与后续扩展见 [Prompt 模块](docs/architecture.md#prompt-design)。
 
@@ -769,7 +820,11 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/c
 
 ## 验证与文档维护
 
-最近一次完整构建 `mvn verify` 共 577 项测试通过，无失败、错误或跳过。命令阶段新增 32 项测试，覆盖真实隔离进程的正常/非零退出、双流输出与截断、超时/中断清理、stdin EOF、Windows 参数及批处理优先、审批/拒绝/PLAN/NONE、参数冻结、目录/程序变更、输出预算与配置；另通过 6 组本地 HTTP 生产 JAR 验证，包括 ask/auto 每次实际执行 Maven 版本命令、非零结果回填、管道审批不可用、PLAN 和无工作区。本次 UI 新增 4 项测试，覆盖真实 JLine 输入框与回答展示、ANSI 不进入模型消息/历史、纯文本管道和 NO_COLOR、长模型名下的模式/token 保留及颜色属性；另在开启配色的虚拟终端下验证 Tab/方向键。权限阶段新增 35 项测试，覆盖默认 ask、按文件授权/撤销/拒绝、直接工具调用、未知工具、自动规则/人工回退、审批期间冲突、准备后参数变化、PLAN+full、会话恢复、管道不误读、配置和 token 状态。终端测试使用真实 JLine 编辑器配合虚拟终端，验证底栏与窗口缩窄；厂商请求使用替身。权限阶段另通过 7 组本地 HTTP JAR 验证：生产六工具与首次批准/授权复用、恢复不恢复批准或重放写入、管道默认不误读下一条聊天、full 显式确认和 PLAN 拦截、auto 普通写入/敏感目标拒绝及跨工具重试拦截、撤销后重新批准、无工作区两个入口隐藏工具。全部配置、会话与工作区隔离，未读取真实 .env 或调用真实厂商。原有写入、搜索、会话、配置及协议回归全部保留。
+2026-10-26 模型容量阶段：完整 `mvn verify` 共 640 项通过，失败/错误/跳过均为 0。新增 32 项覆盖精确模型身份、共享目录、未知容量、严格配置校验/脱敏、有界读取、动态重选/恢复、切换失败保留状态和底栏容量。生产 JAR 另通过 6 组隔离本地 HTTP/SSE 验证：配置检查不联网、不同模型容量匹配、聊天切换与历史、恢复时重载、错误配置在请求前拦截、容量元数据不改变业务请求且缺文件兼容。没有调用真实厂商或读取真实 .env。
+
+流式阶段完整构建 `mvn verify` 共 608 项测试通过，无失败、错误或跳过。命令阶段新增 32 项测试，覆盖真实隔离进程的正常/非零退出、双流输出与截断、超时/中断清理、stdin EOF、Windows 参数及批处理优先、审批/拒绝/PLAN/NONE、参数冻结、目录/程序变更、输出预算与配置；另通过 6 组本地 HTTP 生产 JAR 验证，包括 ask/auto 每次实际执行 Maven 版本命令、非零结果回填、管道审批不可用、PLAN 和无工作区。本次 UI 新增 4 项测试，覆盖真实 JLine 输入框与回答展示、ANSI 不进入模型消息/历史、纯文本管道和 NO_COLOR、长模型名下的模式/token 保留及颜色属性；另在开启配色的虚拟终端下验证 Tab/方向键。权限阶段新增 35 项测试，覆盖默认 ask、按文件授权/撤销/拒绝、直接工具调用、未知工具、自动规则/人工回退、审批期间冲突、准备后参数变化、PLAN+full、会话恢复、管道不误读、配置和 token 状态。终端测试使用真实 JLine 编辑器配合虚拟终端，验证底栏与窗口缩窄；厂商请求使用替身。权限阶段另通过 7 组本地 HTTP JAR 验证：生产六工具与首次批准/授权复用、恢复不恢复批准或重放写入、管道默认不误读下一条聊天、full 显式确认和 PLAN 拦截、auto 普通写入/敏感目标拒绝及跨工具重试拦截、撤销后重新批准、无工作区两个入口隐藏工具。全部配置、会话与工作区隔离，未读取真实 .env 或调用真实厂商。原有写入、搜索、会话、配置及协议回归全部保留。
+
+流式阶段新增 31 项测试，覆盖首片即时显示、中文/emoji 与 CRLF 分片、多行 SSE、交错工具参数、usage、缺少结束标记、无效参数、HTTP 错误、超时和中断；CLI 验证无重复正文、完整历史提交及标题非流式。另用生产 JAR 通过 8 组隔离本地 HTTP 场景，验证 --prompt 首片时序、工具循环与会话继续、异常不保存、关闭流式/usage、静默标题、超时后继续提问，以及 full 下未完整流不执行写文件。真实厂商接口另行验证。
 
 后续每完成或调整模块，同步维护模块导航和对应章节的四项内容：
 

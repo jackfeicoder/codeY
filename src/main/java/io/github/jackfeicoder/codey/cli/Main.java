@@ -1,6 +1,7 @@
 package io.github.jackfeicoder.codey.cli;
 
 import io.github.jackfeicoder.codey.agent.AgentLoop;
+import io.github.jackfeicoder.codey.agent.AgentResult;
 import io.github.jackfeicoder.codey.observability.DebugPrinter;
 import io.github.jackfeicoder.codey.config.ConfigException;
 import io.github.jackfeicoder.codey.config.ConfigLoader;
@@ -10,6 +11,8 @@ import io.github.jackfeicoder.codey.config.ModelPreferenceStore;
 import io.github.jackfeicoder.codey.config.SessionSettings;
 import io.github.jackfeicoder.codey.config.AgentSettings;
 import io.github.jackfeicoder.codey.config.CommandSettings;
+import io.github.jackfeicoder.codey.config.StreamingSettings;
+import io.github.jackfeicoder.codey.config.ModelCapabilitiesLoader;
 import io.github.jackfeicoder.codey.llm.ChatCompletionsClient;
 import io.github.jackfeicoder.codey.llm.LlmClient;
 import io.github.jackfeicoder.codey.llm.LlmException;
@@ -136,9 +139,13 @@ public final class Main {
                 LlmConfig config = profiles.activeConfig(); // 只做本地字段校验，不发送 HTTP 请求。
                 io.github.jackfeicoder.codey.config.PermissionSettings.load(startup, environment);
                 CommandSettings.load(startup, environment);
+                StreamingSettings.load(startup, environment);
+                var capabilities = ModelCapabilitiesLoader.load(startup, environment, profiles.activeProfile(), config.model());
                 System.out.println("LLM configuration is valid. Profile: " + profiles.activeSelection());
                 System.out.println(config);
                 System.out.println(agentSettings);
+                System.out.println("Model context window: " + (capabilities.contextWindow() == null ? "unknown" : capabilities.contextWindow())
+                        + " tokens; source: " + capabilities.source() + ". Capacity metadata only; budgeting is not enabled.");
             } else {
                 AgentSettings agentSettings = AgentSettings.load(startup, environment);
                 // client 通过统一接口使用，实际 HTTP/JSON 逻辑位于 ChatCompletionsClient。
@@ -146,19 +153,30 @@ public final class Main {
                 PrintWriter debugOutput = console == null ? new PrintWriter(System.out, true, StandardCharsets.UTF_8)
                         : console.writer();
                 var debug = new DebugPrinter(debugOutput); // 仅显示轮次、工具与文件摘要。
-                LlmClient client = new ChatCompletionsClient(profiles.activeConfig());
+                // 单次入口也验证可选容量文件，当前仅加载元数据，不据此裁剪或阻止请求。
+                LlmConfig config = profiles.activeConfig();
+                ModelCapabilitiesLoader.load(startup, environment, profiles.activeProfile(), config.model());
+                LlmClient client = new ChatCompletionsClient(config, StreamingSettings.load(startup, environment));
                 // basePrompt 是内置 Markdown 原文，与模型厂商和启动目录无关。
                 String basePrompt = PromptLoader.loadBase();
                 // --prompt 没有工作区，read_file 不会列入可用定义；循环仍由同一 Agent 处理。
-                var result = new AgentLoop(client, createTools(agentSettings, CommandSettings.load(startup, environment)), agentSettings.maxIterations(), debug).run(new Session(basePrompt), prompt,
-                        new ToolContext(WorkspaceBinding.none()));
+                var stream = new ConsoleStreamOutput(new ConsoleTheme(console != null, !environment.containsKey("NO_COLOR")),
+                        debugOutput, () -> { }, false);
+                AgentResult result;
+                try {
+                    result = new AgentLoop(client, createTools(agentSettings, CommandSettings.load(startup, environment)), agentSettings.maxIterations(), debug)
+                            .run(new Session(basePrompt), prompt, new ToolContext(WorkspaceBinding.none()), stream);
+                } catch (LlmException failed) {
+                    if (stream.hasDisplayedText()) System.err.println("以上流式内容尚未确认为完整结果。");
+                    throw failed;
+                }
                 if (!result.completed()) {
                     System.err.println("Agent stopped [BUDGET_EXHAUSTED].");
                     System.exit(1);
                     return;
                 }
                 var response = result.response();
-                System.out.println(response.text());
+                if (!stream.lastResponseHadText()) System.out.println(response.text());
                 if (result.budgetLimited()) System.err.println("本轮已到模型请求上限，回答基于当前已获得的信息。");
                 try { preferences.save(profiles.activeSelection()); }
                 catch (ConfigException failed) { System.err.println("默认模型偏好未保存：" + failed.getMessage()); }
@@ -198,6 +216,7 @@ public final class Main {
         SessionSettings settings = SessionSettings.load(startup, environment);
         AgentSettings agentSettings = AgentSettings.load(startup, environment);
         CommandSettings commandSettings = CommandSettings.load(startup, environment);
+        StreamingSettings streamingSettings = StreamingSettings.load(startup, environment);
         var permissionSettings = io.github.jackfeicoder.codey.config.PermissionSettings.load(startup, environment);
         // Console 可正确处理 Windows 终端字符编码；管道和测试进程没有 Console。
         Console console = System.console();
@@ -214,11 +233,12 @@ public final class Main {
                 // 历史浏览不执行此工厂；准备继续会话时才校验目标 Profile。
                 ModelProfiles profiles = ConfigLoader.loadProfiles(startup, environment, name);
                 LlmConfig config = profiles.activeConfig();
+                var capabilities = ModelCapabilitiesLoader.load(startup, environment, profiles.activeProfile(), config.model());
                 Duration timeout = config.timeout().compareTo(Duration.ofSeconds(5)) < 0
                         ? config.timeout() : Duration.ofSeconds(5);
                 LlmConfig titleConfig = new LlmConfig(config.baseUrl(), config.apiKey(), config.model(), timeout, config.authMode());
-                return new SessionLauncher.ModelChoice(profiles.activeSelection(), new ChatCompletionsClient(config),
-                        new ChatCompletionsClient(titleConfig));
+                return new SessionLauncher.ModelChoice(profiles.activeSelection(), new ChatCompletionsClient(config, streamingSettings),
+                        new ChatCompletionsClient(titleConfig), capabilities);
             }, PromptLoader::loadBase, consoleInput, output, errors, options, createTools(agentSettings, commandSettings), debug,
                     () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings).run();
         }
@@ -259,7 +279,11 @@ public final class Main {
                 Configuration:
                   Process environment > CODEY_CONFIG_DIR .env (or startup-directory .env) > defaults.
                   --check-config validates settings without calling a model.
-                  --prompt runs one non-streaming chat task without a workspace.
+                  Optional models.json in the configuration directory declares contextWindow per profile/modelId.
+                  /status shows the configured window; missing entries stay unknown. Token budgeting is not enabled yet.
+                  --prompt runs one chat task without a workspace; chat and --prompt stream text by default.
+                  CODEY_LLM_STREAM=false disables streaming; CODEY_LLM_STREAM_INCLUDE_USAGE=false omits stream_options.
+                  Automatic titles always use non-streaming generate; completed turns are saved as full messages.
                   No arguments or --chat lists the latest 10 sessions across all workspaces.
                   /new creates; /more_session loads the next 10; /resume TITLE_OR_ID restores.
                   /sessions refreshes; /rename TITLE renames; /back returns to the active chat.
