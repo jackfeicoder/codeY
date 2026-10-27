@@ -74,7 +74,7 @@ class MapReduceSummaryTest {
         try (var execution = new SummaryExecution(client, settings(5), DebugPrinter.NONE)) {
             var failed = assertThrows(SummaryExecution.Failure.class,
                     () -> new MapReduceSummaryStrategy().execute(plan(2), execution, "map", "reduce"));
-            assertFalse(failed.getMessage().contains("secret-invalid-json")); assertEquals(2, execution.calls());
+            assertFalse(failed.getMessage().contains("secret-invalid-json")); assertEquals(5, execution.calls());
         }
         assertTrue(cancelled.await(2, TimeUnit.SECONDS)); assertEquals(0, reduces.get());
     }

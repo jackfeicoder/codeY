@@ -746,7 +746,8 @@ public final class SessionLauncher {
                 + "；模型单次输出上限：" + (budgetPolicy.maxOutputTokens() == null ? "未知（可配置 models.json maxOutputTokens）" : budgetPolicy.maxOutputTokens() + " tok") + "。");
         var state = active == null ? null : active.session().compaction();
         output.println("  策略：来源≤" + compactionSettings.singleMaxSourceTokens() + " tok 且单次可容纳时 Single；否则 MapReduce；块目标 "
-                + compactionSettings.chunkTokens() + " tok；并发≤" + compactionSettings.concurrency() + "；总调用≤" + compactionSettings.maxCalls() + "。");
+                + compactionSettings.chunkTokens() + " tok；并发≤" + compactionSettings.concurrency() + "；总调用≤" + compactionSettings.maxCalls()
+                + "（含重试和 Reduce）；Map 最多重试 3 次。");
         output.println("  当前摘要：" + (state == null ? "尚无" : "覆盖原始历史前 " + state.coveredMessages() + " 条消息")
                 + "；/compact 手动压缩；原始消息保留。");
     }
