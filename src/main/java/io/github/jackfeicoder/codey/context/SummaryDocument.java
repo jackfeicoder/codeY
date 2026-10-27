@@ -9,7 +9,9 @@ import java.util.List;
 public record SummaryDocument(List<String> goals, List<String> constraints, List<String> facts,
                               List<String> decisions, List<String> changes, List<String> verification,
                               List<String> openIssues, List<String> nextSteps) {
-    public static final int MAX_CHARS = 65536;
+    /** 资源保护上限独立于动态 Token 预算，允许大窗口模型保存较丰富的摘要。 */
+    public static final int MAX_CHARS = 1024 * 1024;
+    public static final int MAX_ITEM_CHARS = 65536;
     private static final ObjectMapper MAPPER = new ObjectMapper().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
@@ -46,7 +48,7 @@ public record SummaryDocument(List<String> goals, List<String> constraints, List
         } catch (java.io.IOException failed) { throw invalid(); }
     }
     private static List<String> checked(List<String> values) {
-        if (values == null || values.size() > 64 || values.stream().anyMatch(v -> v == null || v.isBlank() || v.length() > 8192)) throw invalid();
+        if (values == null || values.size() > 64 || values.stream().anyMatch(v -> v == null || v.isBlank() || v.length() > MAX_ITEM_CHARS)) throw invalid();
         return List.copyOf(values);
     }
     private static IllegalArgumentException invalid() { return new IllegalArgumentException("Invalid structured context summary."); }

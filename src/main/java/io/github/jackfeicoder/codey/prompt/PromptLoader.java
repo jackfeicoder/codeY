@@ -20,6 +20,8 @@ public final class PromptLoader {
 
     /** 压缩专用指令，独立于业务 base.md，不把旧对话当作当前执行任务。 */
     public static String loadCompact() { return loadResource("/prompts/compact.md"); }
+    /** Reduce 负责合并按时间排列的子摘要，旧摘要只参与一次。 */
+    public static String loadCompactReduce() { return loadResource("/prompts/compact-reduce.md"); }
 
     /** 按资源路径读取文本；缺失、空白或读取失败时抛出可由 CLI 展示的异常。 */
     static String loadResource(String resourcePath) {

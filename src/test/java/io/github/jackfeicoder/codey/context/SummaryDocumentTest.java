@@ -30,7 +30,7 @@ class SummaryDocumentTest {
             case "empty" -> valid.json().replace("[\"goal\"]", "[]").replace("[\"constraint\"]", "[]");
             case "blank" -> valid.json().replace("[\"goal\"]", "[\" \" ]");
             case "tooMany" -> valid.json().replace("[\"goal\"]", "[" + String.join(",", Collections.nCopies(65, "\"goal\"")) + "]");
-            default -> valid.json().replace("goal\"", "x".repeat(8193) + "\"");
+            default -> valid.json().replace("goal\"", "x".repeat(SummaryDocument.MAX_ITEM_CHARS + 1) + "\"");
         };
         assertThrows(IllegalArgumentException.class, () -> SummaryDocument.parse(json), kind);
     }

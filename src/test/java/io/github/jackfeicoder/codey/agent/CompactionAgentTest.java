@@ -80,4 +80,23 @@ class CompactionAgentTest {
                 .run(session, "continue", context));
         assertEquals(original, session.messages()); assertNotNull(session.compaction());
     }
+
+    @Test void mapReduceCommitsOneSummaryBeforeBusinessAndFailureNeverCommitsChildren() {
+        var cfg = new CompactionSettings(true, new BigDecimal("0.8"), new BigDecimal("0.4"), 3, 512, 24, 5, 512, 3000, 2);
+        var session = history(6000); var raw = session.messages(); var summaryCalls = new AtomicInteger(); var saves = new AtomicInteger();
+        LlmClient summaries = request -> { summaryCalls.incrementAndGet(); return summary(); };
+        var loop = new AgentLoop(request -> { assertEquals(1, saves.get()); return answer("done"); }, new ToolRegistry(), 1,
+                DebugPrinter.NONE, builder, snapshot -> { }, budget, new HistoryCompactor(summaries, budget, cfg, builder, DebugPrinter.NONE), saves::incrementAndGet);
+        var result = loop.run(session, "continue", context);
+        assertTrue(result.completed()); assertEquals(1, result.modelCalls()); assertTrue(summaryCalls.get() > 2);
+        assertEquals(raw, session.messages()); var oldState = session.compaction();
+        for (int i = 0; i < 3; i++) session.completeTurn("new-old" + i, Message.assistant("x".repeat(6000)));
+        for (int i = 0; i < 3; i++) session.completeTurn("new-recent" + i, Message.assistant("done"));
+        // 显式手动压缩的新候选在 Reduce 失败时，不得替换已有效的旧摘要。
+        var compactor = new HistoryCompactor(request -> request.messages().get(1).content().contains("Reduce 合并")
+                ? new LlmResponse(Message.assistant("partial"), "length", null) : summary(), budget, cfg, builder, DebugPrinter.NONE);
+        var before = session.messages();
+        var failed = compactor.prepare(session, List.of(), List.of(), WorkMode.REACT, 1, 20, true);
+        assertFalse(failed.changed()); assertSame(oldState, session.compaction()); assertEquals(before, session.messages());
+    }
 }

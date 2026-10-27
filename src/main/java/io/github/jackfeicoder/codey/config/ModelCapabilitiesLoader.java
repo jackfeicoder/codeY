@@ -19,7 +19,7 @@ public final class ModelCapabilitiesLoader {
     private static final int MAX_BYTES = 1024 * 1024;
     private static final int MAX_MODELS = 1024;
     /** 字段白名单使拼写错误明确报错，避免错误容量被静默当成未知。 */
-    private static final Set<String> MODEL_FIELDS = Set.of("profile", "modelId", "contextWindow", "outputReserveTokens", "safetyMarginTokens");
+    private static final Set<String> MODEL_FIELDS = Set.of("profile", "modelId", "contextWindow", "outputReserveTokens", "safetyMarginTokens", "maxOutputTokens");
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -61,7 +61,7 @@ public final class ModelCapabilitiesLoader {
                         || !item.path("contextWindow").canConvertToLong()) throw invalid();
                 ProfileSelection key = new ProfileSelection(item.path("profile").textValue(), item.path("modelId").textValue());
                 var capacity = new ModelCapabilities(item.path("contextWindow").longValue(),
-                        optionalInteger(item, "outputReserveTokens"), optionalInteger(item, "safetyMarginTokens"));
+                        optionalInteger(item, "outputReserveTokens"), optionalInteger(item, "safetyMarginTokens"), optionalInteger(item, "maxOutputTokens"));
                 if (entries.putIfAbsent(key, capacity) != null) throw invalid();
             }
             return entries.getOrDefault(selected, ModelCapabilities.unknown());
@@ -80,6 +80,6 @@ public final class ModelCapabilitiesLoader {
 
     private static ConfigException invalid() {
         return new ConfigException("Invalid or unreadable models.json; expected {\"models\":[{\"profile\":\"alias\","
-                + "\"modelId\":\"id\",\"contextWindow\":128000}]} with unique profile/modelId pairs, positive windows and optional integer outputReserveTokens/safetyMarginTokens.");
+                + "\"modelId\":\"id\",\"contextWindow\":128000}]} with unique profile/modelId pairs, positive windows and optional integer outputReserveTokens/safetyMarginTokens/maxOutputTokens.");
     }
 }

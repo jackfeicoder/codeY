@@ -33,11 +33,14 @@ public final class ContextBudgetPolicy {
     private final long outputReserve;
     private final long safetyMargin;
     private final Long warningThreshold;
+    /** 单次输出能力独立于普通回答预留；null 表示未提供供应商限制。 */
+    private final Long maxOutputTokens;
 
     /** 选择模型时固定策略并验证；模型覆盖值优先于全局设置，错误不推迟到 HTTP 调用。 */
     public ContextBudgetPolicy(ModelCapabilities model, ContextBudgetSettings settings) {
         Objects.requireNonNull(model, "model"); Objects.requireNonNull(settings, "settings");
         window = model.contextWindow();
+        maxOutputTokens = model.maxOutputTokens();
         outputReserve = model.outputReserveTokens() == null ? settings.outputReserveTokens() : model.outputReserveTokens();
         safetyMargin = model.safetyMarginTokens() == null ? settings.safetyMarginTokens() : model.safetyMarginTokens();
         if (window == null) { inputBudget = null; warningThreshold = null; return; }
@@ -56,6 +59,14 @@ public final class ContextBudgetPolicy {
     }
 
     public Assessment evaluate(ContextSnapshot context) { return evaluate(context.tokens().total()); }
+
+    public Long maxOutputTokens() { return maxOutputTokens; }
+
+    /** 摘要输出扩大时同步减少该摘要请求的输入空间，保证输入与允许输出共用窗口。 */
+    public Long inputBudgetForOutput(int outputLimit) {
+        if (outputLimit <= 0) throw new IllegalArgumentException("Output limit must be positive.");
+        return window == null ? null : Math.min(inputBudget, Math.max(0, window - safetyMargin - outputLimit));
+    }
 
     /** 等于输入预算仍允许发送；使用整数和 BigDecimal，不让 K/M 显示舍入参与判断。 */
     public Assessment evaluate(long estimatedInput) {

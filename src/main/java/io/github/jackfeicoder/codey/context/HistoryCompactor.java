@@ -1,6 +1,5 @@
 package io.github.jackfeicoder.codey.context;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.jackfeicoder.codey.agent.WorkMode;
 import io.github.jackfeicoder.codey.config.CompactionSettings;
 import io.github.jackfeicoder.codey.llm.*;
@@ -13,17 +12,14 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.*;
 
-/** 有界滚动摘要：完整旧任务进入摘要，近期 3/2 轮与当前任务保留；只在候选验收后提交状态。 */
+/** 自适应摘要协调：保护近期原文，规划 Single/MapReduce，全部成功并验收后才更新派生状态。 */
 public final class HistoryCompactor {
     /** 失败/跳过返回原视图；摘要调用独立于 Agent 的任务请求次数。 */
     public record Outcome(ContextSnapshot context, boolean changed, int summaryCalls, String reason) { }
-    /** 只序列化历史资料，不处理凭证或业务 HTTP。 */
-    private static final ObjectMapper MAPPER = new ObjectMapper();
     /** 当前选中模型的客户端，摘要独立走非流式调用。 */
     private final LlmClient client;
-    /** 使用当前模型的输入预算、输出预留与安全余量。 */
+    /** 使用当前模型的窗口、单次输出能力与安全余量，摘要不受普通回答预留额度限制。 */
     private final ContextBudgetPolicy budget;
     /** 启用、水位、保留轮次与调用/时间限制。 */
     private final CompactionSettings settings;
@@ -51,6 +47,9 @@ public final class HistoryCompactor {
         long inputBudget = assessment.inputBudget();
         long trigger = fraction(inputBudget, settings.triggerRatio(), RoundingMode.CEILING);
         long target = fraction(inputBudget, settings.targetRatio(), RoundingMode.FLOOR);
+        // 期望水位不是拒绝线：额外允许输入预算的 5%，但绝不超过硬输入预算。
+        long tolerance = fraction(inputBudget, new BigDecimal("0.05"), RoundingMode.CEILING);
+        long softLimit = target + Math.min(inputBudget - target, tolerance);
         if (!force && original.tokens().total() < trigger) return skipped(original, "未达到压缩水位");
 
         var raw = history.subList(1, history.size());
@@ -60,105 +59,58 @@ public final class HistoryCompactor {
         int kept = settings.keepRecentTurns();
         int cut = Math.max(covered, cutoff(starts, kept));
         long fixed = fixedTokens(history, raw, cut, currentTurn, tools, mode, step, maxSteps);
-        long maxSummary = Math.min(settings.summaryMaxTokens(), assessment.outputReserveTokens());
-        // 优先保留 3 轮；若目标空间不足，按完整用户轮次降到 2 轮，不拆工具组。
-        if (kept == 3 && fixed + maxSummary + 256 > target && starts.size() > 2) {
+        // 优先保留 3 轮，适度超过期望水位也不拆组；连最小摘要都放不下才降到 2 轮。
+        if (kept == 3 && fixed + 128 + 256 > softLimit && starts.size() > 2) {
             kept = 2; cut = Math.max(covered, cutoff(starts, kept));
             fixed = fixedTokens(history, raw, cut, currentTurn, tools, mode, step, maxSteps);
         }
         if (cut == 0) return skipped(original, "没有可摘要的旧轮次，近期完整消息与当前任务保持原样");
-        // 为摘要包装标记留 256 个估算 token。40% 是目标，固定内容过大时以硬输入预算为底线。
-        long hardSpace = inputBudget - fixed - 256;
+        // 为包装留 256 个估算 token；先把 20% 内剩余空间全部提供给摘要，不要求用满。
         long targetSpace = target - fixed - 256;
-        long limit = Math.min(maxSummary, hardSpace);
-        if (targetSpace >= 128) limit = Math.min(limit, targetSpace);
-        if (limit < 128) return skipped(original, "固定内容、近期消息或当前任务过大，摘要没有足够空间");
+        long availableSpace = targetSpace >= 128 ? targetSpace : softLimit - fixed - 256;
+        long limit = Math.min(Integer.MAX_VALUE, availableSpace);
+        if (settings.summaryMaxTokens() > 0) limit = Math.min(limit, settings.summaryMaxTokens());
+        if (budget.maxOutputTokens() != null) limit = Math.min(limit, budget.maxOutputTokens());
+        if (limit < 128) return skipped(original, "近期消息、当前任务或模型输出限制使摘要空间不足；完整原文保持不变");
         int outputLimit = (int) limit;
         if (previous != null && cut == covered && !force && estimator.textTokens(previous.summary().json()) <= outputLimit)
             return skipped(original, "相同历史前缀已压缩，不重复生成摘要");
 
-        int calls = 0;
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(settings.timeoutSeconds());
-        ExecutorService worker = Executors.newSingleThreadExecutor(action -> {
-            var thread = new Thread(action, "codey-compaction"); thread.setDaemon(true); return thread;
-        });
+        var execution = new SummaryExecution(client, settings, debug);
         debug.compaction("开始：估算 " + original.tokens().total() + " tok，保留最近 " + (starts.size() - countCoveredTurns(starts, cut)) + " 个完整用户轮次。");
-        try {
-            String prompt = PromptLoader.loadCompact();
-            var sourceNode = MAPPER.createObjectNode();
-            sourceNode.set("previousSummary", MAPPER.valueToTree(previous == null ? null : previous.summary()));
-            sourceNode.set("newMessages", MAPPER.valueToTree(raw.subList(covered, cut)));
-            String source = MAPPER.writeValueAsString(sourceNode);
-            SummaryDocument rolling = null;
-            int offset = 0;
-            while (offset < source.length()) {
-                if (calls >= settings.maxCalls()) throw failure("摘要调用次数达到上限，候选已放弃");
-                remaining(deadline);
-                String prior = rolling == null ? "null" : rolling.json();
-                int end = fitEnd(source, offset, prompt, prior, outputLimit, inputBudget);
-                if (end <= offset) throw failure("摘要指令或已有摘要过大，单次摘要请求放不下");
-                LlmRequest request = summaryRequest(prompt, prior, source.substring(offset, end), offset, outputLimit);
-                remaining(deadline);
-                calls++;
-                debug.compaction("第 " + calls + " 次摘要请求（非流式、无工具）。");
-                Future<LlmResponse> pending = worker.submit(() -> client.generate(request));
-                LlmResponse response;
-                try { response = pending.get(remaining(deadline), TimeUnit.NANOSECONDS); }
-                catch (TimeoutException timeout) { pending.cancel(true); throw failure("摘要总超时，候选已放弃"); }
-                catch (InterruptedException interrupted) {
-                    pending.cancel(true); Thread.currentThread().interrupt();
-                    throw new LlmException(LlmException.Kind.INTERRUPTED, "Context compaction was interrupted.");
-                } catch (ExecutionException failed) {
-                    if (failed.getCause() instanceof LlmException llm) throw llm;
-                    throw failure("摘要请求失败，候选已放弃");
-                }
-                if (response == null || !"stop".equals(response.finishReason()) || !response.toolCalls().isEmpty())
-                    throw failure("摘要响应不完整或包含工具调用");
-                rolling = SummaryDocument.parse(response.text());
-                if (estimator.textTokens(rolling.json()) > outputLimit) throw failure("摘要超过 Token 上限，候选已放弃");
-                offset = end;
-            }
-            remaining(deadline);
-            var state = new CompactionState(cut, CompactionState.fingerprint(raw.subList(0, cut)), rolling, Instant.now().toString());
+        debug.compaction("空间分配：期望总量≤" + target + " tok，容许总量≤" + softLimit + " tok，固定/近期/当前任务≈"
+                + fixed + " tok，摘要输出上限=" + outputLimit + " tok（无需用满）；模型单次输出上限="
+                + (budget.maxOutputTokens() == null ? "未知，可在 models.json 配置 maxOutputTokens" : budget.maxOutputTokens()) + "。");
+        try (execution) {
+            String prompt = PromptLoader.loadCompact(), reducePrompt = PromptLoader.loadCompactReduce();
+            var plan = new CompactionPlanner(budget, settings).plan(raw.subList(covered, cut), covered,
+                    previous == null ? null : previous.summary(), outputLimit, prompt, reducePrompt);
+            execution.remaining();
+            debug.compaction("策略：" + plan.strategy() + "；摘要来源≈" + plan.sourceTokens() + " tok；计划调用 " + plan.expectedCalls() + " 次。");
+            SummaryDocument document = plan.strategy() == CompactionPlan.Strategy.SINGLE
+                    ? new SingleSummaryStrategy().execute(plan, execution)
+                    : new MapReduceSummaryStrategy().execute(plan, execution, prompt, reducePrompt);
+            execution.remaining();
+            var state = new CompactionState(cut, CompactionState.fingerprint(raw.subList(0, cut)), document, Instant.now().toString());
             var candidate = builder.build(history, currentTurn, tools, mode, step, maxSteps, state);
-            if (candidate.tokens().total() >= original.tokens().total() || !budget.evaluate(candidate).canSend())
-                throw failure("压缩后仍超限或没有缩小请求，候选已放弃");
-            session.applyCompaction(state); // 只有所有分块成功、结构和最终预算通过后才替换。
+            if (candidate.tokens().total() >= original.tokens().total() || candidate.tokens().total() > softLimit || !budget.evaluate(candidate).canSend())
+                throw SummaryExecution.failure("压缩后仍超限或没有缩小请求，候选已放弃");
+            execution.remaining(); // 指纹和最终组装耗时也计入总时限，迟到的候选不应用。
+            session.applyCompaction(state); // Map 子摘要不应用；只提交一次最终派生状态。
             debug.compaction("完成：" + original.tokens().total() + " → " + candidate.tokens().total() + " tok；"
-                    + (candidate.tokens().total() <= target ? "已达到目标水位。" : "已缩小且符合硬预算；保留内容使目标水位暂未达到。"));
-            return new Outcome(candidate, true, calls, "压缩成功");
+                    + (candidate.tokens().total() <= target ? "已达到期望水位。" : "已缩小且在容许范围内。"));
+            return new Outcome(candidate, true, execution.calls(), "压缩成功");
         } catch (LlmException failed) {
             if (failed.kind() == LlmException.Kind.INTERRUPTED) throw failed;
             String reason = "摘要模型调用失败：" + failed.kind(); debug.compaction(reason + "；保留原摘要与完整历史。");
-            return new Outcome(original, false, calls, reason);
-        } catch (java.io.IOException | RuntimeException failed) {
-            String reason = failed instanceof CompactionFailure ? failed.getMessage() : "摘要结构或资源校验失败";
+            return new Outcome(original, false, execution.calls(), reason);
+        } catch (RuntimeException failed) {
+            String reason = failed instanceof SummaryExecution.Failure ? failed.getMessage() : "摘要结构或资源校验失败";
             debug.compaction(reason + "；保留原摘要与完整历史。");
-            return new Outcome(original, false, calls, reason);
-        } finally { worker.shutdownNow(); }
-    }
-
-    /** 二分选择当前模型能接收的文本片段；UTF-16 分界避开代理对，不要求片段本身是完整 JSON。 */
-    private int fitEnd(String source, int offset, String prompt, String prior, int limit, long inputBudget) {
-        int low = 1, high = source.length() - offset, best = offset;
-        while (low <= high) {
-            int length = low + (high - low) / 2;
-            int end = offset + length;
-            if (end < source.length() && Character.isLowSurrogate(source.charAt(end)) && Character.isHighSurrogate(source.charAt(end - 1))) end--;
-            if (end <= offset) { low = length + 1; continue; }
-            var request = summaryRequest(prompt, prior, source.substring(offset, end), offset, limit);
-            long tokens = request.messages().stream().mapToLong(estimator::messageBodyTokens).sum() + 15;
-            if (tokens <= inputBudget) { best = end; low = length + 1; } else high = length - 1;
+            return new Outcome(original, false, execution.calls(), reason);
         }
-        return best;
     }
 
-    /** 包装旧资料与片段位置，显式禁止工具并限制摘要输出。 */
-    private static LlmRequest summaryRequest(String prompt, String prior, String fragment, int offset, int limit) {
-        String input = "本次输出上限约 " + limit + " Token。\n已整理的滚动摘要 JSON：\n" + prior
-                + "\n新增历史数据片段，起始字符位置 " + offset + "：\n" + fragment;
-        return new LlmRequest(List.of(Message.system(prompt), Message.user(input)), List.of(), false, limit);
-    }
     /** 计算不能用旧历史摘要替代的固定部分，为摘要正文留空间。 */
     private long fixedTokens(List<Message> history, List<Message> raw, int cut, List<Message> current,
                              List<ToolDefinition> tools, WorkMode mode, int step, int maxSteps) {
@@ -170,11 +122,5 @@ public final class HistoryCompactor {
     private static long fraction(long value, BigDecimal ratio, RoundingMode rounding) {
         return BigDecimal.valueOf(value).multiply(ratio).setScale(0, rounding).longValueExact();
     }
-    private static long remaining(long deadline) {
-        if (Thread.currentThread().isInterrupted()) throw new LlmException(LlmException.Kind.INTERRUPTED, "Context compaction was interrupted.");
-        long left = deadline - System.nanoTime(); if (left <= 0) throw failure("摘要总超时，候选已放弃"); return left;
-    }
     private static Outcome skipped(ContextSnapshot snapshot, String reason) { return new Outcome(snapshot, false, 0, reason); }
-    private static CompactionFailure failure(String reason) { return new CompactionFailure(reason); }
-    private static final class CompactionFailure extends RuntimeException { private CompactionFailure(String reason) { super(reason); } }
 }

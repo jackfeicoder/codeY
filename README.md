@@ -559,7 +559,10 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
 |---|---|
 | [ContextBuilder.java](src/main/java/io/github/jackfeicoder/codey/context/ContextBuilder.java) | 合并基础 system、运行时指令、成功历史、本次任务消息和工具定义；校验调用/结果配对 |
 | [ContextSnapshot.java](src/main/java/io/github/jackfeicoder/codey/context/ContextSnapshot.java) | 不可变请求视图与 TokenBreakdown 分项统计，不写入会话或 HTTP |
-| [HistoryCompactor.java](src/main/java/io/github/jackfeicoder/codey/context/HistoryCompactor.java) | 发送前选取完整旧任务、分块滚动摘要、超时/调用数限制、候选验收；不删除源消息 |
+| [HistoryCompactor.java](src/main/java/io/github/jackfeicoder/codey/context/HistoryCompactor.java) | 发送前选取完整旧任务、协调 Single/MapReduce、超时/调用数限制、候选验收；不删除源消息 |
+| [CompactionPlanner.java](src/main/java/io/github/jackfeicoder/codey/context/CompactionPlanner.java)、[CompactionPlan.java](src/main/java/io/github/jackfeicoder/codey/context/CompactionPlan.java) | 按来源 Token 选策略，规划完整任务/工具组边界、资料分片及 Map/Reduce 输入输出预算 |
+| [SingleSummaryStrategy.java](src/main/java/io/github/jackfeicoder/codey/context/SingleSummaryStrategy.java)、[MapReduceSummaryStrategy.java](src/main/java/io/github/jackfeicoder/codey/context/MapReduceSummaryStrategy.java) | 单次摘要或有限并行 Map 后调用模型 Reduce，乱序完成按来源重排 |
+| [SummaryExecution.java](src/main/java/io/github/jackfeicoder/codey/context/SummaryExecution.java) | 共用截止时间、线程池、实际调用计数、响应验收和取消；不修改会话 |
 | [CompactionSettings.java](src/main/java/io/github/jackfeicoder/codey/config/CompactionSettings.java) | 加载压缩水位、近期保留轮次、摘要输出/调用数/总超时 |
 | [SummaryDocument.java](src/main/java/io/github/jackfeicoder/codey/context/SummaryDocument.java)、[CompactionState.java](src/main/java/io/github/jackfeicoder/codey/context/CompactionState.java) | 八类结构化摘要、原始覆盖范围、SHA-256 指纹和时间；恢复时校验 |
 | [compact.md](src/main/resources/prompts/compact.md) | 独立摘要指令，旧消息作为资料处理，保留约束/事实/验证/下一步 |
@@ -593,7 +596,7 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
 
 填写时将 profile 对应到 CODEY_PROFILE_NAMES 的别名，modelId 与该供应商 MODEL 列表中的 ID 一致；按网关实际限制填写正整数 token 数。别名忽略大小写，模型 ID 区分大小写，支持斜杠等已有合法格式；同一供应商可多模型，同名模型在不同供应商下互不影响。旧 CODEY_LLM_* 格式使用 profile=default。容量条目不负责注册模型或验证远端能力。
 
-首次配置可以在 CMD 执行 `copy models.example.json models.json`，再修改占位数据；使用共享配置目录时，把文件放在该目录。文件缺失、models 为空或没有匹配条目时显示未知。模型 ID 拼写不匹配也会显示未知，不按名称推测容量。存在文件时严格拒绝错误格式、未知/重复字段、重复模型键和非正整数容量；必填字段为 profile/modelId/contextWindow，可选 outputReserveTokens/safetyMarginTokens 覆盖全局预算默认值；maxOutputTokens 等其他字段尚未接入。读取最多 1 MiB、1024 个条目，错误不回显原始内容。
+首次配置可以在 CMD 执行 `copy models.example.json models.json`，再修改占位数据；使用共享配置目录时，把文件放在该目录。文件缺失、models 为空或没有匹配条目时显示未知。模型 ID 拼写不匹配也会显示未知，不按名称推测容量。存在文件时严格拒绝错误格式、未知/重复字段、重复模型键和非正整数容量；必填字段为 profile/modelId/contextWindow，可选 outputReserveTokens/safetyMarginTokens 覆盖全局预算默认值；可选 maxOutputTokens 声明模型单次输出能力，独立于普通回答的输出预留。读取最多 1 MiB、1024 个条目，错误不回显原始内容。
 
 `--check-config` 显示容量与来源；--prompt 同样加载并执行输入预算检查；进入/恢复会话以及每次 /model（含重选同一模型）重新读取。已打开会话不自动热更新，可重选模型或重启。重新加载失败保留原模型、容量和历史。修改容量不会覆盖服务商限制，也不会加入模型请求或会话快照。
 
@@ -641,16 +644,25 @@ CODEY_CONTEXT_WARNING_RATIO=0.8
 ```dotenv
 CODEY_CONTEXT_COMPACTION_ENABLED=true
 CODEY_CONTEXT_COMPACTION_TRIGGER_RATIO=0.8
-CODEY_CONTEXT_COMPACTION_TARGET_RATIO=0.4
+CODEY_CONTEXT_COMPACTION_TARGET_RATIO=0.2
 CODEY_CONTEXT_KEEP_RECENT_TURNS=3
-CODEY_CONTEXT_SUMMARY_MAX_TOKENS=4096
-CODEY_CONTEXT_COMPACTION_MAX_CALLS=8
+CODEY_CONTEXT_SUMMARY_MAX_TOKENS=0
+CODEY_CONTEXT_COMPACTION_MAX_CALLS=24
 CODEY_CONTEXT_COMPACTION_TIMEOUT_SECONDS=60
+CODEY_CONTEXT_COMPACTION_SINGLE_MAX_SOURCE_TOKENS=64000
+CODEY_CONTEXT_COMPACTION_CHUNK_TOKENS=64000
+CODEY_CONTEXT_COMPACTION_CONCURRENCY=3
 ```
 
-每次业务模型请求前，估算达到输入预算的 80% 时尝试压缩。优先保留最近 3 个完整用户任务；目标空间不足时降至 2 个，assistant 工具调用和对应结果始终成组。更早历史通过独立 `prompts/compact.md` 生成结构化摘要；过大来源按本地预算分块，逐块滚动合并旧摘要。摘要请求使用当前模型、非流式、无工具并显式设置 `max_tokens`，最多 8 次、合计 60 秒。摘要调用不占 ReAct 轮次，也不算入底栏最近业务 usage。
+每次业务模型请求前，估算达到输入预算的 80% 时尝试压缩。优先保留最近 3 个完整用户任务；在额外容许空间内仍没有最小摘要空间时降至 2 个，assistant 工具调用和对应结果始终成组。更早历史通过独立 `prompts/compact.md` 生成结构化摘要；来源不超过 64K 且单次可容纳时 Single，其余走有限并行 MapReduce。旧摘要仅在 Single 或 Reduce 中提供一次，不重复发送给每个 Map。摘要请求使用当前模型、非流式、无工具并显式设置 `max_tokens`，默认最多 24 次、合计 60 秒（本地可配置至 300 秒）。摘要调用不占 ReAct 轮次，也不算入底栏最近业务 usage。
 
-40% 是**整个新请求**的目标，包括 system、tools、摘要、近期原文和当前任务。摘要自身最多 4096 Token，并进一步受当前模型输出预留、目标空间和硬预算约束。候选必须结构有效、未截断、比原请求小且符合硬输入预算才生效；固定内容较多时可能达不到 40%。失败保留旧摘要与原请求，再走硬预算检查，不反复重试。`/compact` 可提前手动压缩，不新增用户消息或标题请求；关闭压缩或容量未知时跳过。
+自动/手动只决定何时触发，Single/MapReduce 按实际摘要来源的 Token 数和模型容量选择，不按总占用百分比或固定轮数。Map 块目标 64K、默认并发 3，两个 Token 参数范围 512..1000000，并发 1..8，可在 `.env` 调整，重启生效。块上限随当前模型窗口与最终输出预留缩小；默认调用预算 24 包含全部 Map 和一次 Reduce，超出时在请求前停止。Reduce 由模型合并，不能仅拼接；全部子摘要的最大总量会预先限制到 Reduce 输入预算内，并在真实合并发送前再次估算。总时限包括规划、排队、Map 和 Reduce，无自动重试或子摘要缓存。任何阶段失败取消未完成任务，旧摘要和原文保留。64K/并发 3 是初始策略值，不是供应商能力保证，可能受限流影响，真实速度和摘要质量需实测。
+
+20% 是**整个新请求**的期望上限，包括 system、tools、摘要、近期原文和当前任务，必要时额外容许 5 个百分点（默认最多 25%）。先扣除完整保留内容与 256 Token 包装余量，再将剩余空间全部作为摘要最大额度，不要求生成到这个长度。默认不再固定 4K，也不受普通回答 8K 预留限制；可选的模型 maxOutputTokens 和正数 CODEY_CONTEXT_SUMMARY_MAX_TOKENS 可进一步限制。候选必须结构有效、未截断、比原请求小且符合容许总量与硬预算才生效。失败保留旧摘要与原请求，再走硬预算检查，不反复重试。`/compact` 可提前手动压缩，不新增用户消息或标题请求；关闭压缩或容量未知时跳过。
+
+压缩失败会区分无响应、输出截断、工具调用、异常结束原因、空正文、JSON 校验失败与正文超限，并显示 finish_reason、工具调用数量、正文字符数、实际 max_tokens 和厂商 completion_tokens（缺失为 unknown），不输出摘要正文或工具参数。若为 length，先检查摘要剩余空间、额外输出上限和模型 maxOutputTokens；推理用量可能占用同一输出额度，日志本身不证明具体厂商的计数方式。
+
+已有 `.env` 若显式设置 TARGET_RATIO=0.4 或 SUMMARY_MAX_TOKENS=4096，会继续尊重这些配置；要采用新策略，请分别改为 0.2 和 0 后重启。models.json 可为单个模型添加 `"maxOutputTokens": 32768`（仅为格式示例，按供应商实际限制填写），重选模型或重启加载。未配置时日志显示单次输出能力未知，不按名称猜测；网关可能拒绝过大的 max_tokens。摘要请求还会按实际输出上限缩小输入分块，给输入与输出共用窗口留空间。
 
 摘要放在首条保留 user 消息的资料区，避免将历史提升为 system 指令。会话 JSON 在首次成功压缩后升级 v3，保存全量原始消息、摘要、覆盖条数、源指纹与时间；v1/v2 继续兼容。恢复和切模型复用摘要，重新计算当前预算。当前执行中的任务不压缩，过大的近期/当前任务仍可能超限；工具文件修改不回滚。摘要由模型生成，结构校验不保证事实完全准确。详见[压缩实现与边界](docs/architecture.md#context-compaction)。
 
@@ -891,7 +903,11 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/c
 
 2026-10-26 模型容量阶段：完整 `mvn verify` 共 640 项通过，失败/错误/跳过均为 0。新增 32 项覆盖精确模型身份、共享目录、未知容量、严格配置校验/脱敏、有界读取、动态重选/恢复、切换失败保留状态和底栏容量。生产 JAR 另通过 6 组隔离本地 HTTP/SSE 验证：配置检查不联网、不同模型容量匹配、聊天切换与历史、恢复时重载、错误配置在请求前拦截、容量元数据不改变业务请求且缺文件兼容。没有调用真实厂商或读取真实 .env。
 
-2026-10-26 历史压缩阶段：完整 `mvn verify` 共 **744 项通过**，失败/错误/跳过均为 0；新增 46 项覆盖配置、严格摘要结构、完整任务边界、分块与 Unicode、超时/次数限制、候选失败回退、原文留存、v3 恢复/指纹/写盘重试、ReAct 计数与 /compact。生产 JAR 使用隔离本地 HTTP/SSE 服务验证自动/手动摘要、输出上限、工具组配对、完整原文保存、离线恢复/切模型、业务失败仍保留已保存摘要，以及摘要失败后预算内继续/超限阻止。未使用真实厂商或用户密钥。
+2026-10-27 自适应压缩阶段：完整 `mvn verify` 共 **770 项通过**，失败/错误/跳过均为 0。新增 11 项覆盖 Token 分流、模型容量适配、任务/工具组边界、Unicode 大消息分片、Reduce 总预算与调用数预检、实际并发上限、乱序完成后的来源顺序、旧摘要只进入一次合并、失败取消、排队超时、调用方中断及旧状态保护。生产 JAR 本地 HTTP/SSE 联测验证 Single、实际并行 Map、一次 Reduce、自动/手动入口、预算、完整原文保存与恢复、业务失败/摘要失败回退；未调用真实厂商，真实延迟与摘要质量仍需实测。
+
+动态摘要额度阶段：完整 `mvn verify` 共 **759 项通过**，失败/错误/跳过均为 0。新增 7 项专项验证剩余空间分配、独立模型输出上限、三轮保护/两轮回退、20%～25% 容许范围、超大摘要、输入加输出共同占用窗口及大整数边界；原有失败诊断、完整原文与持久化回归保留。生产 JAR 本地 HTTP/SSE 联测验证自动/手动动态额度大于普通回答预留且符合模型输出上限、原文与摘要保存/恢复、工具组配对和失败回退；未使用真实厂商或用户密钥。
+
+历史压缩第一版：完整 `mvn verify` 共 **744 项通过**，失败/错误/跳过均为 0；新增 46 项覆盖配置、严格摘要结构、完整任务边界、分块与 Unicode、超时/次数限制、候选失败回退、原文留存、v3 恢复/指纹/写盘重试、ReAct 计数与 /compact。生产 JAR 使用隔离本地 HTTP/SSE 服务验证自动/手动摘要、输出上限、工具组配对、完整原文保存、离线恢复/切模型、业务失败仍保留已保存摘要，以及摘要失败后预算内继续/超限阻止。未使用真实厂商或用户密钥。
 
 上下文组装阶段：完整 `mvn verify` 共 658 项通过，失败/错误/跳过均为 0；新增 18 项覆盖完整消息组/调用配对、分类估算、Unicode、逐次工具回填、失败历史隔离、输入前预览、恢复、模式筛选、/context 和估算/实际来源区分。生产 JAR 通过隔离本地 SSE 两次请求联测：7 个工具 schema、read_file 结果关联、最终完整消息保存、恢复后离线重新估算。未使用真实厂商或用户密钥。
 

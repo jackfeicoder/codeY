@@ -151,4 +151,14 @@ class ModelCapabilitiesLoaderTest {
         write("{\"models\":[{\"profile\":\"fixture\",\"modelId\":\"a\",\"contextWindow\":9223372036854775807}]}");
         assertEquals(Long.MAX_VALUE, load("fixture", "a").contextWindow());
     }
+
+    @Test void optionalSingleOutputCapIsIndependentFromBudgetReserveAndStrictlyValidated() throws Exception {
+        write("{\"models\":[{\"profile\":\"fixture\",\"modelId\":\"a\",\"contextWindow\":1000000,\"outputReserveTokens\":8192,\"maxOutputTokens\":65536}]}");
+        var model = load("fixture", "a"); assertEquals(65536L, model.maxOutputTokens()); assertEquals(8192L, model.outputReserveTokens());
+        assertNull(new ModelCapabilities(1000000L).maxOutputTokens());
+        for (String value : new String[]{"0", "-1", "null", "1.5", "\"65536\"", "2147483648"}) {
+            write("{\"models\":[{\"profile\":\"fixture\",\"modelId\":\"a\",\"contextWindow\":1000000,\"maxOutputTokens\":" + value + "}]}");
+            assertThrows(ConfigException.class, () -> load("fixture", "a"));
+        }
+    }
 }

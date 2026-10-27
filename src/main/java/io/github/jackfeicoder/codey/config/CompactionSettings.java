@@ -11,20 +11,30 @@ import java.util.Map;
  * @param triggerRatio 发送前达到此输入预算比例时尝试摘要
  * @param targetRatio 新请求整体的目标比例，不仅是摘要正文
  * @param keepRecentTurns 优先保留的完整已完成用户任务数，当前任务另行完整保留
- * @param summaryMaxTokens 每次摘要输出的配置上限，实际还受模型预留与可用空间约束
+ * @param summaryMaxTokens 0 表示按剩余空间动态分配；正数为用户额外设置的摘要输出上限
  * @param maxCalls 一次压缩允许的摘要请求总次数，与业务 ReAct 轮次分开
  * @param timeoutSeconds 全部分块共享的总超时秒数
+ * @param singleMaxSourceTokens 来源 Token 的 Single 分界，仍需满足当前模型请求预算
+ * @param chunkTokens Map 块目标上限，优先沿完整任务边界，模型窗口小时自动缩小
+ * @param concurrency 单次压缩最多并行的 Map 数，1..8；Reduce 始终等待全部 Map 完成
  */
 public record CompactionSettings(boolean enabled, BigDecimal triggerRatio, BigDecimal targetRatio,
-                                 int keepRecentTurns, int summaryMaxTokens, int maxCalls, int timeoutSeconds) {
-    public CompactionSettings() { this(true, new BigDecimal("0.8"), new BigDecimal("0.4"), 3, 4096, 8, 60); }
+                                 int keepRecentTurns, int summaryMaxTokens, int maxCalls, int timeoutSeconds,
+                                 int singleMaxSourceTokens, int chunkTokens, int concurrency) {
+    /** 兼容原调用方；新策略默认按 64K 来源分流、64K 分块、最多三个并行请求。 */
+    public CompactionSettings(boolean enabled, BigDecimal triggerRatio, BigDecimal targetRatio,
+                              int keepRecentTurns, int summaryMaxTokens, int maxCalls, int timeoutSeconds) {
+        this(enabled, triggerRatio, targetRatio, keepRecentTurns, summaryMaxTokens, maxCalls, timeoutSeconds, 64000, 64000, 3);
+    }
+    public CompactionSettings() { this(true, new BigDecimal("0.8"), new BigDecimal("0.2"), 3, 0, 24, 60); }
 
     public CompactionSettings {
         validateRatio(triggerRatio); validateRatio(targetRatio);
         if (targetRatio.compareTo(triggerRatio) >= 0 || keepRecentTurns < 2 || keepRecentTurns > 3
-                || summaryMaxTokens < 128 || summaryMaxTokens > 16384 || maxCalls < 1 || maxCalls > 32
-                || timeoutSeconds < 1 || timeoutSeconds > 300) {
-            throw new ConfigException("Invalid compaction settings: target < trigger, recent turns 2..3, summary tokens 128..16384, calls 1..32, timeout 1..300 seconds.");
+                || (summaryMaxTokens != 0 && (summaryMaxTokens < 128 || summaryMaxTokens > 1000000)) || maxCalls < 1 || maxCalls > 32
+                || timeoutSeconds < 1 || timeoutSeconds > 300 || singleMaxSourceTokens < 512 || singleMaxSourceTokens > 1000000
+                || chunkTokens < 512 || chunkTokens > 1000000 || concurrency < 1 || concurrency > 8) {
+            throw new ConfigException("Invalid compaction settings: target < trigger, recent turns 2..3, summary tokens 0 (dynamic) or 128..1000000, calls 1..32, timeout 1..300 seconds, source/chunk tokens 512..1000000, concurrency 1..8.");
         }
         triggerRatio = triggerRatio.stripTrailingZeros(); targetRatio = targetRatio.stripTrailingZeros();
     }
@@ -36,9 +46,11 @@ public record CompactionSettings(boolean enabled, BigDecimal triggerRatio, BigDe
         String flag = values.getOrDefault("CODEY_CONTEXT_COMPACTION_ENABLED", "true").strip();
         if (!flag.equalsIgnoreCase("true") && !flag.equalsIgnoreCase("false")) throw invalid("CODEY_CONTEXT_COMPACTION_ENABLED");
         return new CompactionSettings(Boolean.parseBoolean(flag), ratio(values, "CODEY_CONTEXT_COMPACTION_TRIGGER_RATIO", "0.8"),
-                ratio(values, "CODEY_CONTEXT_COMPACTION_TARGET_RATIO", "0.4"), integer(values, "CODEY_CONTEXT_KEEP_RECENT_TURNS", 3),
-                integer(values, "CODEY_CONTEXT_SUMMARY_MAX_TOKENS", 4096), integer(values, "CODEY_CONTEXT_COMPACTION_MAX_CALLS", 8),
-                integer(values, "CODEY_CONTEXT_COMPACTION_TIMEOUT_SECONDS", 60));
+                ratio(values, "CODEY_CONTEXT_COMPACTION_TARGET_RATIO", "0.2"), integer(values, "CODEY_CONTEXT_KEEP_RECENT_TURNS", 3),
+                integer(values, "CODEY_CONTEXT_SUMMARY_MAX_TOKENS", 0), integer(values, "CODEY_CONTEXT_COMPACTION_MAX_CALLS", 24),
+                integer(values, "CODEY_CONTEXT_COMPACTION_TIMEOUT_SECONDS", 60),
+                integer(values, "CODEY_CONTEXT_COMPACTION_SINGLE_MAX_SOURCE_TOKENS", 64000),
+                integer(values, "CODEY_CONTEXT_COMPACTION_CHUNK_TOKENS", 64000), integer(values, "CODEY_CONTEXT_COMPACTION_CONCURRENCY", 3));
     }
 
     private static BigDecimal ratio(Map<String, String> values, String key, String fallback) {

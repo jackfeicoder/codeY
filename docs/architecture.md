@@ -2280,7 +2280,7 @@ CODEY_LLM_STREAM_INCLUDE_USAGE=true
 
 ### 功能与边界
 
-本节记录上下文模块第一步：每个模型的最大上下文元数据。后续已实现请求组装与本地 Token 估算，见[组装与估算](#context-assembly)；输出预留与输入预算校验现已接入，见[预算管理](#context-budget)；自动摘要仍待实现。当前完整历史原样发送；配置容量不保证请求能被远端接受，也不改变 HTTP 请求内容、权限或消息持久化格式。
+本节记录上下文模块第一步：每个模型的最大上下文元数据。后续已实现请求组装与本地 Token 估算，见[组装与估算](#context-assembly)；输出预留与输入预算校验现已接入，见[预算管理](#context-budget)；已接入[动态历史摘要](#context-compaction)。完整原始历史保留，请求可使用摘要；配置容量不保证请求能被远端接受，也不改变 HTTP 请求内容、权限或消息持久化格式。
 
 同一个 Profile 的不同模型独立配置，不同 Profile 下相同模型 ID 也相互独立。模型选择仍由 .env、启动覆盖与最后选择决定；models.json 不注册模型，不替代 API Key、BASE_URL 或 MODEL 列表，不向模型提问其容量，也未查询厂商元数据。
 
@@ -2310,7 +2310,7 @@ CODEY_LLM_STREAM_INCLUDE_USAGE=true
 
 Profile 使用现有别名规则并转小写，modelId 使用现有 ID 规则、剔除首尾空白并保留大小写；斜杠、冒号等按既有选择规则处理。旧单 Profile 配置的别名为 default。按 profile/modelId 二元键精确匹配，不对子串或厂商名称推断窗口。
 
-文件可提前登记未来模型，但 API 可选模型仍必须加入 .env 的 MODEL 列表。文件不存在、models=[] 或无匹配项返回 unknown，原有配置继续工作；存在文件时严格验证所有条目，未选中条目的错误也需修复。顶层只接受 models 数组，每项必填 profile/modelId/contextWindow，可选 outputReserveTokens/safetyMarginTokens，未知字段、重复 JSON 键、归一化后重复的模型键、尾随 JSON、空标识、非整数、非正数和 Long 越界均报 ConfigException。首版未接入 maxOutputTokens 字段。
+文件可提前登记未来模型，但 API 可选模型仍必须加入 .env 的 MODEL 列表。文件不存在、models=[] 或无匹配项返回 unknown，原有配置继续工作；存在文件时严格验证所有条目，未选中条目的错误也需修复。顶层只接受 models 数组，每项必填 profile/modelId/contextWindow，可选 outputReserveTokens/safetyMarginTokens/maxOutputTokens，未知字段、重复 JSON 键、归一化后重复的模型键、尾随 JSON、空标识、非整数、非正数和 Long 越界均报 ConfigException。现已支持可选 maxOutputTokens，用于约束摘要请求的单次输出上限，不等于普通回答预留。
 
 文件最多 1 MiB、最多 1024 项，拒绝目录及链接等异常文件；有界读取，异常说明不带文件正文、填入值或底层 Jackson 异常。容量只校验合法整数范围，不宣称校验了平台真实规格；总窗口、最大输入及最大输出的差异后续接能力查询时归一化。
 
@@ -2497,7 +2497,7 @@ models.json 原来的三字段条目继续有效，可选增加：
 }
 ```
 
-预留值优先级：当前模型的非空覆盖字段 > 环境变量 > .env > 内置默认；两个覆盖字段独立继承，预警比例目前只支持全局设置。覆盖字段省略表示继承，显式 null 视为配置错误，0 只用于安全余量。配置只接受原三字段及这两个新字段，maxOutputTokens 仍非合法字段。模型元数据读取继续有界，全部条目的类型/基本范围均校验；选择模型时再组合全局默认并验证有效预留合计小于窗口，错误说明不回显配置原文。
+预留值优先级：当前模型的非空覆盖字段 > 环境变量 > .env > 内置默认；两个覆盖字段独立继承，预警比例目前只支持全局设置。覆盖字段省略表示继承，显式 null 视为配置错误，0 只用于安全余量。配置另支持可选 maxOutputTokens，要求正整数且不超过 API Integer 范围；与预留独立。模型元数据读取继续有界，全部条目的类型/基本范围均校验；选择模型时再组合全局默认并验证有效预留合计小于窗口，错误说明不回显配置原文。
 
 已加载的模型覆盖值在重选 /model 或重启后重新读取；全局设置是本次启动快照。选择/恢复先验证预算再创建或保存会话。/model 的预算构造在 active.switchProfile 前完成，失败保留旧模型、容量、实际 usage、历史和默认偏好。没有对其他未选中模型套用当前全局预留，因此可提前配置不同窗口的模型，等选中时验证有效组合。小窗口需要显式降低预留，程序不静默缩减或猜测。
 
@@ -2562,7 +2562,10 @@ AgentLoop 不提交本次任务原消息；通过验收的旧历史摘要单独�
 | 文件 | 职责 |
 |---|---|
 | config/CompactionSettings.java | 全局启用、水位、近期保留数、摘要输出、总调用数和总超时 |
-| context/HistoryCompactor.java | 以完整用户任务切分、适配模型预算分块、滚动摘要、候选验收 |
+| context/HistoryCompactor.java | 保护近期原文、协调规划及执行、最终候选验收与状态应用 |
+| context/CompactionPlanner.java、CompactionPlan.java | 策略选择、来源块/顺序、任务/工具组边界及 Map/Reduce 预算的只读计划 |
+| context/SingleSummaryStrategy.java、MapReduceSummaryStrategy.java | 单次请求或并行 Map + 一次模型 Reduce |
+| context/SummaryExecution.java | 整次压缩的线程池、截止时间、实际请求计数、验收及取消，工作线程不更新 Session |
 | context/SummaryDocument.java | 八类字符串数组；严格 JSON、字段/条目/长度与输出 Token 校验 |
 | context/CompactionState.java | 覆盖的原始消息条数、SHA-256 源指纹、摘要和生成时间 |
 | resources/prompts/compact.md | 独立摘要 system 指令；旧历史只作资料，区分执行/建议/验证 |
@@ -2580,23 +2583,30 @@ AgentLoop 不提交本次任务原消息；通过验收的旧历史摘要单独�
 |---|---|---|
 | CODEY_CONTEXT_COMPACTION_ENABLED | true | 是否启用自动和手动压缩 |
 | CODEY_CONTEXT_COMPACTION_TRIGGER_RATIO | 0.8 | 输入预算触发比例，(0,1]，最多 6 位小数 |
-| CODEY_CONTEXT_COMPACTION_TARGET_RATIO | 0.4 | 整个新请求的目标比例，严格小于触发比例 |
-| CODEY_CONTEXT_KEEP_RECENT_TURNS | 3 | 2 或 3 个完整已完成用户任务；3 在目标空间不足时降至 2 |
-| CODEY_CONTEXT_SUMMARY_MAX_TOKENS | 4096 | 每次摘要输出上限，128..16384 |
-| CODEY_CONTEXT_COMPACTION_MAX_CALLS | 8 | 一次压缩最多 1..32 次摘要请求，与业务模型轮次独立 |
+| CODEY_CONTEXT_COMPACTION_TARGET_RATIO | 0.2 | 整个新请求的期望上限，严格小于触发比例；必要时另放宽 5 个百分点 |
+| CODEY_CONTEXT_KEEP_RECENT_TURNS | 3 | 优先保留 3 轮，放宽后的空间仍不够放最小摘要才降为 2 轮 |
+| CODEY_CONTEXT_SUMMARY_MAX_TOKENS | 0 | 0 为动态剩余空间；正数为额外限制，128..1000000；不是目标长度 |
+| CODEY_CONTEXT_COMPACTION_MAX_CALLS | 24 | 一次压缩最多 1..32 次摘要请求，与业务模型轮次独立 |
 | CODEY_CONTEXT_COMPACTION_TIMEOUT_SECONDS | 60 | 一次压缩总时限 1..300 秒，所有分块共享 |
+| CODEY_CONTEXT_COMPACTION_SINGLE_MAX_SOURCE_TOKENS | 64000 | 来源 Token 分界，512..1000000，仍需满足模型单次请求预算 |
+| CODEY_CONTEXT_COMPACTION_CHUNK_TOKENS | 64000 | Map 块目标，512..1000000，模型预算较小时自动缩小 |
+| CODEY_CONTEXT_COMPACTION_CONCURRENCY | 3 | 单次压缩最多 1..8 个并行 Map，Reduce 等待所有 Map 完成 |
 
 ```text
 inputBudget = contextWindow - outputReserveTokens - safetyMarginTokens
 trigger     = ceil(inputBudget × compactionTriggerRatio)
 target      = floor(inputBudget × compactionTargetRatio)
 fixed       = system + tools + 近期保留原文 + 当前任务 + 协议估算
-summaryCap  ≤ min(summaryMaxTokens, 当前模型输出预留, inputBudget - fixed - 256)
+softLimit   = min(inputBudget, target + ceil(inputBudget × 0.05))
+space       = target - fixed - 256
+              若 space < 128，则使用 softLimit - fixed - 256
+summaryCap  = min(space, 可选模型 maxOutputTokens, 可选用户摘要上限, API Integer 上限)
+summaryInputBudget = min(inputBudget, contextWindow - safetyMarginTokens - summaryCap)
 ```
 
-256 是摘要包装预留；目标空间足够时，summaryCap 进一步降到 target - fixed - 256。小于 128 时跳过。40% 针对整体输入，剩余 20% 也不是专门给摘要的固定区域。触发比例与预算预警比例独立，底栏百分比继续以总窗口为分母。
+256 是摘要包装预留。先把期望上限内的全部剩余空间提供给摘要；没有足够空间时允许额外 5 个百分点，默认最多 25%。最终不足 128 时跳过，不截断近期完整任务。20% 针对整体请求，不要求摘要填满，没有最低生成长度。摘要输出不再受普通回答预留限制；分块时同步预留完整摘要输出额度，避免大输入加大输出超窗口。触发比例与预警比例独立，底栏百分比继续以总窗口为分母。
 
-容量未知时自动和手动摘要都跳过，普通请求仍按原 UNKNOWN 规则执行。没有足够旧轮次时不勉强丢弃近期原文。固定内容已占较多预算时，40% 作为目标，硬输入预算是验收底线。
+容量未知时自动和手动摘要都跳过，普通请求仍按原 UNKNOWN 规则执行。没有足够旧轮次时不勉强丢弃近期原文。期望 20% 可以适度放宽，但候选必须不超过容许总量与硬输入预算；保护内容过大时明确跳过，原始记录不删。模型单次输出能力未配置则标记未知，仅按本地动态空间设置请求，远端可能拒绝，不能把它当成已验证的输出能力。
 
 ### 发送前流程
 
@@ -2604,19 +2614,22 @@ summaryCap  ≤ min(summaryMaxTokens, 当前模型输出预留, inputBudget - fi
 AgentLoop 每一步组装已有摘要 + 近期原文 + 当前任务 + tools
   → 未到触发水位：沿原请求继续
   → 到水位：选原始历史前缀，边界必须是完整用户任务
-      → 优先保留 3 轮，必要时 2 轮；当前任务完整保留
+      → 优先保留 3 轮，放宽 5 个百分点仍无最小摘要空间时尝试 2 轮；当前任务完整保留
       → 旧摘要 + 新覆盖原文，序列化为历史资料
-      → 按当前输入预算二分选择最大片段，避开 Unicode 代理对
-      → compact.md + 滚动摘要 + 当前片段，非流式 generate、无 tools
-      → max_tokens 限制输出；剩余总时限内等待；逐片形成新滚动摘要
+      → CompactionPlanner：按来源 Token 与单次预算选 Single / MapReduce
+      → Single：compact.md + 旧摘要 + 新覆盖历史，一次非流式请求
+      → MapReduce：完整任务优先分块，必要时退到消息/工具组和连续资料片段
+      → 最多三个 Map 并行，按原始块顺序收集子摘要
+      → compact-reduce.md + 一份旧摘要 + 全部子摘要，模型执行合并去重
+      → 每步 max_tokens 限制输出，所有阶段共用总时限
       → stop/无工具、严格 JSON、长度/Token 通过
-      → 最终重建请求：必须比原来小且符合硬输入预算
+      → 最终重建请求：必须比原来小且符合容许总量与硬输入预算
       → 应用摘要状态 → 宿主保存成功后 → 再次预算检查 → 业务模型请求
 ```
 
-消息是 JSON 历史资料，超长单条消息可跨文本片段；这与业务请求的工具消息配对无关，摘要请求自身只有 system + user。摘要提示词明确片段可能不完整，要求保留既有约束、不补造缺失信息。后续压缩读取旧摘要与新覆盖原文，已覆盖大段历史不重复加入来源。
+消息是 JSON 历史资料；分块先保持完整用户任务，其次保持 assistant 与全部关联工具结果，超大组才跨连续资料片段。每段标注原始消息范围与字符偏移，避开 Unicode 代理对。摘要请求自身只有 system + user，不把资料片段作为孤立业务 tool 消息发送。Map 只整理本块，Reduce 按来源顺序判断约束是否被明确替代，未提及不代表失效。后续压缩只使用旧摘要与新覆盖原文，已覆盖大段历史不重复加入来源。
 
-八个字段分别为 goals、constraints、facts、decisions、changes、verification、openIssues、nextSteps；每字段最多 64 条，每条最多 8192 字符，总 JSON 最多 65536 字符，至少一项非空。只接受纯 JSON 或完整 json 围栏，拒绝重复/未知/缺失键、非字符串项及尾随内容。模型新近信息通常优先，旧约束只有明确替代后才作废；事实正确性仍依赖模型，程序结构校验不作事实担保。
+八个字段分别为 goals、constraints、facts、decisions、changes、verification、openIssues、nextSteps；每字段最多 64 条，每条最多 65536 字符，总 JSON 最多 1 MiB 字符（资源保护，独立于 Token 预算），至少一项非空。只接受纯 JSON 或完整 json 围栏，拒绝重复/未知/缺失键、非字符串项及尾随内容。模型新近信息通常优先，旧约束只有明确替代后才作废；事实正确性仍依赖模型，程序结构校验不作事实担保。
 
 摘要放在第一条保留 user 的历史资料前缀，原 user 文本完整保留为后缀，不加入 system。近期 assistant/tool 消息不变，当前任务保持原样。TokenBreakdown 单列 summary，history 只统计未覆盖原文，避免重复计数。
 
@@ -2626,7 +2639,9 @@ v1 文本、v2 工具消息继续加载；无摘要保存为 v2，首次成功�
 
 摘要覆盖旧的已成功历史，因此可以先单独保存，即使之后业务 HTTP 失败也继续有效；当前失败任务不会混进摘要或原始成功记录。写盘失败时保留 dirty 待重试并停止业务请求，沿用原文件与 revision 保护。保存大小仍受 16 MiB 限制，压缩不缩减原始日志文件。
 
-任何分块 HTTP/截断/结构/Token/总超时/次数/最终预算失败，均放弃整次候选；已成功的中间滚动结果不应用。保留旧摘要和原请求，继续硬预算检查：尚有空间时允许业务调用，超限则明确阻止。同一任务中有实际摘要调用后失败，不在后续 ReAct 步反复尝试。中断取消等待并沿原中断通道退出；工作线程只返回候选，迟到响应不能更新 Session。
+任何分块 HTTP/截断/结构/Token/总超时/次数/最终预算失败，均放弃整次候选；已成功的 Map 子摘要不应用。保留旧摘要和原请求，继续硬预算检查：尚有空间时允许业务调用，超限则明确阻止。同一任务中有实际摘要调用后失败，不在后续 ReAct 步反复尝试。中断取消等待并沿原中断通道退出；工作线程只返回候选，迟到响应不能更新 Session。
+
+响应验收单独区分 null、length、非空 tool_calls、非 stop 原因、空正文、JSON 结构/长度及正文估算 Token 超限。失败同时显示 finish_reason、tool_calls 数量、正文 Unicode 码点数、实际 max_tokens 和 completion_tokens；用量缺失显示 unknown，未知远端结束原因显示 other。只输出固定标签和数字，原文、工具名称/参数及任意远端结束原因不回显，避免日志混入敏感资料或终端控制字符。length 提示检查摘要剩余空间、CODEY_CONTEXT_SUMMARY_MAX_TOKENS 和模型 maxOutputTokens，不自动增大额度或重试；推理用量是否包含在输出额度中取决于供应商。
 
 `/compact` 跳过自动水位条件，仍受启用、容量、完整轮次、预算和时间限制；不增加用户轮次，不请求标题。`/context`/`/status`/底栏只预览和统计，不触发摘要网络请求。恢复会话或切换模型复用摘要与原文，按新窗口重新估算，必要时下一次业务请求再压缩。
 
@@ -2636,6 +2651,23 @@ v1 文本、v2 工具消息继续加载；无摘要保存为 v2，首次成功�
 
 ### 验证
 
+动态额度更新后完整 `mvn verify`：759 项通过，失败、错误、跳过均为 0。新增 7 项验证所有剩余空间可用于摘要、与普通回答预留解耦、模型输出能力与额外上限、三轮优先及两轮回退、20%～25% 范围、无可用空间时跳过、大于旧 64K 字符存储限制的有效摘要、分块时输入加允许输出与安全余量不超过窗口、大整数计算边界。生产 JAR 本地 HTTP/SSE 联测确认动态 max_tokens 大于普通回答预留且受模型 maxOutputTokens 限制，原有完整工具组、v3 原文留存、恢复/切模型与失败回退通过；未请求真实厂商。
+
 完整 `mvn verify`：744 项通过，失败、错误、跳过均为 0。压缩阶段新增 46 项，覆盖全局设置来源及范围、严格 JSON/大小约束、保留 3/2 完整轮次与工具组、前缀增量、分块/代理对、总超时/调用数、截断与无效响应拒绝、无实际缩小拒绝、中断、未知容量、写盘失败重试、v3 指纹验证、原文留存、业务计数不受摘要影响、CLI 预览/手动压缩/恢复/切模型。
 
 生产 JAR 使用临时配置和本地 HTTP/SSE 验证摘要非流式且有 max_tokens、业务流式且无新增输出字段、近期工具调用结果成组、自动及手动摘要、全量原文与摘要同存 v3、恢复和切模型不请求网络、业务 HTTP 失败保留已保存摘要、无效摘要时按原预算继续或阻止。本地替身只验证机制与协议，真实厂商的摘要质量、延迟和参数兼容性需另行实测。
+
+
+### 自适应 Single / MapReduce（2026-10-27）
+
+触发方式（手动/自动）与算法路由独立。规划器根据“旧摘要 + 新覆盖原文”的来源 Token 数判断，来源不超过 singleMaxSourceTokens 且单次请求容纳时用 Single；如果仅有旧摘要没有新原文，能容纳时直接 Single。其他情况 MapReduce。64K 是起始策略，不代表所有模型的最优延迟；轮数不是容量依据。
+
+先按完整用户任务打包，再按完整消息或 assistant+全部关联 tool 组拆超大任务；仍超大的组序列化为带原消息范围和字符偏移的资料片段，二分选择可容纳的前缀并避开代理对。业务历史不做拆写。Map 的实际请求预算使用最终摘要额度预留，因 Map 输出不超过最终上限，这是保守的可容纳检查。
+
+规划阶段计算 Reduce 的提示词、旧摘要、来源标记与包装开销，另留 1024 估算 Token 余量；剩余 Reduce 输入空间平均分配给 N 个 Map 作为每块输出上限，再与最终摘要上限取较小值。子摘要先规范化为 JSON 并校验 Token，按原始块编号而非完成顺序组织；旧摘要只提供给 Reduce 一次，不挂工具。实际 Reduce 请求发送前重新估算输入。预算不足或 N+1 超过调用上限时不发送任何请求，本版不做多级 Reduce。
+
+Map 通过有上限的线程池并发执行，完成队列只负责取得已完成结果，子摘要按索引放回原顺序。工作线程仅返回验收后的数据，最终摘要应用仍在宿主线程，Map 不写入 Session 或持久化。一个截止时间覆盖规划、排队、所有 Map 和 Reduce；只有进入模型客户端才计为一次实际摘要请求，不占业务 ReAct 轮次。失败/中断/超时取消等待和未完成 future，关闭线程池；迟到响应不能更新会话。无自动重试、跨次缓存或部分结果保存。
+
+控制台显示来源 Token、策略、预计总调用数、块数、并发上限、逐块完成数及 Map/Reduce 耗时。/context 和 /status 展示路由参数，但预览不调用模型。SummaryDocument 结构和 v3 完整原文保存规则不变。Reduce 提示词位于 prompts/compact-reduce.md，强调来源顺序、旧约束只有明确新要求才能替代、区分计划/执行/验证以及保留不确定性。并发不保证更快，也可能增加费用或触发限流；跨块摘要质量需通过真实任务样本另行评估。
+
+完整 `mvn verify`：770 项通过，失败、错误及跳过均为 0；新增 11 项自适应规划和并发执行测试。同步信号验证实际重叠执行及并发上限、故意乱序完成后按来源顺序合并、旧摘要仅进入 Reduce 一次、失败/超时取消工作线程、排队块不计为已请求、调用方中断标志保留，以及 Reduce 失败不替换旧状态。规划测试覆盖轮数与 Token 分流区别、完整任务/工具组边界、超大资料片段和 Unicode、窗口输入输出共同预算、合并总空间及超调用数预检。生产 JAR 使用隔离本地 HTTP/SSE 服务验证 Single 和真实并行 Map、一次模型 Reduce、两种触发入口、v3 原文留存、恢复/切模型与失败回退。未请求真实厂商，测试替身不证明真实摘要质量或加速比例。

@@ -738,11 +738,15 @@ public final class SessionLauncher {
     }
 
     private void printCompaction() {
-        output.println("  自动压缩：" + (compactionSettings.enabled() ? "开启" : "关闭") + "；触发/目标："
+        output.println("  自动压缩：" + (compactionSettings.enabled() ? "开启" : "关闭") + "；触发/期望上限："
                 + compactionSettings.triggerRatio().multiply(java.math.BigDecimal.valueOf(100)).stripTrailingZeros().toPlainString() + "%/"
                 + compactionSettings.targetRatio().multiply(java.math.BigDecimal.valueOf(100)).stripTrailingZeros().toPlainString()
-                + "% 输入预算；优先保留 " + compactionSettings.keepRecentTurns() + " 个完整用户轮次。");
+                + "% 输入预算（必要时额外容许 5 个百分点）；优先保留 " + compactionSettings.keepRecentTurns() + " 个完整用户轮次。");
+        output.println("  摘要额度：" + (compactionSettings.summaryMaxTokens() == 0 ? "动态剩余空间，无最低长度" : "动态空间内额外限制 " + compactionSettings.summaryMaxTokens() + " tok")
+                + "；模型单次输出上限：" + (budgetPolicy.maxOutputTokens() == null ? "未知（可配置 models.json maxOutputTokens）" : budgetPolicy.maxOutputTokens() + " tok") + "。");
         var state = active == null ? null : active.session().compaction();
+        output.println("  策略：来源≤" + compactionSettings.singleMaxSourceTokens() + " tok 且单次可容纳时 Single；否则 MapReduce；块目标 "
+                + compactionSettings.chunkTokens() + " tok；并发≤" + compactionSettings.concurrency() + "；总调用≤" + compactionSettings.maxCalls() + "。");
         output.println("  当前摘要：" + (state == null ? "尚无" : "覆盖原始历史前 " + state.coveredMessages() + " 条消息")
                 + "；/compact 手动压缩；原始消息保留。");
     }

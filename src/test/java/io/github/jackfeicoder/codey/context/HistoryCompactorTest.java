@@ -23,7 +23,7 @@ class HistoryCompactorTest {
     private final ContextBudgetPolicy budget = new ContextBudgetPolicy(new ModelCapabilities(12000L),
             new ContextBudgetSettings(1024, 1024, new BigDecimal("0.8")));
     private final CompactionSettings settings = new CompactionSettings(true, new BigDecimal("0.8"), new BigDecimal("0.4"), 3, 512, 8, 5);
-    private final List<LlmRequest> requests = new ArrayList<>();
+    private final List<LlmRequest> requests = Collections.synchronizedList(new ArrayList<>());
 
     static SummaryDocument summary() {
         return new SummaryDocument(List.of("完成配置模块"), List.of("不要引入 Spring Boot"), List.of("记录来自历史"),
@@ -59,7 +59,7 @@ class HistoryCompactorTest {
         for (var request : requests) {
             assertTrue(request.tools().isEmpty()); assertFalse(request.toolCallsAllowed());
             assertTrue(request.maxOutputTokens() <= 512); assertTrue(request.messages().get(0).content().contains("只生成摘要"));
-            assertTrue(request.messages().get(1).content().contains("历史数据片段"));
+            assertTrue(request.messages().get(1).content().contains("完整摘要来源"));
         }
     }
 
@@ -137,6 +137,48 @@ class HistoryCompactorTest {
         assertEquals(original, session.messages()); assertFalse(outcome.reason().contains("secret-fixture"));
         var oneCall = new CompactionSettings(true, settings.triggerRatio(), settings.targetRatio(), 3, 512, 1, 5);
         assertFalse(prepare(compactor(oneCall, request -> answer()), session, false).changed()); assertSame(old, session.compaction());
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"null", "length", "tool", "empty", "invalid", "oversized", "filter", "unknown"})
+    void failureDiagnosticsIdentifyCauseAndOnlyExposeBoundedResponseStatistics(String kind) {
+        var session = history("x".repeat(6000)); var original = session.messages();
+        var events = new ArrayList<String>();
+        var compactor = new HistoryCompactor(request -> switch (kind) {
+            case "null" -> null;
+            case "length" -> new LlmResponse(Message.assistant(""), "length", new LlmResponse.TokenUsage(100L, 512L, 612L));
+            case "tool" -> new LlmResponse(Message.assistantToolCalls(List.of(new ToolCall("secret-id", "secret-tool", "{secret-arguments}"))), "tool_calls", null);
+            case "empty" -> new LlmResponse(Message.assistant("  "), "stop", null);
+            case "invalid" -> new LlmResponse(Message.assistant("secret-body"), "stop", null);
+            case "oversized" -> new LlmResponse(Message.assistant(new SummaryDocument(List.of("中".repeat(1000)), List.of(), List.of(),
+                    List.of(), List.of(), List.of(), List.of(), List.of()).json()), "stop", null);
+            case "filter" -> new LlmResponse(Message.assistant("secret-body"), "content_filter", null);
+            default -> new LlmResponse(Message.assistant("secret-body"), "secret-finish\u001b[31m", null);
+        }, budget, settings, builder, new DebugPrinter((event, text) -> events.add(text)));
+        var outcome = prepare(compactor, session, false);
+        String expected = switch (kind) {
+            case "null" -> "未返回响应";
+            case "length" -> "输出被截断";
+            case "tool" -> "返回了工具调用";
+            case "empty" -> "正文为空";
+            case "invalid" -> "JSON 结构或长度校验失败";
+            case "oversized" -> "超过估算 Token 上限";
+            default -> "结束原因不支持";
+        };
+        assertFalse(outcome.changed()); assertEquals(1, outcome.summaryCalls());
+        assertEquals(original, session.messages()); assertNull(session.compaction());
+        assertTrue(outcome.reason().contains(expected), outcome.reason());
+        assertTrue(outcome.reason().contains("max_tokens=512"));
+        assertTrue(outcome.reason().contains("tool_calls=" + (kind.equals("null") ? "unknown" : kind.equals("tool") ? "1" : "0")));
+        if (kind.equals("length")) {
+            assertTrue(outcome.reason().contains("finish_reason=length"));
+            assertTrue(outcome.reason().contains("completion_tokens=512"));
+            assertTrue(outcome.reason().contains("CODEY_CONTEXT_SUMMARY_MAX_TOKENS"));
+        }
+        if (kind.equals("unknown")) assertTrue(outcome.reason().contains("finish_reason=other"));
+        assertTrue(events.stream().anyMatch(text -> text.contains("次摘要请求") && text.contains("max_tokens=512")));
+        assertTrue(events.stream().anyMatch(text -> text.contains(expected) && text.contains("保留原摘要与完整历史")));
+        assertFalse(String.join("\n", events).contains("secret-"));
+        assertFalse(outcome.reason().contains("\u001b"));
     }
 
     @Test void timeoutCancelsWorkerAndRetainsState() throws Exception {

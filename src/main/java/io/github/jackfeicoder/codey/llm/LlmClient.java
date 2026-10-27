@@ -1,6 +1,6 @@
 package io.github.jackfeicoder.codey.llm;
 
-/** 模型调用契约。CLI 与后续 Agent 面向此接口，具体协议由实现类处理。 */
+/** 模型调用契约。并行摘要可并发调用同一客户端，实现须隔离请求状态；具体协议由实现类处理。 */
 public interface LlmClient {
     /**
      * 发送一次非流式请求并返回完整结果；标题生成等场景可保持静默。

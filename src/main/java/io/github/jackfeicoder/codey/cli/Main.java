@@ -303,7 +303,8 @@ public final class Main {
                   Optional models.json in the configuration directory declares contextWindow per profile/modelId.
                   Known windows enable pre-request input budget checks; model outputReserveTokens/safetyMarginTokens override global defaults.
                   /context and /status show estimates, budgets, and compaction. /compact summarizes old turns; raw history is retained.
-                  Auto-compaction defaults to 80% trigger / 40% target of input budget, keeping 3 recent turns (2 if needed).
+                  Auto-compaction defaults to 80% trigger / 20% expected ceiling (+5 percentage points if needed), keeping 3 recent turns (2 if needed).
+                  Summary output uses remaining space, independently of normal output reserves; models.json maxOutputTokens optionally caps a single response.
                   --prompt runs one chat task without a workspace; chat and --prompt stream text by default.
                   CODEY_LLM_STREAM=false disables streaming; CODEY_LLM_STREAM_INCLUDE_USAGE=false omits stream_options.
                   Automatic titles always use non-streaming generate; completed turns are saved as full messages.
