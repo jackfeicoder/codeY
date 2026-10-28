@@ -25,7 +25,7 @@ class CommandCompleterTest {
         var commandsOnly = new CommandCompleter(() -> { throw new AssertionError("No config lookup expected"); }, () -> true);
         assertEquals(List.of("/help"), values(commandsOnly, "/h"));
         assertEquals(List.of("/context"), values(commandsOnly, "/con"));
-        assertEquals(List.of("/mode", "/model", "/more_session"), values(commandsOnly, "/m"));
+        assertEquals(List.of("/mode", "/memory", "/model", "/more_session"), values(commandsOnly, "/m"));
         assertEquals(List.of("ask", "auto"), values(commandsOnly, "/permissions a"));
         assertEquals(List.of("react", "plan"), values(commandsOnly, "/mode "));
         assertEquals(List.of("revoke"), values(commandsOnly, "/permissions r"));
@@ -51,6 +51,14 @@ class CommandCompleterTest {
         var broken = new CommandCompleter(() -> { throw new ConfigException("fixture config error"); }, () -> true);
         assertTrue(values(broken, "/model ").isEmpty());
         assertEquals(List.of("/help"), values(broken, "/h"));
+    }
+
+    @Test void memoryCommandsAndFlagsCompleteWithoutModelLookup() {
+        var local = new CommandCompleter(() -> { throw new AssertionError("no model lookup"); }, () -> true);
+        assertEquals(List.of("/remember"), values(local, "/rem"));
+        assertEquals(List.of("/forget"), values(local, "/fo"));
+        assertEquals(List.of("--user", "--update"), values(local, "/remember --u"));
+        assertEquals(List.of("--always"), values(local, "/remember --user --a"));
     }
 
     /** 使用生产解析器对应的词位置，检查替换的是当前词而非完整输入。 */

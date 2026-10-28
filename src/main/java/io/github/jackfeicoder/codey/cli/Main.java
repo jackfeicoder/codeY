@@ -18,6 +18,8 @@ import io.github.jackfeicoder.codey.config.CompactionSettings;
 import io.github.jackfeicoder.codey.context.HistoryCompactor;
 import io.github.jackfeicoder.codey.context.ContextBudgetPolicy;
 import io.github.jackfeicoder.codey.context.ContextBuilder;
+import io.github.jackfeicoder.codey.config.MemorySettings;
+import io.github.jackfeicoder.codey.memory.*;
 import io.github.jackfeicoder.codey.context.ContextLimitException;
 import io.github.jackfeicoder.codey.llm.ChatCompletionsClient;
 import io.github.jackfeicoder.codey.llm.LlmClient;
@@ -149,6 +151,7 @@ public final class Main {
                 var capabilities = ModelCapabilitiesLoader.load(startup, environment, profiles.activeProfile(), config.model());
                 var budget = new ContextBudgetPolicy(capabilities, ContextBudgetSettings.load(startup, environment)).evaluate(0);
                 System.out.println(CompactionSettings.load(startup, environment));
+                System.out.println(MemorySettings.load(startup, environment));
                 System.out.println("LLM configuration is valid. Profile: " + profiles.activeSelection());
                 System.out.println(config);
                 System.out.println(agentSettings);
@@ -175,11 +178,17 @@ public final class Main {
                 // --prompt 没有工作区，read_file 不会列入可用定义；循环仍由同一 Agent 处理。
                 var stream = new ConsoleStreamOutput(new ConsoleTheme(console != null, !environment.containsKey("NO_COLOR")),
                         debugOutput, () -> { }, false);
+                var memories = new MemoryService(new JsonMemoryStore(SessionSettings.load(startup, environment).dataDirectory()),
+                        MemorySettings.load(startup, environment));
+                var contexts = new ContextBuilder(() -> "", (query, used) -> {
+                    Long limit = budget.evaluate(used).inputBudget();
+                    return memories.select(WorkspaceBinding.none(), query, limit == null ? Long.MAX_VALUE : Math.max(0, limit - used));
+                });
                 AgentResult result;
                 try {
                     result = new AgentLoop(client, createTools(agentSettings, CommandSettings.load(startup, environment)), agentSettings.maxIterations(), debug,
-                            new ContextBuilder(), snapshot -> { }, budget,
-                            new HistoryCompactor(client, budget, compaction, new ContextBuilder(), debug), () -> { })
+                            contexts, snapshot -> { }, budget,
+                            new HistoryCompactor(client, budget, compaction, contexts, debug), () -> { })
                             .run(new Session(basePrompt), prompt, new ToolContext(WorkspaceBinding.none()), stream);
                 } catch (LlmException | ContextLimitException failed) {
                     if (stream.hasDisplayedText()) System.err.println("以上流式内容尚未确认为完整结果。");
@@ -217,6 +226,9 @@ public final class Main {
             System.exit(1);
         } catch (SessionException failed) {
             System.err.println("Session error: " + failed.getMessage());
+            System.exit(1);
+        } catch (MemoryException failed) {
+            System.err.println("Memory error: " + failed.getMessage());
             System.exit(1);
         } catch (IllegalArgumentException invalid) {
             System.err.println("Invalid session options: " + invalid.getMessage());
@@ -261,7 +273,7 @@ public final class Main {
                 return new SessionLauncher.ModelChoice(profiles.activeSelection(), new ChatCompletionsClient(config, streamingSettings),
                         new ChatCompletionsClient(titleConfig), capabilities);
             }, PromptLoader::loadBase, consoleInput, output, errors, options, createTools(agentSettings, commandSettings), debug,
-                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings, budgetSettings, compactionSettings).run();
+                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings, budgetSettings, compactionSettings, MemorySettings.load(startup, environment)).run();
         }
     }
 

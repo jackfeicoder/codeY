@@ -36,7 +36,10 @@ public final class CommandCompleter implements Completer {
             return;
         }
         String command = line.words().get(0);
-        if ("/permissions".equals(command) && line.wordIndex() == 1) {
+        if ("/remember".equals(command) && prefix.startsWith("--")) {
+            for (String option : List.of("--user", "--project", "--always", "--on-demand", "--update", "--title", "--tags"))
+                add(candidates, prefix, option, "长期记忆选项");
+        } else if ("/permissions".equals(command) && line.wordIndex() == 1) {
             add(candidates, prefix, "ask", "请求批准 · 每个文件首次修改时询问");
             add(candidates, prefix, "auto", "帮我批准 · 普通修改自动，风险操作询问");
             add(candidates, prefix, "full", "完全访问 · 跳过常规审批，需明确确认");

@@ -2,6 +2,7 @@ package io.github.jackfeicoder.codey.context;
 
 import io.github.jackfeicoder.codey.agent.WorkMode;
 import io.github.jackfeicoder.codey.llm.LlmRequest;
+import io.github.jackfeicoder.codey.memory.MemorySelection;
 import io.github.jackfeicoder.codey.session.Message;
 import io.github.jackfeicoder.codey.session.MessageHistory;
 import io.github.jackfeicoder.codey.session.MessageRole;
@@ -20,15 +21,25 @@ public final class ContextBuilder {
     /** 宿主按当前工作区加载项目规则；默认库调用保持无规则。 */
     private final java.util.function.Supplier<String> projectRules;
     private final String taskInstructions;
-    public ContextBuilder() { this(() -> "", ""); }
-    public ContextBuilder(java.util.function.Supplier<String> projectRules) { this(projectRules, ""); }
-    private ContextBuilder(java.util.function.Supplier<String> projectRules, String taskInstructions) {
+    /** 接收当前任务目标与不含记忆的输入估算；宿主决定可用剩余预算。 */
+    private final java.util.function.BiFunction<String, Long, MemorySelection> memories;
+    public ContextBuilder() { this(() -> ""); }
+    public ContextBuilder(java.util.function.Supplier<String> projectRules) {
+        this(projectRules, (query, used) -> MemorySelection.EMPTY);
+    }
+    public ContextBuilder(java.util.function.Supplier<String> projectRules,
+                          java.util.function.BiFunction<String, Long, MemorySelection> memories) {
+        this(projectRules, "", memories);
+    }
+    private ContextBuilder(java.util.function.Supplier<String> projectRules, String taskInstructions,
+                           java.util.function.BiFunction<String, Long, MemorySelection> memories) {
         this.projectRules = Objects.requireNonNull(projectRules, "projectRules");
         this.taskInstructions = Objects.requireNonNull(taskInstructions, "taskInstructions");
+        this.memories = Objects.requireNonNull(memories, "memories");
     }
     /** 初始化任务使用独立组装器，共享规则来源，不污染其他任务。 */
     public ContextBuilder withTaskInstructions(String instructions) {
-        return new ContextBuilder(projectRules, instructions);
+        return new ContextBuilder(projectRules, instructions, memories);
     }
 
     /**
@@ -84,8 +95,23 @@ public final class ContextBuilder {
         long definitions = request.tools().stream().mapToLong(estimator::toolTokens).sum();
         // 每条消息约 4 token 的角色/边界，加回复起始开销；none 控制字段也计入估算。
         long overhead = 4L * messages.size() + 3 + (!request.toolCallsAllowed() && !tools.isEmpty() ? 4 : 0);
+        long beforeMemory = estimator.textTokens(base) + estimator.textTokens(runtime) + past + user + assistant
+                + results + definitions + overhead + estimator.textTokens(summaryText) + estimator.textTokens(rules);
+        // 只用当前任务最初的用户目标查询，不把历史、工具输出或记忆自身再作为查询。
+        String query = currentTurn.isEmpty() ? "" : currentTurn.get(0).content();
+        var selected = memories.apply(query, beforeMemory);
+        if (currentTurn.isEmpty()) selected = new MemorySelection(selected.always(), List.of());
+        messages.set(0, Message.system(base + selected.alwaysText() + rules + runtime));
+        if (!selected.recalled().isEmpty() && !currentTurn.isEmpty()) {
+            int index = 1 + recent.size();
+            messages.set(index, Message.user(selected.recalledText() + "\n[当前用户任务]\n" + currentTurn.get(0).content()));
+        }
+        long recall = selected.recalledTokens() + (!selected.recalled().isEmpty() && !currentTurn.isEmpty()
+                ? estimator.textTokens("\n[当前用户任务]\n") : 0);
+        request = new LlmRequest(messages, tools, step < maxSteps);
         return new ContextSnapshot(request, new ContextSnapshot.TokenBreakdown(estimator.textTokens(base),
-                estimator.textTokens(runtime), past, user, assistant, results, definitions, overhead, estimator.textTokens(summaryText), estimator.textTokens(rules)));
+                estimator.textTokens(runtime), past, user, assistant, results, definitions, overhead,
+                estimator.textTokens(summaryText), estimator.textTokens(rules), selected.alwaysTokens(), recall));
     }
 
     /** 运行时指令只叠加在本次 system 副本，保持原有 PLAN 和请求轮次预算语义。 */

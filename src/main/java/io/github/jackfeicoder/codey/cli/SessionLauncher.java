@@ -13,6 +13,8 @@ import io.github.jackfeicoder.codey.config.ProfileSelection;
 import io.github.jackfeicoder.codey.context.ContextBuilder;
 import io.github.jackfeicoder.codey.instruction.ProjectInstructionLoader;
 import io.github.jackfeicoder.codey.instruction.ProjectInitializer;
+import io.github.jackfeicoder.codey.memory.*;
+import io.github.jackfeicoder.codey.config.MemorySettings;
 import io.github.jackfeicoder.codey.context.TokenEstimator;
 import io.github.jackfeicoder.codey.context.ContextSnapshot;
 import io.github.jackfeicoder.codey.context.ContextBudgetPolicy;
@@ -118,7 +120,9 @@ public final class SessionLauncher {
     /** 输入前预览与 Agent 实际请求共用同一组装器，避免两套用量计算逻辑。 */
     private final ProjectInstructionLoader instructionLoader = new ProjectInstructionLoader();
     private String lastInstructionStatus;
-    private final ContextBuilder contexts = new ContextBuilder(this::projectRules);
+    private final ContextBuilder contexts = new ContextBuilder(this::projectRules, this::selectMemories);
+    private final MemoryService memory;
+    private String lastMemoryError;
     /** 全局默认值在启动时注入；模型切换后重新解析单模型覆盖值。 */
     private final ContextBudgetSettings budgetSettings;
     private ContextBudgetPolicy budgetPolicy = ContextBudgetPolicy.unknown();
@@ -202,6 +206,18 @@ public final class SessionLauncher {
                            ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog,
                            int maxIterations, PermissionSettings permissionSettings, ContextBudgetSettings budgetSettings,
                            CompactionSettings compactionSettings) {
+        this(startup, settings, store, models, basePrompt, input, output, errors, options, tools, debug,
+                modelCatalog, maxIterations, permissionSettings, budgetSettings, compactionSettings, new MemorySettings());
+    }
+
+    /** 长期记忆与会话共用用户数据目录，配置由生产宿主显式注入。 */
+    public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
+                           Function<String, ModelChoice> models, Supplier<String> basePrompt,
+                           ConsoleInput input, PrintWriter output, PrintWriter errors, Options options,
+                           ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog,
+                           int maxIterations, PermissionSettings permissionSettings, ContextBudgetSettings budgetSettings,
+                           CompactionSettings compactionSettings, MemorySettings memorySettings) {
+        this.memory = new MemoryService(new JsonMemoryStore(settings.dataDirectory()), memorySettings);
         if (maxIterations < 1 || maxIterations > AgentLoop.MAX_STEPS) throw new IllegalArgumentException("Agent steps must be within 1..100.");
         this.maxIterations = maxIterations;
         this.budgetSettings = java.util.Objects.requireNonNull(budgetSettings, "budgetSettings");
@@ -269,6 +285,12 @@ public final class SessionLauncher {
                         printStatus();
                     } else if (command.equals("/context")) {
                         printContext();
+                    } else if (command.equals("/remember") || command.startsWith("/remember ")) {
+                        memoryCommands().remember(command.substring(9).strip());
+                    } else if (command.equals("/memory") || command.startsWith("/memory ")) {
+                        memoryCommands().list(command.substring(7).strip());
+                    } else if (command.equals("/forget") || command.startsWith("/forget ")) {
+                        memoryCommands().forget(command.substring(7).strip());
                     } else if (command.equals("/init")) {
                         initializeProject();
                     } else if (command.equals("/compact")) {
@@ -308,6 +330,8 @@ public final class SessionLauncher {
                     }
                 } catch (ConfigException failed) {
                     input.theme().line(errors, ConsoleTheme.Tone.ERROR, "Configuration error: " + failed.getMessage());
+                } catch (MemoryException failed) {
+                    input.theme().line(errors, ConsoleTheme.Tone.ERROR, "Memory error: " + failed.getMessage());
                 } catch (SessionException | IllegalArgumentException failed) {
                     input.theme().line(errors, ConsoleTheme.Tone.ERROR, (active != null && active.dirty() ? "未保存，结果仍在内存：" : "Session error: ")
                             + failed.getMessage());
@@ -719,6 +743,8 @@ public final class SessionLauncher {
         output.println("上下文预览（尚未包含下一条用户输入），估算方法：" + TokenEstimator.METHOD);
         output.println(instructionLoader.load(active.snapshot().workspace()).description());
         output.println("  项目规则及标记：≈" + tokens.projectInstructions() + " tok");
+        output.println("  用户常驻记忆：≈" + tokens.alwaysMemory() + " tok");
+        output.println("  按需召回记忆：≈" + tokens.recalledMemory() + " tok（预览无新任务，暂不检索）");
         output.println("  基础提示词：≈" + tokens.basePrompt() + " tok");
         output.println("  运行时模式/轮次指令：≈" + tokens.runtimeInstructions() + " tok");
         output.println("  成功历史（含过去工具调用与结果）：≈" + tokens.history() + " tok");
@@ -732,7 +758,29 @@ public final class SessionLauncher {
         output.println("发送前加入当前输入，每次 ReAct 请求前重新组装；原始历史完整保存，请求可使用摘要。");
         printBudget();
         printCompaction();
-        output.println("压缩后仍超限时阻止下一次模型请求；长期记忆、MCP、Skill 尚未接入。");
+        output.println("压缩后仍超限时阻止下一次模型请求；长期记忆已接入；MCP、Skill 尚未接入。");
+    }
+
+    private MemoryCommands memoryCommands() {
+        return new MemoryCommands(memory, active == null ? WorkspaceBinding.none() : active.snapshot().workspace(),
+                active == null ? null : active.snapshot().id(), output);
+    }
+
+    /** 预算不足时先减少低相关召回；存储错误显式提示，不修改损坏文件。 */
+    private MemorySelection selectMemories(String query, Long used) {
+        try {
+            Long limit = budgetPolicy.evaluate(used).inputBudget();
+            var selected = memory.select(active == null ? WorkspaceBinding.none() : active.snapshot().workspace(), query,
+                    limit == null ? Long.MAX_VALUE : Math.max(0, limit - used));
+            lastMemoryError = null;
+            return selected;
+        } catch (MemoryException failed) {
+            if (!failed.getMessage().equals(lastMemoryError)) {
+                input.theme().line(errors, ConsoleTheme.Tone.ERROR, "记忆未加载：" + failed.getMessage());
+                errors.flush(); lastMemoryError = failed.getMessage();
+            }
+            return MemorySelection.EMPTY;
+        }
     }
 
     /** 每次请求与预览都重新检查小文件；状态变化才提示，避免每轮刷屏。无效规则不截断、不沿用旧副本。 */

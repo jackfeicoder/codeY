@@ -34,6 +34,12 @@
             <artifactId>jackson-databind</artifactId>
             <version>2.18.2</version>
         </dependency>
+        <!-- 中文词典分词，Portable内置基础数据；只在本地记忆检索中使用。 -->
+        <dependency>
+            <groupId>com.hankcs</groupId>
+            <artifactId>hanlp</artifactId>
+            <version>portable-1.8.6</version>
+        </dependency>
         <!-- 测试依赖：仅在测试阶段使用，不打入最终运行 JAR。 -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>

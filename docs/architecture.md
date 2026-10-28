@@ -948,7 +948,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --profile qwen
 
 Session 保存完整文本/工具对话，并非完整执行审计日志；不保存模型失败、中断或预算耗尽的轮次。SessionService/JsonSessionStore 已提供跨进程恢复，不重放旧工具调用。当前仍发送全部历史，没有 Token 预算、裁剪或摘要；超长时可 /clear，新会话不删除旧历史。
 
-模块边界：Session 保存发生过的对话，ContextBuilder 后续选择和组织本次请求，Memory 后续提取/保存/召回可复用事实。context 已实现统一组装、预算与摘要；memory 独立模块仍待实现。
+模块边界：Session 保存发生过的对话，ContextBuilder 后续选择和组织本次请求，Memory 显式保存/召回可复用事实，自动提取后续实现。context 已实现统一组装、预算与摘要；memory 已接入独立本地存储和检索。
 
 阶段记录：最初新增 11 项 Session 与 7 项 ChatCli 测试，共 151 项通过，并完成 8 项内存交互 JAR 检查。目前入口与 /clear 已升级为持久化语义，最新验证见 [第 16 节](#workspace-sessions)。
 
@@ -1756,7 +1756,7 @@ PromptException 表示资源缺失、空白或读取失败，由 Main 展示 Pro
 
 ### 第二阶段：项目指令与提示词组合（根目录已实现）
 
-`instruction` 是独立项目规则来源；`context` 消费规则并管理请求预算；长期记忆仍是独立待实现模块。
+`instruction` 是独立项目规则来源；`context` 消费规则并管理请求预算；长期记忆由独立memory模块管理。
 
 - `ProjectInstructionLoader.load(workspace)` 返回 `ProjectInstructions(path,content,tokens,status,detail)`，NONE/MISSING/LOADED/INVALID 区分状态。根目录普通 AGENTS.md 有界读取，每次组装刷新，拒绝符号链接与越界真实路径；不扫描其他目录或隐式回退其他文件名。
 - 字节上限32768、估算 token 上限2000，JVM 系统属性 `codey.instructions.maxBytes`、`codey.instructions.maxTokens` 可覆盖（分别1..1048576、1..1000000）。UTF-8严格解码，允许BOM。空白、超限或错误返回INVALID且内容为空，显示原因后继续普通对话；绝不截断或沿用过期规则。
@@ -2427,7 +2427,7 @@ ContextBuilder.build(history, currentTurn, tools, mode, step, maxSteps) 不依�
 | 可用工具定义 | ToolRegistry.definitions(ToolContext) 筛选 | 独立 tools 数组：type/function/name/description/parameters JSON Schema，不再复制为 md 提示词 |
 | 工具选择控制 | 最后一次请求 toolCallsAllowed=false | LLM 层发 tool_choice=none；原 Agent 执行防线继续生效 |
 
-模型 ID、URL、认证、stream 和 stream_options 仍由客户端按配置编码，不注入 messages；估算数字不进入 HTTP。工作区在工具筛选和真实路径执行时生效，不自动读取整个工作区或注入目录树；根目录项目规则有界读取并注入。权限审批仍由 Java policy 执行，提示词不授予工具权限。长期记忆、MCP 和 Skill 待后续模块接入。
+模型 ID、URL、认证、stream 和 stream_options 仍由客户端按配置编码，不注入 messages；估算数字不进入 HTTP。工作区在工具筛选和真实路径执行时生效，不自动读取整个工作区或注入目录树；根目录项目规则有界读取并注入。权限审批仍由 Java policy 执行，提示词不授予工具权限。长期记忆已接入；MCP 和 Skill 待后续模块接入。
 
 ### 数据流与持久化边界
 
@@ -2573,7 +2573,7 @@ AgentLoop 不提交本次任务原消息；通过验收的旧历史摘要单独�
 
 ### 职责与文件
 
-压缩减少本次发送的历史信息量。Session 和磁盘仍保留全部成功 user/assistant/tool 原记录，ContextBuilder 负责请求视图，HistoryCompactor 负责选择、生成和验收摘要，SessionService 负责原子保存派生状态。长期记忆跨任务召回、失败任务事件和当前任务内部压缩不在本版范围。
+压缩减少本次发送的历史信息量。Session 和磁盘仍保留全部成功 user/assistant/tool 原记录，ContextBuilder 负责请求视图，HistoryCompactor 负责选择、生成和验收摘要，SessionService 负责原子保存派生状态。长期记忆跨任务召回现已独立接入，失败任务事件和当前任务内部压缩尚待实现。
 
 | 文件 | 职责 |
 |---|---|
@@ -2663,7 +2663,7 @@ Map 的网络/限流/部分服务端错误以及无效摘要按块有限重试�
 
 摘要请求使用当前模型的同一个客户端，非流式，不挂工具；普通聊天仍流式。摘要 API 输出上限只发送 max_tokens，某些推理模型会把推理用量纳入这个参数，也有网关不支持它；拒绝或 length 时按失败流程处理，未做自动兼容重试。摘要调用不占业务轮次或最近业务 usage，但仍会产生厂商调用费用，本版尚未汇总费用。
 
-当前任务内部、极大的近期单轮、system/tools 占用过大仍可能超限；保留两轮不是强行截短单轮。摘要可能遗漏或漂移，完整原文保留用于后续查阅和改进。长期记忆、精确 tokenizer、通用业务请求重试、成本预算及失败事件日志后续实现。
+当前任务内部、极大的近期单轮、system/tools 占用过大仍可能超限；保留两轮不是强行截短单轮。摘要可能遗漏或漂移，完整原文保留用于后续查阅和改进。长期记忆自动提取/语义检索、精确 tokenizer、通用业务请求重试、成本预算及失败事件日志后续实现。
 
 ### 验证
 
@@ -2698,3 +2698,59 @@ Map 完成队列返回块编号、尝试次数、验收后的 JSON 或分类错�
 所有 Map 尝试都使用 CAS 抢占共享调用预算，并为一次 Reduce 保留名额；没有进入客户端的排队或预算拒绝不计数。全局时限/预算可在块重试三次之前结束压缩。重试日志仅输出来源块编号、次数、分类错误与固定诊断，不回显远端异常正文。失败块恢复后复用已成功子摘要，按原来源顺序合并；最终失败则关闭并取消剩余工作，旧摘要及完整原记录不变。成功子摘要仅在本次压缩内保留，不跨 /compact 调用或进程缓存。
 
 完整 `mvn verify`：775 项通过，失败、错误、跳过均为 0。新增 5 项覆盖失败块恢复且成功块只请求一次、相同请求按块重发、全部成功后的 Reduce 屏障、第四次失败时停止、认证错误不重试、为 Reduce 保留预算、并发计数不超发以及退避期间共享总时限。既有取消/中断、原状态保护及单次 Reduce 失败回归保留。生产 JAR 本地 HTTP/SSE 联测模拟单块首次 HTTP 429 后恢复，确认仅失败块补发，其他块仅请求一次，所有块成功后仅执行一次 Reduce；同时验证 Single、自动/手动入口、v3 原文留存、恢复和失败回退。未调用真实厂商。
+
+
+## 长期记忆实现：用户常驻、用户按需、项目按需
+
+### 职责与数据
+
+`memory`管理显式持久条目与检索；`instruction`管理项目常驻AGENTS.md；`context`组装并执行总预算；`session`保存原始完整对话。详细文档保存在docs，通过规则索引按需读取，不在记忆中重复搬运。
+
+`MemoryEntry(id,scope,projectId,loading,title,content,tags,sourceSessionId,createdAt,updatedAt)`：完整UUID、USER/PROJECT、ALWAYS/ON_DEMAND、ISO Instant时间。标题最多120字符，正文8192字符，标签最多16个/每个40字符；项目ID是工作区真实路径SHA256，Windows路径先转小写。PROJECT+ALWAYS拒绝，项目常驻仅AGENTS.md。项目移动/worktree迁移暂不共享；来源会话不证明记忆事实正确。
+
+### 存储和事务
+
+`JsonMemoryStore`在用户dataDirectory/memory/user.json及projects/<id>.json保存schemaVersion=1的Document。构造/空读取不创建文件；保存时拒绝链接及重定向路径段，独立.lock文件tryLock，持锁重新读取当前文件，将mutation应用到最新列表，校验作用域/重复ID/条目数，写同目录随机临时文件并force，最后ATOMIC_MOVE+REPLACE_EXISTING。最多1MiB/1000条，严格重复字段/未知字段/尾随JSON检测。失败不覆盖损坏文件，不退化成非原子写入；锁忙明确重试。锁为协作应用的文件锁，非OS沙箱，不承诺外部程序并发改文件时的跨进程权限隔离。
+
+`MemoryService.remember`新增或完整ID更新，保留创建时间；更新不跨作用域。Unicode NFKC、空白归一化和忽略大小写后的完全相同正文拒绝，不据语义相似覆盖。删除只搜索USER和当前PROJECT，拒绝其他项目与ID短前缀。跨作用域没有事务或全局扫描。
+
+### 检索与选择
+
+`Bm25MemoryRetriever`直接扫描有界候选并临时建立词频，不持久化索引。查询只取当前任务最初的用户输入（最多4096 Unicode码点），不遍历聊天或工具内容。分词通过MemoryTokenizer接口注入，默认HanlpMemoryTokenizer。英文拆camelCase、缩写边界和下划线/分隔符，NFKC归一化后小写；中文用com.hankcs:hanlp:portable-1.8.6的DijkstraSegment，禁用实体识别/POS，索引模式最小子词长度2。底层词图最短路径给出词语，索引模式保留词典认可的子词；过滤少量功能词，不过滤否定词。每段最多8192码点，避免截断UTF-16代理对；标点/emoji不成为检索词。HanLP是中文词典分词，仍非Embedding语义检索，也不是LLM计费tokenizer。正文权重1、标题2、标签3；BM25 k1=1.2、b=.75；无匹配不召回。分数降序，更新时间降序及ID确定平局顺序。读取候选范围在检索前限制，避免其他项目进入词频和结果。
+
+`MemoryService.select`常驻全部保留并校验独立额度；按分数遍历按需候选，剔除与已选/常驻归一化相同内容，依次尝试完整条目，不截断条目。放不下的条目跳过，继续尝试后续较小条目；达到maxResults停止。召回额度包含JSON来源包装和当前任务标记，取配置额度与模型剩余输入空间的较小值。超过总窗口的常驻内容仍由ContextBudgetPolicy阻止发送；常驻配置超限拒绝新增或明确报告加载错误。
+
+### 请求集成与配置
+
+`ContextBuilder`接受记忆provider(query,不含记忆的估算token)。SessionLauncher结合当前模型输入预算计算可用余额，再调用MemoryService；withTaskInstructions保留同一provider，因此/init也使用常驻与按需记忆。压缩固定成本和最终候选同样通过Builder计入记忆。原始历史与当前任务保持不变，构造请求副本时system加入常驻偏好，当前user前缀加入JSON参考资料。参考资料带ID、作用域、更新时间，不作权限授权，也不被提升成system规则。输入前/context预览没有查询，只加载常驻，不展示上一任务的假定召回。
+
+生产--prompt也加载用户级记忆，无工作区不读任何项目；独立库调用默认不读本机记忆，需要宿主显式注入provider。交互中存储损坏明确提示后跳过该次记忆加载，不自动修复；--prompt报Memory error。修复存储后交互下次请求重新加载。记忆和规则不写入Session历史，但实际模型回复可能复述其内容，删除不清除旧会话记录或模型已复述的事实。
+
+MemorySettings从共享配置目录.env加载，环境覆盖：CODEY_MEMORY_ALWAYS_TOKENS默认1000（128..16000），CODEY_MEMORY_RECALL_TOKENS默认2000（0..32000），CODEY_MEMORY_MAX_RESULTS默认5（1..20）。错误配置启动时提示，预算是启发式token而非精确分词。
+
+### 用户命令与边界
+
+/remember [--user|--project] [--always|--on-demand] [--update ID] [--title 标题] [--tags a,b] 内容；无工作区需显式--user，有工作区默认project，默认on-demand。选项只在正文前解析，支持选项参数引号与--终止符；不执行shell。更新是整条替换，未给loading/tags时按默认按需/空标签处理。/memory [关键词]列出或本地检索用户和当前项目，最多展示100条；/forget完整ID删除。命令共用帮助/Tab，不请求模型，也不加入聊天历史。用户手动管理在PLAN模式仍可执行，模型没有记忆写入工具，文件工具审批不用于用户显式记忆管理命令。
+
+未实现自动提取、向量/混合检索、自动遗忘、与AGENTS.md语义去重或跨工作区迁移。关键词检索有同义词漏召回和共享字符误召回风险，可用准确标题与标签改进，后续用样例评估再引入Embedding。
+
+
+### 长期记忆验证
+
+完整mvn verify共825项通过，零失败、错误、跳过；新增30项测试验证存储完整性与事务、作用域与跨会话、完整ID更新/删除、重复内容、独立/总预算、BM25和中英文分词、注入角色与消息副本、摘要/初始化provider继承、CLI分发与补全、环境配置。既有/m菜单测试更新候选集合以包含/memory。生产JAR使用临时配置、数据目录和工作区，6次本地HTTP请求验证保存后重启、--prompt仅用户记忆、项目隔离与恢复、删除即时生效、原始会话不含注入包装。未访问真实供应商或用户数据；这些检查不证明语义召回准确度。
+
+
+### 中文分词替换与领域词典
+
+MemoryTokenizer.tokenize是查询、标题、标签、正文的统一入口。Bm25MemoryRetriever默认注入HanlpMemoryTokenizer，也可通过构造器替换分词实现，分词和排序职责分离。包内tokens诊断入口仍使用默认实现。原单字/双字机械切片已移除，不保留隐式旧算法回退。
+
+HanlpMemoryTokenizer默认使用延迟初始化的共享Segment，纯英文无需加载中文词典；根据HanLP接口约定，只读seg调用可并发，配置仅在构建期执行。独立DynamicCustomDictionary由内存TreeMap构建DoubleArrayTrie和BinTrie，直接传给Segment；不修改全局CustomDictionary，也不在运行中动态增删词。显式List<String>构造器允许宿主/测试创建独立领域词典，互不影响。先构建DAT再供读取，避免空DAT查询异常。
+
+资源memory/domain-words.txt包含编程/Agent词语，每行2..32汉字，允许空行和#注释，64KiB/1024条资源上限；词频10000、词性nz，启用自定义词强制匹配。修改资源需重新构建，首版不支持外部热更新词典。不加载任何项目路径作为词典；Portable基础数据随依赖/JAR提供，无Python服务或运行时下载。jar依赖约7.99MB，首次中文调用会加载词典和统计数据，尚未做冷启动/峰值内存基准。
+
+选择依据：[HanLP Java 1.x文档](https://github.com/hankcs/HanLP/tree/1.x)提供Portable零配置和自定义词典；[Jieba Java上游README](https://raw.githubusercontent.com/huaban/jieba-analysis/master/README.md)列出搜索/索引与用户词典，同时注明原团队不再维护；[Ansj官方仓库](https://github.com/NLPchina/ansj_seg)也是可行的Java方案。本项目选择HanLP是离线Java资源打包和扩展词典的工程取舍，未对三者做质量或吞吐对比测评。
+
+用例：解释一下线程池得到[解释,线程池]，进程池得到[进程池,进程]；上下文/工具调用保留完整词，索引模式可能同时产生词典子词。线程池查询不会仅因共享“池”字命中进程池。真实同义表达依然可能漏召回，不将这项边界测试当成整体准确率证明。
+
+
+分词替换验证：mvn verify共834项通过，零失败/错误/跳过。新增HanlpMemoryTokenizerTest的9项真实词典测试，涵盖完整领域词/基础词典、线程池与进程池、英文标识符、Unicode/停用词、独立词典不污染默认实例、频次/输入上界、并发只读与可替换接口。生产JAR在临时目录下通过6次中文查询/标签的本地HTTP联测，确认随包资源、--prompt用户记忆、工作区隔离/恢复/删除及原始历史未混入注入副本。可执行JAR为11492027字节。未调用真实供应商，未测整体召回准确率。
