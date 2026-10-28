@@ -82,7 +82,7 @@ public final class JsonMemoryStore implements MemoryStore {
         throw new MemoryException("Invalid memory scope.");
     }
     /** 检查包括数据目录在内的已有路径段，拒绝符号链接或目录重定向。 */
-    private static void checkPath(Path path) throws IOException {
+    static void checkPath(Path path) throws IOException {
         Path current = path.getRoot();
         for (Path part : path) {
             current = current.resolve(part);

@@ -948,7 +948,7 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --profile qwen
 
 Session 保存完整文本/工具对话，并非完整执行审计日志；不保存模型失败、中断或预算耗尽的轮次。SessionService/JsonSessionStore 已提供跨进程恢复，不重放旧工具调用。当前仍发送全部历史，没有 Token 预算、裁剪或摘要；超长时可 /clear，新会话不删除旧历史。
 
-模块边界：Session 保存发生过的对话，ContextBuilder 后续选择和组织本次请求，Memory 显式保存/召回可复用事实，自动提取后续实现。context 已实现统一组装、预算与摘要；memory 已接入独立本地存储和检索。
+模块边界：Session 保存发生过的对话，ContextBuilder 后续选择和组织本次请求，Memory 显式管理/条件自动提取/召回可复用事实。context 已实现统一组装、预算与摘要；memory 已接入独立本地存储和检索。
 
 阶段记录：最初新增 11 项 Session 与 7 项 ChatCli 测试，共 151 项通过，并完成 8 项内存交互 JAR 检查。目前入口与 /clear 已升级为持久化语义，最新验证见 [第 16 节](#workspace-sessions)。
 
@@ -2663,7 +2663,7 @@ Map 的网络/限流/部分服务端错误以及无效摘要按块有限重试�
 
 摘要请求使用当前模型的同一个客户端，非流式，不挂工具；普通聊天仍流式。摘要 API 输出上限只发送 max_tokens，某些推理模型会把推理用量纳入这个参数，也有网关不支持它；拒绝或 length 时按失败流程处理，未做自动兼容重试。摘要调用不占业务轮次或最近业务 usage，但仍会产生厂商调用费用，本版尚未汇总费用。
 
-当前任务内部、极大的近期单轮、system/tools 占用过大仍可能超限；保留两轮不是强行截短单轮。摘要可能遗漏或漂移，完整原文保留用于后续查阅和改进。长期记忆自动提取/语义检索、精确 tokenizer、通用业务请求重试、成本预算及失败事件日志后续实现。
+当前任务内部、极大的近期单轮、system/tools 占用过大仍可能超限；保留两轮不是强行截短单轮。摘要可能遗漏或漂移，完整原文保留用于后续查阅和改进。长期记忆语义检索/自动冲突合并、精确 tokenizer、通用业务请求重试、成本预算及失败事件日志后续实现。
 
 ### 验证
 
@@ -2732,7 +2732,7 @@ MemorySettings从共享配置目录.env加载，环境覆盖：CODEY_MEMORY_ALWA
 
 /remember [--user|--project] [--always|--on-demand] [--update ID] [--title 标题] [--tags a,b] 内容；无工作区需显式--user，有工作区默认project，默认on-demand。选项只在正文前解析，支持选项参数引号与--终止符；不执行shell。更新是整条替换，未给loading/tags时按默认按需/空标签处理。/memory [关键词]列出或本地检索用户和当前项目，最多展示100条；/forget完整ID删除。命令共用帮助/Tab，不请求模型，也不加入聊天历史。用户手动管理在PLAN模式仍可执行，模型没有记忆写入工具，文件工具审批不用于用户显式记忆管理命令。
 
-未实现自动提取、向量/混合检索、自动遗忘、与AGENTS.md语义去重或跨工作区迁移。关键词检索有同义词漏召回和共享字符误召回风险，可用准确标题与标签改进，后续用样例评估再引入Embedding。
+已实现规则门控后的自动提取；未实现向量/混合检索、自动遗忘、与AGENTS.md语义去重或跨工作区迁移。关键词检索有同义词漏召回和共享字符误召回风险，可用准确标题与标签改进，后续用样例评估再引入Embedding。
 
 
 ### 长期记忆验证
@@ -2754,3 +2754,37 @@ HanlpMemoryTokenizer默认使用延迟初始化的共享Segment，纯英文无�
 
 
 分词替换验证：mvn verify共834项通过，零失败/错误/跳过。新增HanlpMemoryTokenizerTest的9项真实词典测试，涵盖完整领域词/基础词典、线程池与进程池、英文标识符、Unicode/停用词、独立词典不污染默认实例、频次/输入上界、并发只读与可替换接口。生产JAR在临时目录下通过6次中文查询/标签的本地HTTP联测，确认随包资源、--prompt用户记忆、工作区隔离/恢复/删除及原始历史未混入注入副本。可执行JAR为11492027字节。未调用真实供应商，未测整体召回准确率。
+
+
+## 条件自动提取长期记忆
+
+### 任务完成钩子与边界
+
+SessionLauncher.answer在ChatCli.answer完整完成、captureTurn和save成功后，调用AutoMemoryService.afterSavedTurn，再处理自动标题。自动提取不复用业务system/stream，不混入原始消息或ReAct请求次数，使用当前模型的generate单独调用。/init的临时任务、管理命令和--prompt无持久会话入口跳过。失败主任务或保存失败不触发；后续dirty保存重试不补跑提取。提取中断保留主任务，跳过标题并结束输入循环。
+
+MemoryIntentDetector只检查本轮用户原话，排除完整/未闭合代码块、行引用和行内代码；引用中的触发词不参与门控。明确拒绝记录、能力问句、普通任务或自述“我记住了”不触发。门控识别记住/以后默认/每次偏好/纠正等中文模式，非完备语义识别；规则命中只授权请求提取模型，模型仍可决定无记忆。已有外部请求时保留引号中的具体值，供原文依据检查。
+
+### 提取请求与候选校验
+
+MemoryExtractor加载prompts/memory-extract.md，user数据JSON含userInput、intent、hasWorkspace、scopeHint和最多8条相关既有记忆。只采信本轮用户表达，不发送工具结果或最终回答作为偏好事实；既有记忆只用于重复/冲突判断。非流式、tools为空、toolCallsAllowed=false、max_tokens显式限制。独立输入预算默认4096，另按模型window/output/safety检查；输出默认1024并取已知模型输出上限较小者。独立daemon工作线程Future.get默认10秒，超时cancel(true)，迟到结果不应用；无业务或提取自动重试。
+
+严格响应为{memories:[MemoryCandidate]}，最多3个非null候选；action=ADD/REVIEW、scope=USER/PROJECT、title<=120、content<=1000、tags<=8且每项<=40、evidence<=512非空且逐字存在本轮清理后用户原文，relatedId可空或引用本请求既有同范围ID。stop且无工具/非空，正文<=32768字符且估算不超过输出额度；JSON严格字段、重复键/尾随检查。全组结构与来源先验收，再保存。凭证标记模式只作补充过滤，不保证识别所有敏感数据或语义失真。
+
+scopeHint明确时后端强制一致；有工作区但未明确个人/全局意图默认PROJECT；无工作区且scopeHint仍不明确只复核，禁止无依据扩散成全局。所有CORRECTION意图即使模型给ADD也转人工复核，REVIEW只提示候选内容和相关ID；不持久化候选审批队列、不覆盖/删除旧条目、不改AGENTS.md。自动新增固定ON_DEMAND，常驻需用户显式/remember --user --always管理。
+
+### 存储、幂等与故障
+
+MemoryService.rememberAutomatically使用既有JsonMemoryStore锁事务，仅新增；归一化完全相同正文在锁内跳过，包括已存在的ALWAYS。范围在宿主确定，模型不提供projectId/路径。原条目sourceSessionId追溯会话；具体触发轮次以journal中的会话ID和位置/原输入SHA256关联。
+
+MemoryExtractionJournal在dataDirectory/memory/extractions/<sessionUUID>/<turnKey>.json通过CREATE_NEW创建CLAIMED，写入并force成功后才请求提取。不同会话实例并发只允许一个claim成功。成功/失败用同目录临时文件原子替换状态，内容仅schemaVersion/status/updatedAt/savedIds。即使崩溃留下CLAIMED、失败或结果标记保存失败，存在的claim也阻止隐式重放，取舍是可能漏掉一次提取，避免重复付费或删除后复活。无自动重试、启动回放和标记保留期清理。
+
+AutoMemoryService捕获副流程异常，CLI报告主任务已保存和实际新增数量；不会触发外层“本轮未保存”误报。候选跨文件没有全局事务，部分保存可能保留并准确报告；旧条目不被覆盖。模型调用不更新业务轮次实际usage显示，其额外成本目前没有计入独立总费用统计。
+
+### 配置
+
+MemoryExtractionSettings独立加载CODEY_MEMORY_AUTO_ENABLED=true、AUTO_TIMEOUT_SECONDS=10（1..60）、AUTO_MAX_INPUT_TOKENS=4096（512..16000）、AUTO_MAX_OUTPUT_TOKENS=1024（128..4096），后三个完整键均前缀CODEY_MEMORY_。环境覆盖共享.env，重启生效；Main --check-config也校验。关闭不影响显式管理或已有检索。运行时只在有意图的完整成功持久任务后增加一次提取调用。
+
+
+### 条件自动记忆验证
+
+完整mvn verify共887项通过，零失败/错误/跳过；新增53项：意图检测正反例、引用/代码/否定/能力问句、范围提示与引号值、候选原文依据/范围/旧ID/凭证/严格JSON、全组先验收、重复/常驻保留、纠正人工复核、并发claim、恢复不重放及删除不复活、调用预算、超时取消、中断、配置、真实CLI的先保存后提取/下一轮召回/失败副流程隔离。生产JAR在临时目录通过9次本地HTTP请求：常规输入零额外调用、有效意图单次提取、无工具/非流式/max_tokens、显式命令不重复请求、持久原文不含提取请求、恢复不回放、503后主任务保留、关闭开关、COMPLETED/FAILED日志状态。未调用真实供应商，测试不保证所有自然语言意图和提取语义都正确。

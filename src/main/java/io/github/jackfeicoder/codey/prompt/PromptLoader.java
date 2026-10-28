@@ -26,6 +26,9 @@ public final class PromptLoader {
     /** 项目初始化专用指令。 */
     public static String loadInit() { return loadResource("/prompts/init.md"); }
 
+    /** 成功任务后的长期记忆提取，不复用业务系统提示词。 */
+    public static String loadMemoryExtract() { return loadResource("/prompts/memory-extract.md"); }
+
     /** 按资源路径读取文本；缺失、空白或读取失败时抛出可由 CLI 展示的异常。 */
     static String loadResource(String resourcePath) {
         // 通过类定位资源，支持从构建目录或 JAR 读取，try 自动关闭流。

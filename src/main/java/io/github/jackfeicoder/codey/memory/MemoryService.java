@@ -9,7 +9,7 @@ import java.text.Normalizer;
 import java.time.Instant;
 import java.util.*;
 
-/** 管理作用域、重复检测、整条更新和有界召回；不自动提取或向量化对话。 */
+/** 管理作用域、重复检测、整条更新和有界召回；提取编排独立，不在存储服务中请求模型。 */
 public final class MemoryService {
     /** 存储依赖不接触模型，替换实现不改变业务语义。 */
     private final MemoryStore store;
@@ -69,6 +69,23 @@ public final class MemoryService {
         });
         return selected[0];
     }
+    /** 自动提取只新增按需条目；在锁内去重，已有内容（含常驻）保留，绝不覆盖旧记忆。 */
+    public Optional<MemoryEntry> rememberAutomatically(WorkspaceBinding workspace, MemoryCandidate candidate, String sessionId) {
+        if (candidate.action() != MemoryCandidate.Action.ADD) throw new MemoryException("复核候选不自动保存。");
+        String project = candidate.scope() == MemoryScope.PROJECT ? projectId(workspace) : null;
+        if (candidate.scope() == MemoryScope.PROJECT && project == null) throw new MemoryException("项目记忆需要当前工作区。");
+        var saved = new MemoryEntry[1];
+        store.update(candidate.scope(), project, existing -> {
+            if (existing.stream().anyMatch(e -> normalize(e.content()).equals(normalize(candidate.content())))) return existing;
+            String now = Instant.now().toString();
+            var entry = new MemoryEntry(UUID.randomUUID().toString(), candidate.scope(), project, MemoryLoading.ON_DEMAND,
+                    candidate.title(), candidate.content().strip(), candidate.tags(), sessionId, now, now);
+            var entries = new ArrayList<>(existing); entries.add(entry); saved[0] = entry;
+            return entries;
+        });
+        return Optional.ofNullable(saved[0]);
+    }
+
     /** 删除范围仅限用户与当前项目，其他项目即使知道ID也不会被遍历或删除。 */
     public void forget(WorkspaceBinding workspace, String id) {
         if (!MemoryEntry.validId(id)) throw new MemoryException("删除需要完整记忆 ID。");

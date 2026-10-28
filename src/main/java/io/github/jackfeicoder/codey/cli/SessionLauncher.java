@@ -15,6 +15,7 @@ import io.github.jackfeicoder.codey.instruction.ProjectInstructionLoader;
 import io.github.jackfeicoder.codey.instruction.ProjectInitializer;
 import io.github.jackfeicoder.codey.memory.*;
 import io.github.jackfeicoder.codey.config.MemorySettings;
+import io.github.jackfeicoder.codey.config.MemoryExtractionSettings;
 import io.github.jackfeicoder.codey.context.TokenEstimator;
 import io.github.jackfeicoder.codey.context.ContextSnapshot;
 import io.github.jackfeicoder.codey.context.ContextBudgetPolicy;
@@ -122,6 +123,7 @@ public final class SessionLauncher {
     private String lastInstructionStatus;
     private final ContextBuilder contexts = new ContextBuilder(this::projectRules, this::selectMemories);
     private final MemoryService memory;
+    private final AutoMemoryService autoMemory;
     private String lastMemoryError;
     /** 全局默认值在启动时注入；模型切换后重新解析单模型覆盖值。 */
     private final ContextBudgetSettings budgetSettings;
@@ -217,7 +219,19 @@ public final class SessionLauncher {
                            ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog,
                            int maxIterations, PermissionSettings permissionSettings, ContextBudgetSettings budgetSettings,
                            CompactionSettings compactionSettings, MemorySettings memorySettings) {
+        this(startup, settings, store, models, basePrompt, input, output, errors, options, tools, debug, modelCatalog,
+                maxIterations, permissionSettings, budgetSettings, compactionSettings, memorySettings, new MemoryExtractionSettings());
+    }
+
+    /** 自动记忆配置只在生产宿主加载；测试可注入禁用或短时限，不访问真实.env。 */
+    public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
+                           Function<String, ModelChoice> models, Supplier<String> basePrompt,
+                           ConsoleInput input, PrintWriter output, PrintWriter errors, Options options,
+                           ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog,
+                           int maxIterations, PermissionSettings permissionSettings, ContextBudgetSettings budgetSettings,
+                           CompactionSettings compactionSettings, MemorySettings memorySettings, MemoryExtractionSettings extractionSettings) {
         this.memory = new MemoryService(new JsonMemoryStore(settings.dataDirectory()), memorySettings);
+        this.autoMemory = new AutoMemoryService(memory, settings.dataDirectory(), extractionSettings);
         if (maxIterations < 1 || maxIterations > AgentLoop.MAX_STEPS) throw new IllegalArgumentException("Agent steps must be within 1..100.");
         this.maxIterations = maxIterations;
         this.budgetSettings = java.util.Objects.requireNonNull(budgetSettings, "budgetSettings");
@@ -640,8 +654,24 @@ public final class SessionLauncher {
         if (chat.answer(line)) {
             active.captureTurn();
             active.save();
-            generateTitle();
+            if (taskInstructions.isEmpty()) extractMemory(line, selectedClient);
+            if (!Thread.currentThread().isInterrupted()) generateTitle();
         }
+    }
+
+    /** 保存后运行的附属调用，失败只报告记忆状态，不把成功主任务显示成失败。 */
+    private void extractMemory(String line, LlmClient client) {
+        var outcome = autoMemory.afterSavedTurn(active.snapshot().workspace(), active.snapshot().id(),
+                active.snapshot().messages().size(), line, client, budgetPolicy, text -> { output.println(text); output.flush(); });
+        if (!outcome.attempted()) return;
+        output.println("[长期记忆] " + ConsoleApprovalHandler.clean(outcome.detail()));
+        for (String id : outcome.savedIds()) output.println("  已保存：" + id + "（/memory 查看，/forget ID 删除）");
+        for (var candidate : outcome.reviews()) {
+            output.println("  待检查，未自动保存：" + ConsoleApprovalHandler.clean(candidate.content()));
+            if (candidate.relatedId() != null) output.println("  相关记忆：" + candidate.relatedId() + "；可 /remember --"
+                    + candidate.scope().name().toLowerCase(java.util.Locale.ROOT) + " --update ID 内容 显式更新。");
+        }
+        output.flush();
     }
 
     /** 无参数选择菜单，参数直接切换；revoke 由用户撤销本会话的批准与拒绝。 */
