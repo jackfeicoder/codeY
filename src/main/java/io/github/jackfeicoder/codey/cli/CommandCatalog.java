@@ -14,6 +14,7 @@ public final class CommandCatalog {
             new Command("/mode", "/mode [react|plan]", "切换工作模式；multi 尚待实现"),
             new Command("/status", "/status", "查看模式、模型、估算上下文、实际用量和文件授权"),
             new Command("/context", "/context", "查看上下文组装内容与 Token 估算拆分"),
+            new Command("/init", "/init", "分析工作区并创建或更新 AGENTS.md 项目规则"),
             new Command("/compact", "/compact", "摘要旧历史并保留近期完整轮次，不删除原始记录"),
             new Command("/list", "/list model", "查看供应商、模型 ID 和本地配置状态"),
             new Command("/model", "/model [供应商 [模型ID]]", "查看/切换当前模型；省略 ID 使用第一个模型"),

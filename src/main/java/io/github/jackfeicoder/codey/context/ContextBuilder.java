@@ -17,6 +17,20 @@ public final class ContextBuilder {
     /** 无远程依赖的估算器；未来精确分词可集中替换此处。 */
     private final TokenEstimator estimator = new TokenEstimator();
 
+    /** 宿主按当前工作区加载项目规则；默认库调用保持无规则。 */
+    private final java.util.function.Supplier<String> projectRules;
+    private final String taskInstructions;
+    public ContextBuilder() { this(() -> "", ""); }
+    public ContextBuilder(java.util.function.Supplier<String> projectRules) { this(projectRules, ""); }
+    private ContextBuilder(java.util.function.Supplier<String> projectRules, String taskInstructions) {
+        this.projectRules = Objects.requireNonNull(projectRules, "projectRules");
+        this.taskInstructions = Objects.requireNonNull(taskInstructions, "taskInstructions");
+    }
+    /** 初始化任务使用独立组装器，共享规则来源，不污染其他任务。 */
+    public ContextBuilder withTaskInstructions(String instructions) {
+        return new ContextBuilder(projectRules, instructions);
+    }
+
     /**
      * history 含首条基础 system 与成功历史；currentTurn 是当前 user 及已配对的工具组。
      * currentTurn 为空用于输入前预览；tools 由注册表按工作区/工作模式筛选，审批仍由权限模块执行。
@@ -38,7 +52,9 @@ public final class ContextBuilder {
         MessageHistory.validate(history.subList(1, history.size()));
         validateCurrentTurn(currentTurn);
         String base = history.get(0).content();
-        String runtime = runtimeInstructions(mode, step, maxSteps);
+        String rules = projectRules.get();
+        String runtime = (taskInstructions.isEmpty() ? "" : "\n\n[本次任务指令]\n" + taskInstructions)
+                + runtimeInstructions(mode, step, maxSteps);
         var raw = history.subList(1, history.size());
         String summaryText = "";
         if (state != null) {
@@ -50,7 +66,7 @@ public final class ContextBuilder {
         var recent = new ArrayList<>(raw);
         if (state != null) recent.set(0, Message.user(summaryText + recent.get(0).content()));
         var messages = new ArrayList<Message>();
-        messages.add(Message.system(base + runtime));
+        messages.add(Message.system(base + rules + runtime));
         messages.addAll(recent);
         messages.addAll(currentTurn);
         var request = new LlmRequest(messages, tools, step < maxSteps);
@@ -69,7 +85,7 @@ public final class ContextBuilder {
         // 每条消息约 4 token 的角色/边界，加回复起始开销；none 控制字段也计入估算。
         long overhead = 4L * messages.size() + 3 + (!request.toolCallsAllowed() && !tools.isEmpty() ? 4 : 0);
         return new ContextSnapshot(request, new ContextSnapshot.TokenBreakdown(estimator.textTokens(base),
-                estimator.textTokens(runtime), past, user, assistant, results, definitions, overhead, estimator.textTokens(summaryText)));
+                estimator.textTokens(runtime), past, user, assistant, results, definitions, overhead, estimator.textTokens(summaryText), estimator.textTokens(rules)));
     }
 
     /** 运行时指令只叠加在本次 system 副本，保持原有 PLAN 和请求轮次预算语义。 */

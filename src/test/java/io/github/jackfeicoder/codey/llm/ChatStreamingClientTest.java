@@ -124,6 +124,64 @@ class ChatStreamingClientTest {
         assertNull(result.usage());
     }
 
+    @ParameterizedTest @ValueSource(strings={"empty_placeholder", "repeated_id", "late_id"})
+    void compatibleIdPlaceholdersAndRepeatedIdsKeepOneStableCall(String mode) {
+        handler = exchange -> {
+            start(exchange);
+            send(exchange, event(call(0, mode.equals("late_id") ? "" : "stable-call", "read_file", "{\"path\":"), null));
+            send(exchange, event(call(0, mode.equals("empty_placeholder") ? "" : "stable-call", null, "\"a.txt\"}"), null));
+            send(exchange, event(json.createObjectNode(), "tool_calls") + "data: [DONE]\n\n"); exchange.close();
+        };
+        var result = client().generateStream(request(), part -> { });
+        assertEquals(List.of(new ToolCall("stable-call", "read_file", "{\"path\":\"a.txt\"}")), result.toolCalls());
+    }
+
+    @ParameterizedTest @ValueSource(strings={"conflict", "oversized", "whitespace", "only_empty"})
+    void ambiguousOrInvalidIdsAreDiagnosedAndEntireGroupIsNeverExecuted(String mode) {
+        handler = exchange -> {
+            start(exchange);
+            send(exchange, event(call(0, mode.equals("only_empty") ? "" : "fixture-secret-a", "probe", "{}"), null));
+            String next = switch (mode) {
+                case "conflict" -> "fixture-secret-b";
+                case "oversized" -> "x".repeat(1025);
+                case "whitespace" -> "   ";
+                default -> "";
+            };
+            send(exchange, event(call(0, next, null, null), null));
+            send(exchange, event(json.createObjectNode(), "tool_calls") + "data: [DONE]\n\n"); exchange.close();
+        };
+        var executions = new AtomicInteger();
+        Tool probe = new Tool() {
+            public ToolDefinition definition() { return new ToolDefinition("probe", "probe", json.createObjectNode().put("type", "object")); }
+            public ToolAccess access() { return ToolAccess.READ_ONLY; }
+            public void validateArguments(JsonNode args, ToolContext context) { }
+            public String execute(JsonNode args, ToolContext context) { executions.incrementAndGet(); return "ok"; }
+        };
+        var session = new Session("base");
+        var error = assertThrows(LlmException.class, () -> new AgentLoop(client(), new ToolRegistry().register(probe))
+                .run(session, "run", new ToolContext(WorkspaceBinding.none()), part -> { }));
+        assertEquals(LlmException.Kind.INVALID_RESPONSE, error.kind()); assertEquals(0, executions.get());
+        assertEquals(List.of(Message.system("base")), session.messages()); assertFalse(error.getMessage().contains("fixture-secret"));
+        if (!mode.equals("only_empty")) {
+            assertTrue(error.getMessage().contains("index=0")); assertTrue(error.getMessage().contains("frame=2"));
+            assertTrue(error.getMessage().contains(switch (mode) {
+                case "conflict" -> "ID conflict";
+                case "oversized" -> "exceeds 1024";
+                default -> "only whitespace";
+            }));
+        }
+    }
+
+    @Test void toolIndexZeroCanHaveDifferentIdsAcrossSeparateResponses() {
+        handler = exchange -> {
+            start(exchange); send(exchange, event(call(0, "call-" + requests.get(), "read_file", "{}"), null));
+            send(exchange, event(json.createObjectNode(), "tool_calls") + "data: [DONE]\n\n"); exchange.close();
+        };
+        var client = client();
+        assertEquals("call-1", client.generateStream(request(), part -> { }).toolCalls().get(0).id());
+        assertEquals("call-2", client.generateStream(request(), part -> { }).toolCalls().get(0).id());
+    }
+
     @ParameterizedTest @ValueSource(strings={"missing_done", "missing_finish", "bad_arguments", "bad_second_arguments"})
     void incompleteToolStreamsNeverReachToolExecution(String mode) {
         handler = exchange -> {

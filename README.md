@@ -32,6 +32,7 @@
 | [工具模块](#module-tool) | 已实现六个文件工具及 execute_command，已接入模型、审批和 CLI |
 | [Agent 执行模块](#module-agent) | 已实现：工具循环、轮次预算、中断与完成状态 |
 | [上下文模块](#module-context) | 已实现模型容量、统一组装、Token 估算、输入预算与有界历史摘要 |
+| [项目规则模块](#module-instruction) | 已实现根目录 AGENTS.md、/init、大小校验、动态加载与上下文计数 |
 | [记忆模块](#module-memory) | 待实现：长期事实保存与召回 |
 | [MCP 模块](#module-mcp) | 待实现：外部工具协议与适配 |
 | [权限模块](#module-policy) | 已实现 ask/规则 auto/full、逐文件审批、撤销和拒绝拦截；审计及进程沙箱待实现 |
@@ -219,7 +220,7 @@ Main / SessionLauncher → PromptLoader.loadBase
 
 **实现方式与边界**：直接发送 Markdown 原文，不转换 HTML。加载用资源流，不依赖运行时的源码目录；基础资源缺失或为空时在发请求前报错。所有 Profile 共用基础提示词，修改后重新打包即可。历史会话沿用创建时的快照，发现 hash 变化会提示。
 
-工具名称、描述与参数 schema 放在 `ToolDefinition`，已通过请求 `tools` 字段发送；基础提示词仅写使用指导、不维护另一份工具清单。工具输出按待分析的数据处理。标题生成的专用指令目前在 `SessionTitleGenerator` 内。项目 `AGENTS.md`、提示词组合和模式模板尚待接入，详见 [提示词设计](docs/architecture.md#prompt-design)。
+工具名称、描述与参数 schema 放在 `ToolDefinition`，已通过请求 `tools` 字段发送；基础提示词仅写使用指导、不维护另一份工具清单。工具输出按待分析的数据处理。标题生成的专用指令目前在 `SessionTitleGenerator` 内。项目 `AGENTS.md` 与 `/init` 已接入独立 instruction 模块；更多提示词组合和模式模板仍待扩展，详见 [提示词设计](docs/architecture.md#prompt-design)。
 
 <a id="module-message"></a>
 
@@ -287,6 +288,10 @@ CODEY_LLM_STREAM_INCLUDE_USAGE=true
 ```
 
 平台拒绝 stream_options 时将第二项设为 false；平台不支持 SSE 时将第一项设为 false。只接受 true/false，未返回用量显示 `?`；底栏在完整响应后更新“已用”，来源为最近请求的输入 token，尚无实时上下文估算。首版流式正文使用终端默认前景色，不做逐片 Markdown 语法着色。协议边界、超时和验收见 [流式实现](docs/architecture.md#streaming)。
+
+流式工具 ID 兼容：id 缺省、null 或空字符串视为该分片没有提供身份，不覆盖已保存 ID；首片为空也允许后续非空 ID 补齐；同一非空 ID 重复发送不会报错。每个响应独立聚合，下一轮 index 可重新从 0 开始。若同一响应的同一 index 出现不同非空 ID，继续拒绝整个工具组，不猜测拼接或重编号；错误显示 index、JSON 分片序号和 ID 长度，不打印 ID/参数原文。超长、纯空白和始终缺少有效 ID 分别报错，流完整通过校验后才执行工具。
+
+2026-10-27 验证：完整 `mvn verify` 共 783 项通过，无失败、错误或跳过；新增 8 项覆盖空占位、重复/延后 ID、真实冲突、超长/空白/始终缺失身份及跨响应 index 复用。生产 JAR 本地 SSE 验证空占位后正常 read_file、结果回填及完整历史保存，非空冲突时阻止后续请求且不保存残缺轮次；未请求真实厂商。
 
 <a id="module-cli"></a>
 
@@ -551,7 +556,7 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
 
 ### 10. 上下文模块：context（容量、组装、预算与摘要压缩已实现）
 
-**功能**：统一组装模型输入，保留完整成功历史和本次任务的工具消息；提供各部分 Token 估算、模型容量与百分比展示。新建/恢复会话后即可估算，每次 ReAct 请求前重新组装。发送前达到水位时摘要旧历史，保留近期完整任务并重新估算；仍超过输入预算时阻止请求。原始成功历史始终保留；项目指令、长期记忆、MCP 和 Skill 尚未接入。
+**功能**：统一组装模型输入，保留完整成功历史和本次任务的工具消息；提供各部分 Token 估算、模型容量与百分比展示。新建/恢复会话后即可估算，每次 ReAct 请求前重新组装。发送前达到水位时摘要旧历史，保留近期完整任务并重新估算；仍超过输入预算时阻止请求。原始成功历史始终保留；项目规则已接入；长期记忆、MCP 和 Skill 尚未接入。
 
 **涉及文件**：
 
@@ -617,7 +622,7 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
 /context：显示当前预览分项，不调用模型、不展示消息正文、不保存为用户消息
 ```
 
-**组装内容**：基础 system（新会话来自 prompts/base.md，恢复用该会话快照）只注入一次；PLAN 和临近轮次上限的指令只叠加到本次 system 副本；历史包含 user、assistant 正文/调用及 tool 结果；本次任务包含当前 user 和已完成的工具消息组。可用工具以独立 tools 数组发送，内容为名称、描述和 parameters JSON Schema，不另拼一份提示词。模型 ID、URL、认证和流式字段仍由 LLM 客户端处理，不把 API Key 加进 messages。工作区影响工具筛选及执行根目录，当前不自动注入目录树或项目规则文件。
+**组装内容**：基础 system（新会话来自 prompts/base.md，恢复用该会话快照）只注入一次；PLAN 和临近轮次上限的指令只叠加到本次 system 副本；历史包含 user、assistant 正文/调用及 tool 结果；本次任务包含当前 user 和已完成的工具消息组。可用工具以独立 tools 数组发送，内容为名称、描述和 parameters JSON Schema，不另拼一份提示词。模型 ID、URL、认证和流式字段仍由 LLM 客户端处理，不把 API Key 加进 messages。工作区影响工具筛选及执行根目录，不自动注入目录树；根目录 AGENTS.md 由 instruction 模块校验后注入。
 
 **估算与边界**：heuristic-v1 对 ASCII 约按 3 字符/token、非 ASCII 按 UTF-8 字节数的 2/3 估算，并计入调用 ID/参数、消息边界和工具 schema；这是统一启发式算法，不是各模型 tokenizer，也不代表精确 HTTP 字节数或硬性上界。统计分为基础指令、运行时指令、成功历史、本次输入、本次 assistant、当前工具结果、可用工具定义、协议开销、历史摘要；旧工具消息归历史，不重复计入本次。已加入输出预留与安全余量，后续仍需用实际 usage 校准估算准确度。摘要生效后发送摘要 + 未覆盖近期原文 + 当前任务；失败不保存残缺任务，完整成功历史仍保存在本地，长期记忆后续实现。
 
@@ -667,6 +672,35 @@ Map 重试采用 250/500/1000ms 退避，重试仍受原总调用数、总截止
 已有 `.env` 若显式设置 TARGET_RATIO=0.4 或 SUMMARY_MAX_TOKENS=4096，会继续尊重这些配置；要采用新策略，请分别改为 0.2 和 0 后重启。models.json 可为单个模型添加 `"maxOutputTokens": 32768`（仅为格式示例，按供应商实际限制填写），重选模型或重启加载。未配置时日志显示单次输出能力未知，不按名称猜测；网关可能拒绝过大的 max_tokens。摘要请求还会按实际输出上限缩小输入分块，给输入与输出共用窗口留空间。
 
 摘要放在首条保留 user 消息的资料区，避免将历史提升为 system 指令。会话 JSON 在首次成功压缩后升级 v3，保存全量原始消息、摘要、覆盖条数、源指纹与时间；v1/v2 继续兼容。恢复和切模型复用摘要，重新计算当前预算。当前执行中的任务不压缩，过大的近期/当前任务仍可能超限；工具文件修改不回滚。摘要由模型生成，结构校验不保证事实完全准确。详见[压缩实现与边界](docs/architecture.md#context-compaction)。
+
+<a id="module-instruction"></a>
+### 项目规则模块：instruction（已实现）
+
+**功能**：进入项目会话后读取工作区根目录 `AGENTS.md`，每次业务请求只注入一份；`/init` 让 Agent 分析项目并创建或针对性更新规则。用户可手动编辑，后续请求重新读取最新内容。规则按工作区区分，同一工作区多个会话共用。
+
+**涉及文件**：
+
+| 文件 | 职责 |
+|---|---|
+| `instruction/ProjectInstructions.java` | 路径、内容、token、加载状态及来源标记 |
+| `instruction/ProjectInstructionLoader.java` | 有界 UTF-8 读取、字节/token 校验、拒绝目录和符号链接 |
+| `instruction/ProjectInitializer.java` | 检查工作区并组织初始化任务，加载专用指令 |
+| `resources/prompts/init.md` | 约束探索范围、生成内容、已有文件保留及验证方式 |
+| `cli/SessionLauncher.java`、`CommandCatalog.java` | `/init` 分发、帮助和 Tab 补全、加载结果展示 |
+| `context/ContextBuilder.java`、`ContextSnapshot.java` | 请求注入、规则 token 分类、固定预算与临时任务指令隔离 |
+
+**调用流程**：`/init → ProjectInitializer → init.md → 现有 AgentLoop → list/read/write/edit 工具 → 当前权限审批 → 重新读取校验`。普通对话为 `工作区 → Loader → ContextBuilder → 预算检查 → LLM`。初始化完整成功轮次照常保存，专用 init.md 只存在于本次请求 system 副本，不改会话基础提示词；工具参数/结果仍作为原始历史保存。
+
+**实现方式与边界**：
+
+- 首次进入不自动扫描或写文件；缺失提示 `/init`，无工作区拒绝初始化。PLAN 只读，ask/auto/full 行为沿用原审批模块。
+- 提示词指导模型先读已有规则、README、构建配置与关键入口，只写有证据支持的信息；详细文档提供路径索引，链接不自动展开。已有规则更新优先 `edit_file`，实际内容质量仍需用户检查。
+- 默认加载上限 **32768 字节、估算 2000 token**；生成目标约 1000 token、200 行。行数是建议而非硬限制。可用 JVM 参数 `-Dcodey.instructions.maxBytes=32768`（1..1048576）、`-Dcodey.instructions.maxTokens=2000`（1..1000000）覆盖；这是 Java 系统属性，不是 `.env` 字段。
+- 文件缺失、空白、超限、UTF-8 错误或读取失败会显示状态；无效文件不注入、不截断，也不继续使用旧版本。普通对话可继续，修正文件后自动恢复加载；`/context` 查看状态与规则及标记的估算占用。
+- 每次组装有界重读小文件，避免缓存导致手动修改不生效；不读取父目录、子目录规则或 CLAUDE.md。规则不加入持久化历史，压缩时仍作为固定成本保留，恢复会话重新读取磁盘。
+- `AGENTS.md` 是项目指导，权限由 Java policy 强制执行；单文件工具读取它产生的正常工具历史不去重，保证执行记录完整。
+
+使用：进入绑定工作区的会话，执行 `/init`，ask 下确认 `AGENTS.md` 写入，再用 `/context` 查看加载状态。生成后可手动修改，下一次请求生效。
 
 <a id="module-memory"></a>
 
@@ -773,6 +807,7 @@ codeY/
     │   │   ├── cli/
     │   │   ├── config/
     │   │   ├── prompt/
+    │   │   ├── instruction/          # 项目规则加载与初始化
     │   │   ├── agent/
     │   │   ├── llm/
     │   │   ├── tool/builtin/
@@ -784,7 +819,10 @@ codeY/
     │   │   ├── policy/
     │   │   └── observability/
     │   └── resources/prompts/
-    │       └── base.md
+    │       ├── base.md
+    │       ├── compact.md
+    │       ├── compact-reduce.md
+    │       └── init.md
     └── test/
         ├── java/io/github/jackfeicoder/codey/
         └── resources/fixtures/
@@ -902,6 +940,9 @@ java -jar target/codey-0.1.0-SNAPSHOT.jar --chat --workspace E:/Desktop/github/c
 学习代码可从 [阅读顺序与当前调用流程](docs/architecture.md#code-guide) 开始。主代码和测试已补充中文类、方法、字段及关键变量注释；构建配置和环境模板也有用途说明。
 
 ## 验证与文档维护
+
+2026-10-28 项目规则阶段：新增12项测试通过，完整构建 `mvn verify` 通过；补充已有规则局部更新用例后汇总795项，无失败、错误或跳过。覆盖根目录文件加载/缺失/修改/删除/跨工作区隔离、UTF-8/BOM、空白/目录/字节及token限制、规则单份注入和压缩后保留、初始化指令不进入后续任务，以及真实CLI/文件工具/审批/持久化下的创建、拒绝、PLAN拦截、已有文件保护和批准后的局部编辑。使用临时工作区和本地模型替身，未调用真实供应商；生成内容的事实与质量仍需实际检查。
+
 
 2026-10-26 模型容量阶段：完整 `mvn verify` 共 640 项通过，失败/错误/跳过均为 0。新增 32 项覆盖精确模型身份、共享目录、未知容量、严格配置校验/脱敏、有界读取、动态重选/恢复、切换失败保留状态和底栏容量。生产 JAR 另通过 6 组隔离本地 HTTP/SSE 验证：配置检查不联网、不同模型容量匹配、聊天切换与历史、恢复时重载、错误配置在请求前拦截、容量元数据不改变业务请求且缺文件兼容。没有调用真实厂商或读取真实 .env。
 

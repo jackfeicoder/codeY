@@ -75,6 +75,7 @@ codeY/
     │   │   ├── cli/          # Main、ChatCli、装配、输入与展示
     │   │   ├── config/       # 环境配置、模型配置、工作区
     │   │   ├── prompt/       # PromptLoader、PromptException
+    │   │   ├── instruction/  # AGENTS.md 加载、大小校验、/init任务
     │   │   ├── agent/        # AgentLoop、预算、取消、结果
     │   │   ├── llm/          # LlmClient、请求响应、SSE
     │   │   ├── tool/
@@ -87,7 +88,10 @@ codeY/
     │   │   ├── policy/       # 路径范围、审批与执行策略
     │   │   └── observability/ # 执行轨迹、Token 与耗时
     │   └── resources/prompts/
-    │       └── base.md       # 随 JAR 打包的基础提示词
+    │       ├── base.md       # 随 JAR 打包的基础提示词
+    │       ├── compact.md
+    │       ├── compact-reduce.md
+    │       └── init.md       # 项目规则初始化指令
     └── test/
         ├── java/io/github/jackfeicoder/codey/
         └── resources/fixtures/
@@ -1466,7 +1470,7 @@ write_file、edit_file、权限审批与 ReAct/Plan 已实现；继续加入 exe
 
 统一 ContextBuilder，加入规则、历史、工具输出预算和摘要。规则约定文件名及优先级在本阶段确定。
 
-- [ ] 新增项目规则或 Skill 的加载与注入（请求前组装入口已实现）。
+- [x] 根目录 AGENTS.md 加载、预算统计和 /init 初始化；子目录规则与 Skill 另行扩展。
 - [x] 预算包含系统提示词、工具 schema、历史、输出预留和安全余量；估算与实际 usage 分开。
 - [x] 有界摘要保留近期完整工具组、当前任务，摘要包含目标/约束/验证/下一步。
 - [x] 完整成功消息历史留存，请求压缩不破坏源记录（失败/执行中事件另行设计）。
@@ -1698,7 +1702,7 @@ CodeY 实现：类/方法、输入输出与关键控制点。
 
 ## 15. Prompt 模块设计与文件约定
 
-> 第一阶段已实现：PromptLoader 从 classpath 读取 prompts/base.md，Main 将全文作为 system 消息发送。项目指令、提示词组合、运行模式仍为后续设计。
+> 第一阶段已实现：PromptLoader 从 classpath 读取 prompts/base.md，Main 将全文作为 system 消息发送。根目录 AGENTS.md 与 /init 已由 instruction 接入；PLAN 运行时指令已接入。更多提示词组合仍属后续设计。
 
 ### 主流实现的共同点与差异
 
@@ -1717,7 +1721,7 @@ CodeY 实现：类/方法、输入输出与关键控制点。
 |---|---|---|
 | system.md / base.md | 身份、回复习惯、证据要求、基础工作规则 | 第一阶段只做一个基础文件 |
 | 项目名.md / CODEY.md | 自定义项目说明；也可能被作者用作内部模板 | 不是通用约定，先不增加 |
-| AGENTS.md | 工作区中的项目指令，例如测试命令、代码规范 | 后续优先支持这个约定 |
+| AGENTS.md | 工作区中的项目指令，例如测试命令、代码规范 | 已支持根目录加载和 /init |
 | agent.md / Agent.md | 某个项目自定义的默认 Agent 模式或角色 | 与 AGENTS.md 区分，名称相近不代表同一机制 |
 | CLAUDE.md | Claude Code 常用的项目规则文件 | 后续有兼容需求时做显式回退 |
 | ReAct.md | 根据行动结果继续决策的工作指导 | 工具循环实现后按需增加，不要求模型输出内部思维 |
@@ -1750,23 +1754,31 @@ Main 的调用流程调整为：加载配置 → 选择模型 Profile → 读取
 
 PromptException 表示资源缺失、空白或读取失败，由 Main 展示 Prompt error 并以退出码 1 结束；配置与模型异常继续使用各自类型。修改 base.md 后重新构建 JAR 即生效，无需调整 LLM 适配器。
 
-### 第二阶段：项目指令与提示词组合
+### 第二阶段：项目指令与提示词组合（根目录已实现）
 
-有工作区与会话后再增加两个类：
+`instruction` 是独立项目规则来源；`context` 消费规则并管理请求预算；长期记忆仍是独立待实现模块。
 
-- ProjectInstructionsLoader：读取明确指定工作区根目录的 AGENTS.md；文件可选，缺失时继续运行。首版不递归扫描、不读取任意父目录；限制文件大小，例如 16 KiB，并校验实际路径属于工作区，记录来源路径。
-- PromptAssembler：组合基础提示词、已启用模式和运行环境信息；将项目指令作为带来源标签的独立上下文块供 ContextBuilder 使用，避免与内置规则混成无来源文本。
-
-首版只选一个项目规则来源。后续若支持 CLAUDE.md，明确使用“AGENTS.md 优先，缺失时回退 CLAUDE.md”的 CodeY 自身规则，不同时重复注入多个内容近似的文件。
+- `ProjectInstructionLoader.load(workspace)` 返回 `ProjectInstructions(path,content,tokens,status,detail)`，NONE/MISSING/LOADED/INVALID 区分状态。根目录普通 AGENTS.md 有界读取，每次组装刷新，拒绝符号链接与越界真实路径；不扫描其他目录或隐式回退其他文件名。
+- 字节上限32768、估算 token 上限2000，JVM 系统属性 `codey.instructions.maxBytes`、`codey.instructions.maxTokens` 可覆盖（分别1..1048576、1..1000000）。UTF-8严格解码，允许BOM。空白、超限或错误返回INVALID且内容为空，显示原因后继续普通对话；绝不截断或沿用过期规则。
+- `ContextBuilder(Supplier<String>)` 在每次组装时获取带来源标签的规则，拼到基础 system 之后、任务/PLAN/预算指令之前，只注入一份。`TokenBreakdown.projectInstructions` 包含规则和包装，计入总量。压缩固定成本也经由同一 Builder 计算；项目规则不属于被摘要替代的历史。
+- `/init` 由命令目录统一提供帮助与补全。`ProjectInitializer` 检查工作区，`PromptLoader.loadInit()` 加载 `prompts/init.md`；用 `withTaskInstructions` 创建本次专用 Builder，AgentLoop和HistoryCompactor共用它，结束后恢复普通 Builder。初始化提示词不写入基础 system 或保存历史。
+- 初始化由现有 ReAct 探索目录、README、构建和关键入口，生成简介/关键目录/必要约定/验证命令/按任务的文档索引。生成目标约1000 token、200行，详细文档不展开；现有规则先读后针对性编辑。生成是否属实与高质量仍需要检查，提示词约束不冒充程序验证。
+- 写入通过原 write_file/edit_file 与 PermissionService；PLAN不提供写工具且执行器也拦截。拒绝或失败不另走文件写入通道。完成后宿主重新读磁盘，显示实际加载状态，不仅采信模型的完成声明；即使新文件超限，文件仍保留，明确显示未加载并提示精简。
+- 初始化完整任务与普通任务一样保存用户/assistant/tool原始记录，初始化 system指令不持久化；文件规则作为请求视图，不加入原始历史。工具读取规则正文仍正常保存。会话恢复按当前工作区加载，不恢复规则旧快照，也不跨项目共享规则。
 
 ```text
-PromptLoader ─────────────── 基础行为说明 ─┐
-ProjectInstructionsLoader ── 项目规则/来源 ─┼→ ContextBuilder → LlmRequest
-PromptAssembler ──────────── 模式/运行环境 ─┤
-Session ──────────────────── 历史/当前请求 ─┘
+/init → ProjectInitializer → init.md → task ContextBuilder → AgentLoop
+                                                    ↓
+                               工具审批 → write/edit AGENTS.md
+                                                    ↓
+工作区 → ProjectInstructionLoader → ContextBuilder → 输入预算检查 → LLM
+                                          ↓
+                                  /context 规则状态与计数
 ```
 
-PromptAssembler 负责提示词片段组合；ContextBuilder 负责消息顺序、会话历史、工具结果和上下文预算。基础内容可以在会话开始时加载，模式与工具变化时重新组装相关片段；不要让 PromptLoader 同时承担记忆管理。
+首版没有子目录继承、路径匹配规则、链接自动展开、自动记忆写入和CLAUDE.md回退。首次接触项目只检查文件，不自动发起初始化扫描。
+
+验证：ProjectInstructionsTest 与 ProjectInitCliTest 共12项，使用临时目录和模型替身覆盖加载/限制/刷新/跨项目隔离、请求单份注入/压缩保留/临时指令隔离、真实审批创建与拒绝、PLAN阻止写入、已有文件保护与局部编辑。完整构建通过，汇总795项测试无失败、错误或跳过。生成规则质量不由结构测试保证。
 
 ### 第三阶段：工具与模式提示词
 
@@ -1863,7 +1875,7 @@ WorkspaceBinding 明确区分 DIRECTORY 与 NONE：DIRECTORY 保存绝对真实�
 - 相对路径相对启动目录解析；接受带空格的路径，使用 Path.toRealPath 校验存在且为目录，不要求必须是 Git 仓库，也不要求目录一定可写。
 - 启动参数优先；没有参数时通过菜单明确选择。CODEY_WORKSPACE 提供“配置建议目录”菜单项，进程环境覆盖启动目录 .env；模板中的点号不自动跳过选择，也不覆盖历史会话的绑定。
 - 配置建议目录作为额外选项展示，即使与当前目录相同也不会自动选定；失效建议不阻止选择其他目录。显式 --workspace 无效时报告参数错误。
-- Main 注册六个文件工具与 execute_command，按会话工作区筛选是否展示；NONE 不展示且拒绝执行工作区工具。权限审批与本地命令已接入，项目指令后续接入。选目录本身不扫描整个项目或把全项目注入模型。
+- Main 注册六个文件工具与 execute_command，按会话工作区筛选是否展示；NONE 不展示且拒绝执行工作区工具。权限审批与本地命令已接入，根目录项目指令已接入。选目录本身不扫描整个项目或把全项目注入模型。
 
 工作区是文件和命令的定位依据；读写工具已检查路径范围，审批已由策略模块处理，进程隔离后续实现。选定目录后模型可浏览、定位、搜索、读取及写入文件，命令通过 execute_command 接入，工作目录不构成进程沙箱。
 
@@ -1887,7 +1899,7 @@ WorkspaceBinding 明确区分 DIRECTORY 与 NONE：DIRECTORY 保存绝对真实�
 
 systemPrompt 单独存储，恢复时仅生成一条 system 消息，再追加保存的对话；不向已包含 system 的列表重复注入 base.md。数据 DTO 与 LLM 请求 JSON 分开，磁盘版本不依赖服务商 wire 格式。
 
-文件中不序列化 LlmConfig、完整环境变量或 API Key；Profile 的当前凭证只在启动时重新解析。消息是用户与模型产生的原文，因此仍可能含用户主动粘贴的敏感内容。恢复旧会话首版沿用其基础提示词快照，若与当前 base.md 摘要不同则显示提示；后续项目规则与真实工具能力需重新加载，不恢复过期权限。
+文件中不序列化 LlmConfig、完整环境变量或 API Key；Profile 的当前凭证只在启动时重新解析。消息是用户与模型产生的原文，因此仍可能含用户主动粘贴的敏感内容。恢复旧会话首版沿用其基础提示词快照，若与当前 base.md 摘要不同则显示提示；项目规则与真实工具能力重新加载，不恢复过期权限。
 
 当前保存有最终回答的完整文本/工具轮次；工具业务失败可作为结果随完成轮次保存，模型失败、中断或预算结束仍无文本时不提交残缺本轮；有效收尾总结可保存并提示预算受限。执行状态和事件日志后续增加，不承诺恢复正在执行的任务。
 
@@ -1950,7 +1962,7 @@ SessionStore 提供 create/save/load/list；实现使用已引入的 Jackson，�
 | cli/SessionLauncher | 全局最近列表、稳定分页、标题/ID 选择与工作区输入；ChatCli 继续负责对话输入 |
 | config | 解析存储位置与建议工作区，保持模型凭证来源不变 |
 
-这些步骤已接通。SessionService 维持 dirty 快照，失败时先重试保存；switchProfile 先保存成功再更新属性。JsonSessionStore 限制快照 16 MiB，严格校验并原子替换。/model 和用户默认已实现，项目规则、上下文预算、执行中恢复和云端接口后续增加。
+这些步骤已接通。SessionService 维持 dirty 快照，失败时先重试保存；switchProfile 先保存成功再更新属性。JsonSessionStore 限制快照 16 MiB，严格校验并原子替换。/model 和用户默认已实现，项目规则和上下文预算已接入，执行中恢复和云端接口后续增加。
 
 实现调用流程：
 
@@ -2244,6 +2256,10 @@ Main → StreamingSettings.load → ChatCompletionsClient(config, settings)
 
 按空行切分 SSE 事件，支持 LF/CRLF/CR、BOM、注释/心跳和多行 data。JSON 从 choices[0].delta 获取正文，usage 可由 choices=[] 的独立帧返回。tool_calls 按 index 分组，name/arguments 逐片追加，允许多个调用交错；ID 一经指定保持一致。处理依据为 [Chat Completions 流式事件定义](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events) 与 [Function calling 流式参数示例](https://developers.openai.com/api/docs/guides/function-calling)。
 
+2026-10-27 工具 ID 兼容修复：id 缺省/null/空字符串均视为未提供身份，不覆盖先前非空 ID；允许首片空占位后补 ID、相同非空 ID 重复。纯空白 ID 和超过 1024 字符的 ID 明确拒绝。同一响应同一 index 的非空 ID 冲突仍拒绝，不把 ID 文本任意拼接或将 index 自动改成另一工具；诊断只输出 index、JSON 分片序号、既有/新 ID 长度，不回显原始 ID 或参数。每个响应新建解码器，因此跨 ReAct 轮次复用 index=0 并使用不同 ID 正常。所有身份及工具组完整校验通过前不执行任何该组工具，不保存失败用户轮次。未采集具体厂商的异常流时，只能确认兼容路径已修复，不能据单条旧日志认定实际返回的是空占位还是非空冲突。
+
+完整 `mvn verify` 783 项通过，失败/错误/跳过为 0；新增 8 项真实本地 HTTP 流式测试覆盖上述身份兼容与拒绝路径，异常组通过 AgentLoop 验证不执行工具、不提交消息。生产 JAR 本地 SSE 两组场景验证空占位后读取临时文件及配对历史持久化、非空冲突时停止且输出脱敏定位信息；未使用真实厂商、密钥或会话。
+
 当前仅支持单候选 index=0，每轮最多 16 个工具，工具索引需从 0 连续，函数名最多 64 个 UTF-16 单元，参数最多 64 Ki 单元。单 SSE 行/事件上限 128 Ki 单元，整个流上限 4 Mi 单元（含协议文本），防止坏帧无限增长。正文聚合后校验 Unicode；UTF-8 字节解码使用严格校验。
 
 必须收到非空 finish_reason 和 [DONE] 才返回完整响应；仅收到结束原因就断开仍按 INVALID_RESPONSE。聚合后复用原有 decode 校验 JSON 对象参数、工具 ID、角色与用量，再由 AgentLoop 校验整组结束状态与重复 ID。完整流之前不进入 ToolExecutor，即使 full 模式也不执行半截调用。整组有一项参数损坏时该组均不执行。
@@ -2411,7 +2427,7 @@ ContextBuilder.build(history, currentTurn, tools, mode, step, maxSteps) 不依�
 | 可用工具定义 | ToolRegistry.definitions(ToolContext) 筛选 | 独立 tools 数组：type/function/name/description/parameters JSON Schema，不再复制为 md 提示词 |
 | 工具选择控制 | 最后一次请求 toolCallsAllowed=false | LLM 层发 tool_choice=none；原 Agent 执行防线继续生效 |
 
-模型 ID、URL、认证、stream 和 stream_options 仍由客户端按配置编码，不注入 messages；估算数字不进入 HTTP。工作区在工具筛选和真实路径执行时生效，当前不自动读取整个工作区、注入目录树或加载项目规则文件。权限审批仍由 Java policy 执行，提示词不授予工具权限。记忆、MCP、Skill 和项目规则待后续模块接入。
+模型 ID、URL、认证、stream 和 stream_options 仍由客户端按配置编码，不注入 messages；估算数字不进入 HTTP。工作区在工具筛选和真实路径执行时生效，不自动读取整个工作区或注入目录树；根目录项目规则有界读取并注入。权限审批仍由 Java policy 执行，提示词不授予工具权限。长期记忆、MCP 和 Skill 待后续模块接入。
 
 ### 数据流与持久化边界
 
@@ -2647,7 +2663,7 @@ Map 的网络/限流/部分服务端错误以及无效摘要按块有限重试�
 
 摘要请求使用当前模型的同一个客户端，非流式，不挂工具；普通聊天仍流式。摘要 API 输出上限只发送 max_tokens，某些推理模型会把推理用量纳入这个参数，也有网关不支持它；拒绝或 length 时按失败流程处理，未做自动兼容重试。摘要调用不占业务轮次或最近业务 usage，但仍会产生厂商调用费用，本版尚未汇总费用。
 
-当前任务内部、极大的近期单轮、system/tools 占用过大仍可能超限；保留两轮不是强行截短单轮。摘要可能遗漏或漂移，完整原文保留用于后续查阅和改进。长期记忆、项目规则、精确 tokenizer、通用业务请求重试、成本预算及失败事件日志后续实现。
+当前任务内部、极大的近期单轮、system/tools 占用过大仍可能超限；保留两轮不是强行截短单轮。摘要可能遗漏或漂移，完整原文保留用于后续查阅和改进。长期记忆、精确 tokenizer、通用业务请求重试、成本预算及失败事件日志后续实现。
 
 ### 验证
 

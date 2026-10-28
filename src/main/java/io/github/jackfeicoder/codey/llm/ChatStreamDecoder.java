@@ -23,6 +23,8 @@ final class ChatStreamDecoder {
     private boolean sawContent;
     private int readChars;
     private boolean skipLf;
+    /** 仅用于定位异常分片的序号，不记录或打印原始响应。 */
+    private int frame;
 
     ChatStreamDecoder(ObjectMapper mapper, Consumer<String> onText) { this.mapper = mapper; this.onText = onText; }
 
@@ -78,6 +80,7 @@ final class ChatStreamDecoder {
     }
 
     private void chunk(String data) throws IOException {
+        frame++;
         JsonNode root;
         try { root = mapper.readTree(data); }
         catch (com.fasterxml.jackson.core.JsonProcessingException malformed) { throw invalid("LLM stream contains malformed JSON."); }
@@ -123,8 +126,15 @@ final class ChatStreamDecoder {
             throw invalid("LLM stream tool index is outside the supported range.");
         Call call = calls.computeIfAbsent(index.intValue(), ignored -> new Call());
         String id = text(item, "id");
-        if (id != null) {
-            if (id.length() > 1024 || (call.id != null && !call.id.equals(id))) throw invalid("LLM stream changed a tool-call ID.");
+        // 部分兼容网关在后续 delta 中发送空 ID 占位：它等同未携带 ID，不能覆盖已有身份。
+        // 非空 ID 必须始终一致；不猜测拼接 ID，也不把冲突 index 自动改成另一个工具。
+        if (id != null && !id.isEmpty()) {
+            String location = " (index=" + index.intValue() + ", frame=" + frame + ", incoming_id_chars=" + id.length() + ").";
+            if (id.length() > 1024) throw invalid("LLM stream tool-call ID exceeds 1024 characters" + location);
+            if (id.isBlank()) throw invalid("LLM stream tool-call ID contains only whitespace" + location);
+            if (call.id != null && !call.id.equals(id)) throw invalid("LLM stream tool-call ID conflict (index="
+                    + index.intValue() + ", frame=" + frame + ", stored_id_chars=" + call.id.length()
+                    + ", incoming_id_chars=" + id.length() + "). Different nonempty IDs share one index.");
             call.id = id;
         }
         String type = text(item, "type");

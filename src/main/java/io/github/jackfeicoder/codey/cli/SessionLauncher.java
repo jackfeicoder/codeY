@@ -11,6 +11,8 @@ import io.github.jackfeicoder.codey.config.ModelProfiles;
 import io.github.jackfeicoder.codey.config.ModelCapabilities;
 import io.github.jackfeicoder.codey.config.ProfileSelection;
 import io.github.jackfeicoder.codey.context.ContextBuilder;
+import io.github.jackfeicoder.codey.instruction.ProjectInstructionLoader;
+import io.github.jackfeicoder.codey.instruction.ProjectInitializer;
 import io.github.jackfeicoder.codey.context.TokenEstimator;
 import io.github.jackfeicoder.codey.context.ContextSnapshot;
 import io.github.jackfeicoder.codey.context.ContextBudgetPolicy;
@@ -114,7 +116,9 @@ public final class SessionLauncher {
     private PermissionService permissions;
     private final RuntimeStatus runtimeStatus = new RuntimeStatus();
     /** 输入前预览与 Agent 实际请求共用同一组装器，避免两套用量计算逻辑。 */
-    private final ContextBuilder contexts = new ContextBuilder();
+    private final ProjectInstructionLoader instructionLoader = new ProjectInstructionLoader();
+    private String lastInstructionStatus;
+    private final ContextBuilder contexts = new ContextBuilder(this::projectRules);
     /** 全局默认值在启动时注入；模型切换后重新解析单模型覆盖值。 */
     private final ContextBudgetSettings budgetSettings;
     private ContextBudgetPolicy budgetPolicy = ContextBudgetPolicy.unknown();
@@ -265,6 +269,8 @@ public final class SessionLauncher {
                         printStatus();
                     } else if (command.equals("/context")) {
                         printContext();
+                    } else if (command.equals("/init")) {
+                        initializeProject();
                     } else if (command.equals("/compact")) {
                         compact();
                     } else if (command.matches("/list\\s+model")) {
@@ -583,7 +589,10 @@ public final class SessionLauncher {
     }
 
     /** 先保存成功回答，再执行一次有界标题任务；生成文本不会加入历史。 */
-    private void answer(String line) {
+    private void answer(String line) { answer(line, ""); }
+
+    private void answer(String line, String taskInstructions) {
+        ContextBuilder taskContexts = taskInstructions.isEmpty() ? contexts : contexts.withTaskInstructions(taskInstructions);
         // 模型客户端/模式在任务开始时固定，运行中不消费切换命令；状态只观察响应。
         final var selectedClient = model.chat();
         LlmClient observed = new LlmClient() {
@@ -601,8 +610,8 @@ public final class SessionLauncher {
                 return response;
             }
         };
-        ChatCli chat = new ChatCli(new AgentLoop(observed, tools, maxIterations, debug, contexts, this::updateContext, budgetPolicy,
-                new HistoryCompactor(selectedClient, budgetPolicy, compactionSettings, contexts, debug), this::saveCompaction), active.session(),
+        ChatCli chat = new ChatCli(new AgentLoop(observed, tools, maxIterations, debug, taskContexts, this::updateContext, budgetPolicy,
+                new HistoryCompactor(selectedClient, budgetPolicy, compactionSettings, taskContexts, debug), this::saveCompaction), active.session(),
                 new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions), input, output, errors);
         if (chat.answer(line)) {
             active.captureTurn();
@@ -708,6 +717,8 @@ public final class SessionLauncher {
         var snapshot = runtimeStatus.context();
         var tokens = snapshot.tokens();
         output.println("上下文预览（尚未包含下一条用户输入），估算方法：" + TokenEstimator.METHOD);
+        output.println(instructionLoader.load(active.snapshot().workspace()).description());
+        output.println("  项目规则及标记：≈" + tokens.projectInstructions() + " tok");
         output.println("  基础提示词：≈" + tokens.basePrompt() + " tok");
         output.println("  运行时模式/轮次指令：≈" + tokens.runtimeInstructions() + " tok");
         output.println("  成功历史（含过去工具调用与结果）：≈" + tokens.history() + " tok");
@@ -721,7 +732,33 @@ public final class SessionLauncher {
         output.println("发送前加入当前输入，每次 ReAct 请求前重新组装；原始历史完整保存，请求可使用摘要。");
         printBudget();
         printCompaction();
-        output.println("压缩后仍超限时阻止下一次模型请求；项目规则、长期记忆、MCP、Skill 尚未接入。");
+        output.println("压缩后仍超限时阻止下一次模型请求；长期记忆、MCP、Skill 尚未接入。");
+    }
+
+    /** 每次请求与预览都重新检查小文件；状态变化才提示，避免每轮刷屏。无效规则不截断、不沿用旧副本。 */
+    private String projectRules() {
+        if (active == null) return "";
+        var rules = instructionLoader.load(active.snapshot().workspace());
+        String status = rules.description();
+        if (!status.equals(lastInstructionStatus)) {
+            output.println(status);
+            output.flush();
+            lastInstructionStatus = status;
+        }
+        return rules.requestText();
+    }
+
+    /** 显式初始化，写入继续走当前模式和逐文件审批；随后读磁盘确认实际结果。 */
+    private void initializeProject() {
+        if (active == null || browsing) {
+            output.println("请先进入一个项目会话，再执行 /init。");
+            return;
+        }
+        var initializer = new ProjectInitializer();
+        String task = initializer.task(active.snapshot().workspace());
+        answer(task, initializer.instructions());
+        output.println("初始化检查：" + instructionLoader.load(active.snapshot().workspace()).description());
+        previewContext();
     }
 
     private void saveCompaction() { active.captureCompaction(); active.save(); }
