@@ -36,7 +36,11 @@ public final class CommandCompleter implements Completer {
             return;
         }
         String command = line.words().get(0);
-        if ("/remember".equals(command) && prefix.startsWith("--")) {
+        if ("/memory".equals(command) && line.wordIndex() == 1) {
+            for (String option : List.of("tidy", "archives", "versions", "restore", "rollback")) add(candidates,prefix,option,"记忆整理与恢复");
+        } else if ("/memory".equals(command) && line.wordIndex() == 2) {
+            add(candidates,prefix,"--user","用户记忆范围"); add(candidates,prefix,"--project","当前项目范围");
+        } else if ("/remember".equals(command) && prefix.startsWith("--")) {
             for (String option : List.of("--user", "--project", "--always", "--on-demand", "--update", "--title", "--tags"))
                 add(candidates, prefix, option, "长期记忆选项");
         } else if ("/permissions".equals(command) && line.wordIndex() == 1) {

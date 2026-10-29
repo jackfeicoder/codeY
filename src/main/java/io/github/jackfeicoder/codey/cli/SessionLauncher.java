@@ -16,6 +16,7 @@ import io.github.jackfeicoder.codey.instruction.ProjectInitializer;
 import io.github.jackfeicoder.codey.memory.*;
 import io.github.jackfeicoder.codey.config.MemorySettings;
 import io.github.jackfeicoder.codey.config.MemoryExtractionSettings;
+import io.github.jackfeicoder.codey.config.MemoryConsolidationSettings;
 import io.github.jackfeicoder.codey.context.TokenEstimator;
 import io.github.jackfeicoder.codey.context.ContextSnapshot;
 import io.github.jackfeicoder.codey.context.ContextBudgetPolicy;
@@ -124,6 +125,7 @@ public final class SessionLauncher {
     private final ContextBuilder contexts = new ContextBuilder(this::projectRules, this::selectMemories);
     private final MemoryService memory;
     private final AutoMemoryService autoMemory;
+    private final MemoryConsolidator memoryConsolidator;
     private String lastMemoryError;
     /** 全局默认值在启动时注入；模型切换后重新解析单模型覆盖值。 */
     private final ContextBudgetSettings budgetSettings;
@@ -230,7 +232,22 @@ public final class SessionLauncher {
                            ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog,
                            int maxIterations, PermissionSettings permissionSettings, ContextBudgetSettings budgetSettings,
                            CompactionSettings compactionSettings, MemorySettings memorySettings, MemoryExtractionSettings extractionSettings) {
-        this.memory = new MemoryService(new JsonMemoryStore(settings.dataDirectory()), memorySettings);
+        this(startup, settings, store, models, basePrompt, input, output, errors, options, tools, debug, modelCatalog,
+                maxIterations, permissionSettings, budgetSettings, compactionSettings, memorySettings, extractionSettings, new MemoryConsolidationSettings());
+    }
+
+    /** 记忆整理与主任务分离，宿主配置水位、冷却及模型调用额度。 */
+    public SessionLauncher(Path startup, SessionSettings settings, SessionStore store,
+                           Function<String, ModelChoice> models, Supplier<String> basePrompt,
+                           ConsoleInput input, PrintWriter output, PrintWriter errors, Options options,
+                           ToolRegistry tools, DebugPrinter debug, Supplier<List<ModelProfiles.ProfileInfo>> modelCatalog,
+                           int maxIterations, PermissionSettings permissionSettings, ContextBudgetSettings budgetSettings,
+                           CompactionSettings compactionSettings, MemorySettings memorySettings, MemoryExtractionSettings extractionSettings,
+                           MemoryConsolidationSettings consolidationSettings) {
+        var memoryStore = new JsonMemoryStore(settings.dataDirectory());
+        this.memory = new MemoryService(memoryStore, memorySettings);
+        this.memoryConsolidator = new MemoryConsolidator(memoryStore, memory, consolidationSettings);
+
         this.autoMemory = new AutoMemoryService(memory, settings.dataDirectory(), extractionSettings);
         if (maxIterations < 1 || maxIterations > AgentLoop.MAX_STEPS) throw new IllegalArgumentException("Agent steps must be within 1..100.");
         this.maxIterations = maxIterations;
@@ -301,8 +318,12 @@ public final class SessionLauncher {
                         printContext();
                     } else if (command.equals("/remember") || command.startsWith("/remember ")) {
                         memoryCommands().remember(command.substring(9).strip());
+                        tidyMemories();
                     } else if (command.equals("/memory") || command.startsWith("/memory ")) {
-                        memoryCommands().list(command.substring(7).strip());
+                        String args = command.substring(7).strip();
+                        var maintenance = new MemoryMaintenanceCommands(memoryConsolidator,
+                                active == null ? WorkspaceBinding.none() : active.snapshot().workspace(), output);
+                        if (!maintenance.execute(args, model == null ? null : model.chat(), budgetPolicy)) memoryCommands().list(args);
                     } else if (command.equals("/forget") || command.startsWith("/forget ")) {
                         memoryCommands().forget(command.substring(7).strip());
                     } else if (command.equals("/init")) {
@@ -654,7 +675,10 @@ public final class SessionLauncher {
         if (chat.answer(line)) {
             active.captureTurn();
             active.save();
-            if (taskInstructions.isEmpty()) extractMemory(line, selectedClient);
+            if (taskInstructions.isEmpty()) {
+                extractMemory(line, selectedClient);
+                if (!Thread.currentThread().isInterrupted()) tidyMemories();
+            }
             if (!Thread.currentThread().isInterrupted()) generateTitle();
         }
     }
@@ -670,6 +694,24 @@ public final class SessionLauncher {
             output.println("  待检查，未自动保存：" + ConsoleApprovalHandler.clean(candidate.content()));
             if (candidate.relatedId() != null) output.println("  相关记忆：" + candidate.relatedId() + "；可 /remember --"
                     + candidate.scope().name().toLowerCase(java.util.Locale.ROOT) + " --update ID 内容 显式更新。");
+        }
+        output.flush();
+    }
+
+    /** 每个范围最多一次模型请求；低水位/同指纹/冷却跳过，不影响已保存的主任务。 */
+    private void tidyMemories() {
+        if (model == null || Thread.currentThread().isInterrupted()) return;
+        var workspace = active == null ? WorkspaceBinding.none() : active.snapshot().workspace();
+        var scopes = workspace.mode() == WorkspaceBinding.Mode.DIRECTORY ? List.of(MemoryScope.USER,MemoryScope.PROJECT) : List.of(MemoryScope.USER);
+        for (var scope : scopes) {
+            if (Thread.currentThread().isInterrupted()) break;
+            try {
+                var result = memoryConsolidator.tidy(workspace,scope,false,model.chat(),budgetPolicy,text -> { output.println(text); output.flush(); });
+                if (result.attempted()) {
+                    output.println("[记忆整理] " + scope + " · " + ConsoleApprovalHandler.clean(result.detail()));
+                    result.reviews().forEach(text -> output.println("  待检查：" + ConsoleApprovalHandler.clean(text)));
+                }
+            } catch (RuntimeException failed) { output.println("[记忆整理] 范围不可用或处理失败，主任务和现有记忆保留。"); }
         }
         output.flush();
     }

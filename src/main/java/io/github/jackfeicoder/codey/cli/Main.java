@@ -20,6 +20,7 @@ import io.github.jackfeicoder.codey.context.ContextBudgetPolicy;
 import io.github.jackfeicoder.codey.context.ContextBuilder;
 import io.github.jackfeicoder.codey.config.MemorySettings;
 import io.github.jackfeicoder.codey.config.MemoryExtractionSettings;
+import io.github.jackfeicoder.codey.config.MemoryConsolidationSettings;
 import io.github.jackfeicoder.codey.memory.*;
 import io.github.jackfeicoder.codey.context.ContextLimitException;
 import io.github.jackfeicoder.codey.llm.ChatCompletionsClient;
@@ -154,6 +155,7 @@ public final class Main {
                 System.out.println(CompactionSettings.load(startup, environment));
                 System.out.println(MemorySettings.load(startup, environment));
                 System.out.println(MemoryExtractionSettings.load(startup, environment));
+                System.out.println(MemoryConsolidationSettings.load(startup, environment));
                 System.out.println("LLM configuration is valid. Profile: " + profiles.activeSelection());
                 System.out.println(config);
                 System.out.println(agentSettings);
@@ -275,7 +277,7 @@ public final class Main {
                 return new SessionLauncher.ModelChoice(profiles.activeSelection(), new ChatCompletionsClient(config, streamingSettings),
                         new ChatCompletionsClient(titleConfig), capabilities);
             }, PromptLoader::loadBase, consoleInput, output, errors, options, createTools(agentSettings, commandSettings), debug,
-                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings, budgetSettings, compactionSettings, MemorySettings.load(startup, environment), MemoryExtractionSettings.load(startup, environment)).run();
+                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings, budgetSettings, compactionSettings, MemorySettings.load(startup, environment), MemoryExtractionSettings.load(startup, environment), MemoryConsolidationSettings.load(startup, environment)).run();
         }
     }
 

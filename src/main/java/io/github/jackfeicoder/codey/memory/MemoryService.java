@@ -117,7 +117,7 @@ public final class MemoryService {
         }
         return new MemorySelection(always, result);
     }
-    private void validateAlways(List<MemoryEntry> entries) {
+    void validateAlways(List<MemoryEntry> entries) {
         var pinned = entries.stream().filter(e -> e.loading() == MemoryLoading.ALWAYS).toList();
         if (new MemorySelection(pinned, List.of()).alwaysTokens() > settings.alwaysTokens())
             throw new MemoryException("用户常驻记忆超过 " + settings.alwaysTokens() + " token，请缩短或改为按需记忆；未静默截断。");

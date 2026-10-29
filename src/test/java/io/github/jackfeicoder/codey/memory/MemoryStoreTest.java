@@ -20,7 +20,7 @@ class MemoryStoreTest {
         var entry = entry("中文😀"); store.update(MemoryScope.USER, null, old -> List.of(entry));
         assertEquals(List.of(entry), new JsonMemoryStore(root).load(MemoryScope.USER, null));
         assertThrows(UnsupportedOperationException.class, () -> store.load(MemoryScope.USER, null).clear());
-        assertEquals(1, new com.fasterxml.jackson.databind.ObjectMapper().readTree(Files.readString(root.resolve("memory/user.json"))).path("schemaVersion").intValue());
+        assertEquals(2, new com.fasterxml.jackson.databind.ObjectMapper().readTree(Files.readString(root.resolve("memory/user.json"))).path("schemaVersion").intValue());
     }
     @Test void separateInstancesReadLatestUnderLockInsteadOfOverwritingOldList() {
         var a = new JsonMemoryStore(root); var b = new JsonMemoryStore(root);

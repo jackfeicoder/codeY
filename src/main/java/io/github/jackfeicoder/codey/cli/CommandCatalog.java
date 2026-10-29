@@ -15,7 +15,7 @@ public final class CommandCatalog {
             new Command("/status", "/status", "查看模式、模型、估算上下文、实际用量和文件授权"),
             new Command("/context", "/context", "查看上下文组装内容与 Token 估算拆分"),
             new Command("/remember", "/remember [--user|--project] [--always|--on-demand] [--update ID] [--title 标题] [--tags 标签1,标签2] 内容", "显式保存或更新长期记忆；项目默认按需"),
-            new Command("/memory", "/memory [关键词]", "查看用户与当前项目记忆，可本地搜索"),
+            new Command("/memory", "/memory [关键词|tidy|archives|versions|restore|rollback]", "查看/整理记忆或归档恢复，操作支持 --user|--project"),
             new Command("/forget", "/forget 完整ID", "删除用户或当前项目的一条记忆"),
             new Command("/init", "/init", "分析工作区并创建或更新 AGENTS.md 项目规则"),
             new Command("/compact", "/compact", "摘要旧历史并保留近期完整轮次，不删除原始记录"),

@@ -61,6 +61,12 @@ class CommandCompleterTest {
         assertEquals(List.of("--always"), values(local, "/remember --user --a"));
     }
 
+    @Test void memoryMaintenanceCommandsAndScopesCompleteLocally() {
+        assertEquals(List.of("tidy"),values(completer,"/memory t"));
+        assertEquals(List.of("--user"),values(completer,"/memory tidy --u"));
+        assertEquals(List.of("archives"),values(completer,"/memory ar"));
+    }
+
     /** 使用生产解析器对应的词位置，检查替换的是当前词而非完整输入。 */
     private List<String> values(CommandCompleter target, String text) {
         var parsed = new DefaultParser().escapeChars(null).quoteChars(null)

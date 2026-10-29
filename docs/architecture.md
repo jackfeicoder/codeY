@@ -2710,7 +2710,7 @@ Map 完成队列返回块编号、尝试次数、验收后的 JSON 或分类错�
 
 ### 存储和事务
 
-`JsonMemoryStore`在用户dataDirectory/memory/user.json及projects/<id>.json保存schemaVersion=1的Document。构造/空读取不创建文件；保存时拒绝链接及重定向路径段，独立.lock文件tryLock，持锁重新读取当前文件，将mutation应用到最新列表，校验作用域/重复ID/条目数，写同目录随机临时文件并force，最后ATOMIC_MOVE+REPLACE_EXISTING。最多1MiB/1000条，严格重复字段/未知字段/尾随JSON检测。失败不覆盖损坏文件，不退化成非原子写入；锁忙明确重试。锁为协作应用的文件锁，非OS沙箱，不承诺外部程序并发改文件时的跨进程权限隔离。
+`JsonMemoryStore`在用户dataDirectory/memory/user.json及projects/<id>.json保存v2 Document并兼容读取v1。构造/空读取不创建文件；保存时拒绝链接及重定向路径段，独立.lock文件tryLock，持锁重新读取当前文件，将mutation应用到最新列表，校验作用域/重复ID/条目数，写同目录随机临时文件并force，最后ATOMIC_MOVE+REPLACE_EXISTING。有效条目最多1MiB/1000条，全文档含归档/最近版本最多16MiB；严格重复字段/未知字段/尾随JSON检测。失败不覆盖损坏文件，不退化成非原子写入；锁忙明确重试。锁为协作应用的文件锁，非OS沙箱，不承诺外部程序并发改文件时的跨进程权限隔离。
 
 `MemoryService.remember`新增或完整ID更新，保留创建时间；更新不跨作用域。Unicode NFKC、空白归一化和忽略大小写后的完全相同正文拒绝，不据语义相似覆盖。删除只搜索USER和当前PROJECT，拒绝其他项目与ID短前缀。跨作用域没有事务或全局扫描。
 
@@ -2732,7 +2732,7 @@ MemorySettings从共享配置目录.env加载，环境覆盖：CODEY_MEMORY_ALWA
 
 /remember [--user|--project] [--always|--on-demand] [--update ID] [--title 标题] [--tags a,b] 内容；无工作区需显式--user，有工作区默认project，默认on-demand。选项只在正文前解析，支持选项参数引号与--终止符；不执行shell。更新是整条替换，未给loading/tags时按默认按需/空标签处理。/memory [关键词]列出或本地检索用户和当前项目，最多展示100条；/forget完整ID删除。命令共用帮助/Tab，不请求模型，也不加入聊天历史。用户手动管理在PLAN模式仍可执行，模型没有记忆写入工具，文件工具审批不用于用户显式记忆管理命令。
 
-已实现规则门控后的自动提取；未实现向量/混合检索、自动遗忘、与AGENTS.md语义去重或跨工作区迁移。关键词检索有同义词漏召回和共享字符误召回风险，可用准确标题与标签改进，后续用样例评估再引入Embedding。
+已实现规则门控后的自动提取；未实现向量/混合检索、按时间自动删除；模型整理/归档已实现、与AGENTS.md语义去重或跨工作区迁移。关键词检索有同义词漏召回和共享字符误召回风险，可用准确标题与标签改进，后续用样例评估再引入Embedding。
 
 
 ### 长期记忆验证
@@ -2788,3 +2788,45 @@ MemoryExtractionSettings独立加载CODEY_MEMORY_AUTO_ENABLED=true、AUTO_TIMEOU
 ### 条件自动记忆验证
 
 完整mvn verify共887项通过，零失败/错误/跳过；新增53项：意图检测正反例、引用/代码/否定/能力问句、范围提示与引号值、候选原文依据/范围/旧ID/凭证/严格JSON、全组先验收、重复/常驻保留、纠正人工复核、并发claim、恢复不重放及删除不复活、调用预算、超时取消、中断、配置、真实CLI的先保存后提取/下一轮召回/失败副流程隔离。生产JAR在临时目录通过9次本地HTTP请求：常规输入零额外调用、有效意图单次提取、无工具/非流式/max_tokens、显式命令不重复请求、持久原文不含提取请求、恢复不回放、503后主任务保留、关闭开关、COMPLETED/FAILED日志状态。未调用真实供应商，测试不保证所有自然语言意图和提取语义都正确。
+
+
+## 模型辅助长期记忆整理与恢复
+
+### 数据格式与事务
+
+JsonMemoryStore Document v2包含schemaVersion、entries、revision、archived、versions、checkpoint。v1读取保持不落盘，首次变更升级v2；v2必须有有效revision和完整归档/版本列表。每次写入（含占位）revision+1，所有读改写在原有.lock中重读并原子替换，模型请求不持锁。
+
+entries仍最多1000条/序列化1MiB；完整文件最多16MiB、归档2000组、版本最近5个。MemoryArchive存kind/reason/createdAt、完整originals和replacement快照，后者用于恢复冲突检查。MemoryVersion保存整理/恢复前的有效/归档完整副本，不嵌套versions；MemoryTidyCheckpoint保存runId、attemptedAt/leaseUntil、running、原文指纹及按需数量/正文Token基线。来源组和快照逐项校验相同USER或精确PROJECT范围，不跨项目；原来源会话和时间在归档中保留。
+
+### 水位、占位与模型调用
+
+MemoryConsolidator.tidy按范围判断：默认enabled=true，按需条数>=50或正文token>=8000；常驻不计触发水位但作为本范围已保护资料提供。已尝试同指纹永不自动重复；有变化还需冷却3600秒，数量增长至少10或正文增长1024 token。成功基线改为结果，失败/空方案也记录，避免每轮整理。活动running占位在leaseUntil前禁止并行重入；租期为timeout+60秒。手动force忽略水位/冷却/指纹，但不绕过关闭开关、活动租期和模型/存储边界。
+
+先预检独立输入16000 token/输出4096 token及模型window-output-safety。整个范围放不下则跳过，不截断来源，不分块。事务占位检查旧revision，存新checkpoint后释放锁。prompts/memory-tidy.md只接受entries作为资料，单次非流式、无工具generate；超时默认20秒Future取消，daemon线程只产生方案，迟到结果不写入记忆。响应必须stop、无工具、非空、<=65536字符且估算不超过输出额度，JSON严格重复字段/未知字段/尾随校验。
+
+### 操作方案验收
+
+MemoryTidyPlan最多64个操作、每个来源ID只出现一次。未提到的条目保持，未知或跨范围ID拒绝整组。KEEP/REVIEW/SHORTEN/ARCHIVE各1个来源，MERGE为2..20个来源。MERGE/SHORTEN仅提供title/content/tags/reason，保持第一个来源的ID、范围、创建时间、来源会话及ON_DEMAND，新的updatedAt由程序生成；替换的估算条目体积必须小于来源总量，不引入与其他条目完全重复正文。
+
+ALWAYS无论模型给何种修改动作均转复核，不执行。ARCHIVE只接受本范围保留且未经本方案改写的supersededBy，时间必须较来源更新，evidence逐字存在来源或替代正文并包含明确替代表述（已改为/已替换/不再使用/已废弃/已停用/已失效/已取消/已过期）；年代、访问频率不作为删除证明。该规则约束形状与证据来源，不证明模型理解、语义等价或合并完整性，冲突与不确定情况提示REVIEW。
+
+整个方案在副本上验收，检查常驻额度，提交时要求占位后revision和原文指纹仍相等；期间手动写入即拒绝旧方案。最终有效条目、完整原文归档、提交前快照及新水位同一个JSON事务提交，失败无部分应用。无安全改动则只更新尝试基线，复核建议显示而不持久化。
+
+### 集成和命令
+
+SessionLauncher在普通任务成功保存、自动提取完成后检查USER及当前PROJECT，最多每范围1次；/remember写入成功后也检查。常驻/按需检索、自动提取仍独立，/init和--prompt不自动整理；恢复旧会话只读不补跑。失败/超时报告整理状态，不把已保存主任务显示成失败，不混入原始聊天或ReAct轮次。自动整理的附属调用usage尚未计入独立费用统计。
+
+MemoryMaintenanceCommands处理/memory tidy|archives|versions [--user|--project]和/memory restore|rollback [--user|--project]完整ID。默认当前项目，无工作区默认USER；保留原/memory关键词查询。只有tidy请求模型，查看和恢复不请求模型，帮助和Tab共用注册。
+
+restore恢复单次操作所有originals：MERGE/SHORTEN撤销replacement再放回来源，ARCHIVE保留successor并恢复旧条目；replacement已修改/删除或来源ID被占用则拒绝。rollback显式恢复本范围整份快照的有效/归档列表，其他范围不受影响；版本之后的任何手动修改或删除也会撤销。恢复前再保存版本，最多5份；恢复后的checkpoint以当前内容作为基线，避免立即自动重做。
+
+/forget仍移除有效列表，不清除归档或历史恢复副本；显式rollback可能恢复已删除内容。归档不参与普通memory list、BM25或上下文注入。没有按访问频率自动删除、TTL、物理历史擦除、独立MEMORY.md索引、向量检索或模型读取工具，本阶段是可恢复整理，不把历史压缩/详细文档复制进记忆。
+
+### 配置
+
+MemoryConsolidationSettings读取共享.env并由环境覆盖，重启生效。CODEY_MEMORY_TIDY_ENABLED=true；ENTRIES=50（2..1000）；TOKENS=8000（128..1000000）；COOLDOWN_SECONDS=3600（0..86400）；MIN_GROWTH=10（1..1000）；TIMEOUT_SECONDS=20（1..60）；MAX_INPUT_TOKENS=16000（512..1000000）；MAX_OUTPUT_TOKENS=4096（128..16000），后七项均使用CODEY_MEMORY_TIDY_前缀。水位是可调整初值，不声称已做质量/延迟最优评测。
+
+
+### 整理与恢复验证
+
+mvn verify共911项通过，零失败/错误/跳过；新增24项覆盖MERGE/SHORTEN/ARCHIVE/REVIEW、未提及条目保留、常驻降级复核、明确替代归档、未知/重复ID整组拒绝、并发手动写入使计划失效、持久指纹/冷却/增量、请求预算、错误/超时不应用、归档原文恢复及冲突拒绝、范围回滚、5版本上界、v1迁移、真实CLI自动/显式入口与范围隔离/补全/配置。生产JAR临时配置/数据下7次本地HTTP请求验证v1升级v2、先存主任务后自动整理、常驻错误修改被保留为复核、归档/版本在单文档、离线恢复/回滚、恢复后不立即重整、原历史不含整理请求、503保留主任务及原记忆且不重复调用。未访问真实用户记忆或真实供应商，模型语义正确性需另做样例评估。
