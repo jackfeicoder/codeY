@@ -1,0 +1,30 @@
+{
+  "mcpServers": {
+    "remote_demo": {
+      "description": "查询第三方服务中的资料；请替换为实际服务能力简介",
+      "transport": "streamable-http",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${CODEY_MCP_REMOTE_TOKEN}"
+      },
+      "activation": "lazy",
+      "enabled": false,
+      "startupTimeoutSeconds": 15,
+      "toolTimeoutSeconds": 60,
+      "enabledTools": [],
+      "disabledTools": []
+    },
+    "local_demo": {
+      "description": "通过本地 Java MCP 程序提供工具",
+      "transport": "stdio",
+      "command": "java",
+      "args": [
+        "-jar",
+        "${CODEY_MCP_SERVER_JAR}"
+      ],
+      "env": {},
+      "activation": "lazy",
+      "enabled": false
+    }
+  }
+}

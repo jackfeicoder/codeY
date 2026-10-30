@@ -156,6 +156,7 @@ public final class Main {
                 System.out.println(MemorySettings.load(startup, environment));
                 System.out.println(MemoryExtractionSettings.load(startup, environment));
                 System.out.println(MemoryConsolidationSettings.load(startup, environment));
+                System.out.println("MCP servers: " + io.github.jackfeicoder.codey.mcp.McpConfigLoader.load(startup, environment).size() + " (not connected)");
                 System.out.println("LLM configuration is valid. Profile: " + profiles.activeSelection());
                 System.out.println(config);
                 System.out.println(agentSettings);
@@ -189,8 +190,10 @@ public final class Main {
                     return memories.select(WorkspaceBinding.none(), query, limit == null ? Long.MAX_VALUE : Math.max(0, limit - used));
                 });
                 AgentResult result;
-                try {
-                    result = new AgentLoop(client, createTools(agentSettings, CommandSettings.load(startup, environment)), agentSettings.maxIterations(), debug,
+                var promptTools = createTools(agentSettings, CommandSettings.load(startup, environment));
+                try (var mcp = new io.github.jackfeicoder.codey.mcp.McpConnectionManager(promptTools,
+                        io.github.jackfeicoder.codey.mcp.McpConfigLoader.load(startup, environment))) {
+                    result = new AgentLoop(client, promptTools, agentSettings.maxIterations(), debug,
                             contexts, snapshot -> { }, budget,
                             new HistoryCompactor(client, budget, compaction, contexts, debug), () -> { })
                             .run(new Session(basePrompt), prompt, new ToolContext(WorkspaceBinding.none()), stream);
@@ -263,7 +266,10 @@ public final class Main {
                 ? new PrintWriter(System.out, true, StandardCharsets.UTF_8) : console.writer();
         PrintWriter errors = new PrintWriter(System.err, true,
                 console == null ? StandardCharsets.UTF_8 : console.charset());
-        try (ConsoleInput consoleInput = ConsoleInput.open(input, output,
+        var chatTools = createTools(agentSettings, commandSettings);
+        try (var mcp = new io.github.jackfeicoder.codey.mcp.McpConnectionManager(chatTools,
+                io.github.jackfeicoder.codey.mcp.McpConfigLoader.load(startup, environment));
+             ConsoleInput consoleInput = ConsoleInput.open(input, output,
                 () -> ConfigLoader.loadModelCatalog(startup, environment))) {
             var debug = consoleInput.progressPrinter(output); // 原生终端统一进度样式，管道保留简洁文本。
             return new SessionLauncher(startup, settings, new JsonSessionStore(settings.dataDirectory()), name -> {
@@ -276,8 +282,8 @@ public final class Main {
                 LlmConfig titleConfig = new LlmConfig(config.baseUrl(), config.apiKey(), config.model(), timeout, config.authMode());
                 return new SessionLauncher.ModelChoice(profiles.activeSelection(), new ChatCompletionsClient(config, streamingSettings),
                         new ChatCompletionsClient(titleConfig), capabilities);
-            }, PromptLoader::loadBase, consoleInput, output, errors, options, createTools(agentSettings, commandSettings), debug,
-                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings, budgetSettings, compactionSettings, MemorySettings.load(startup, environment), MemoryExtractionSettings.load(startup, environment), MemoryConsolidationSettings.load(startup, environment)).run();
+            }, PromptLoader::loadBase, consoleInput, output, errors, options, chatTools, debug,
+                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings, budgetSettings, compactionSettings, MemorySettings.load(startup, environment), MemoryExtractionSettings.load(startup, environment), MemoryConsolidationSettings.load(startup, environment)).withMcp(mcp).run();
         }
     }
 

@@ -10,6 +10,28 @@ import java.util.Optional;
 public final class ToolRegistry {
     /** 按注册顺序保存，定义展示顺序确定；名称区分大小写。 */
     private final Map<String, RegisteredTool> tools = new LinkedHashMap<>();
+    /** 宿主扩展的任务清理器；正常、预算耗尽和异常退出均调用。 */
+    private final java.util.List<Runnable> taskCleanups = new java.util.ArrayList<>();
+
+    /** 动态工具整批校验后注册，冲突时不留下半批工具。 */
+    public void registerAll(List<? extends Tool> batch) {
+        ToolRegistry staging = new ToolRegistry();
+        for (Tool tool : batch) {
+            staging.register(tool);
+            if (tools.containsKey(tool.definition().name())) throw new IllegalArgumentException("Tool registration conflict.");
+        }
+        tools.putAll(staging.tools);
+    }
+
+    /** 仅卸载相同实例，避免旧连接误删后续注册的新工具。 */
+    public void unregister(Tool tool) {
+        var entry = tools.get(tool.definition().name());
+        if (entry != null && entry.implementation() == tool) tools.remove(tool.definition().name());
+    }
+
+    public void onTaskFinished(Runnable cleanup) { taskCleanups.add(Objects.requireNonNull(cleanup)); }
+    public void removeTaskCleanup(Runnable cleanup) { taskCleanups.remove(cleanup); }
+    public void finishTask() { for (Runnable cleanup : List.copyOf(taskCleanups)) cleanup.run(); }
 
     /** 注册时固定元数据，即使实现之后改变 definition() 也不改变已注册说明。 */
     public record RegisteredTool(ToolDefinition definition, Tool implementation, boolean requiresWorkspace, ToolAccess access) { }

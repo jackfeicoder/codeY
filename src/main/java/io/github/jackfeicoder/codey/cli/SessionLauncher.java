@@ -274,6 +274,12 @@ public final class SessionLauncher {
         updateModes();
     }
 
+    /** MCP 由 Main 装配；旧构造入口保持无外部服务，便于嵌入和测试。 */
+    private io.github.jackfeicoder.codey.mcp.McpConnectionManager mcp;
+    public SessionLauncher withMcp(io.github.jackfeicoder.codey.mcp.McpConnectionManager manager) {
+        this.mcp = java.util.Objects.requireNonNull(manager); return this;
+    }
+
     /** EOF 或 /exit 结束；错误保存会话返回 1，参数配置错误由 Main 分类。 */
     public int run() throws IOException {
         try {
@@ -304,6 +310,7 @@ public final class SessionLauncher {
                             output.println("Bye.");
                             return 0; // 列表中 exit 退出；聊天中 exit 只返回列表。
                         }
+                        if (mcp != null) mcp.releaseAll();
                         browsing = true;
                         refresh(); // 刚才的轮次已保存；保留活动会话，可 /back 或选择其他会话。
                     } else if ("/help".equals(command)) {
@@ -316,6 +323,8 @@ public final class SessionLauncher {
                         printStatus();
                     } else if (command.equals("/context")) {
                         printContext();
+                    } else if (command.equals("/mcp") || command.startsWith("/mcp ")) {
+                        mcpCommand(command.substring(4).strip());
                     } else if (command.equals("/remember") || command.startsWith("/remember ")) {
                         memoryCommands().remember(command.substring(9).strip());
                         tidyMemories();
@@ -343,6 +352,7 @@ public final class SessionLauncher {
                         replace(SessionService.create(store, active.snapshot().workspace(), model.profile(),
                                 basePrompt.get(), null), model);
                     } else if ("/sessions".equals(command) || "/resume".equals(command)) {
+                        if (mcp != null) mcp.releaseAll();
                         browsing = true;
                         refresh();
                     } else if ("/more_session".equals(command)) {
@@ -383,12 +393,42 @@ public final class SessionLauncher {
             }
             return savePending() ? 0 : 1;
         } finally {
+            if (mcp != null) mcp.releaseAll();
             if (permissions != null) permissions.revoke();
             input.status(null);
             if (active != null) active.close();
             output.flush();
             errors.flush();
         }
+    }
+
+    /** MCP 管理不进入业务历史；召唤/重连仍走相同工具审批入口。 */
+    private void mcpCommand(String args) {
+        if (mcp == null) { output.println("未配置 MCP 服务。"); return; }
+        var words = args.isBlank() ? new String[0] : args.split("\\s+");
+        if (words.length == 0 || (words.length == 1 && words[0].equals("list"))) {
+            for (String name : mcp.names()) output.println(name + " | " + mcp.state(name));
+            output.print(mcp.catalog()); return;
+        }
+        if (words.length != 2) { output.println("用法：/mcp [list|tools|enable|disable|summon|release|reconnect] [服务名]"); return; }
+        String action = words[0], name = words[1];
+        try {
+            switch (action) {
+                case "tools" -> output.println(mcp.tools(name));
+                case "enable", "disable" -> { mcp.enabled(name, action.equals("enable")); output.println(name + " | " + mcp.state(name)); }
+                case "release" -> output.println(mcp.release(name));
+                case "summon", "reconnect" -> {
+                    if (active == null || browsing) { output.println("请先进入会话，再激活 MCP 服务。"); return; }
+                    if (action.equals("reconnect")) mcp.release(name);
+                    var json = new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode().put("server",name);
+                    var result = new io.github.jackfeicoder.codey.tool.ToolExecutor(tools).execute(
+                            new io.github.jackfeicoder.codey.tool.ToolCall(java.util.UUID.randomUUID().toString(), "mcp_summon", json.toString()),
+                            new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions));
+                    output.println(result.status() + "：" + result.output());
+                }
+                default -> output.println("未知 MCP 子命令。");
+            }
+        } catch (io.github.jackfeicoder.codey.tool.ToolException failed) { output.println("MCP：" + failed.getMessage()); }
     }
 
     /** 更新全局列表快照，下一页沿用它，避免排序变化导致选错序号。 */
@@ -545,6 +585,7 @@ public final class SessionLauncher {
 
     /** 新会话准备成功后才释放旧锁，失败不会丢失当前会话。 */
     private void replace(SessionService candidate, ModelChoice selected) {
+        if (mcp != null) mcp.releaseAll();
         try {
             if (active != null) active.close();
         } catch (RuntimeException failed) {
@@ -830,7 +871,7 @@ public final class SessionLauncher {
         output.println("发送前加入当前输入，每次 ReAct 请求前重新组装；原始历史完整保存，请求可使用摘要。");
         printBudget();
         printCompaction();
-        output.println("压缩后仍超限时阻止下一次模型请求；长期记忆已接入；MCP、Skill 尚未接入。");
+        output.println("压缩后仍超限时阻止下一次模型请求；长期记忆已接入；MCP 动态工具已接入；Skill 尚未接入。");
     }
 
     private MemoryCommands memoryCommands() {

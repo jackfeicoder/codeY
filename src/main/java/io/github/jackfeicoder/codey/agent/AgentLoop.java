@@ -100,7 +100,8 @@ public final class AgentLoop {
     public AgentResult run(Session session, String input, ToolContext context, AgentStreamListener stream) {
         Objects.requireNonNull(session, "session");
         Objects.requireNonNull(context, "context");
-        return execute(session, input, context, stream); // 最终回答、错误和预算提示继续由 CLI 展示。
+        try { return execute(session, input, context, stream); }
+        finally { registry.finishTask(); } // 动态扩展按任务释放，失败不遗留连接。
     }
 
     /** 实际循环使用请求副本，打印的数据不加入消息历史。 */
@@ -117,6 +118,9 @@ public final class AgentLoop {
             checkInterrupted();
             boolean finalRound = step == maxSteps;
             var definitions = registry.definitions(context);
+            // 固定本轮已注册名称；原有隐藏工具仍由执行器报告工作区/权限错误，新工具下一轮才可用。
+            var offered = registry.definitions().stream().map(io.github.jackfeicoder.codey.tool.ToolDefinition::name)
+                    .collect(java.util.stream.Collectors.toSet());
             var snapshot = contexts.build(history, messages, definitions, context.workMode(), step, maxSteps, session.compaction());
             if (compactor != null && !summaryFailed) {
                 var outcome = compactor.prepare(session, messages, definitions, context.workMode(), step, maxSteps, false);
@@ -169,7 +173,11 @@ public final class AgentLoop {
             for (var call : response.toolCalls()) {
                 checkInterrupted();
                 debug.tool(step, call);
-                var result = executor.execute(call, context);
+                var result = offered.contains(call.name()) ? executor.execute(call, context)
+                        : new io.github.jackfeicoder.codey.tool.ToolResult(call.id(), call.name(),
+                        io.github.jackfeicoder.codey.tool.ToolResult.Status.ERROR,
+                        "Tool was not offered in this request. Summon it and use it in the next request.",
+                        io.github.jackfeicoder.codey.tool.ToolResult.ErrorCode.UNKNOWN_TOOL, 0, false);
                 executions++;
                 debug.toolFailed(step, result);
                 checkInterrupted(); // 中断不进入下一工具或模型请求。

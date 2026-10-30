@@ -6,7 +6,7 @@
 
 ## 当前进度
 
-当前已完成多模型配置、消息与基础提示词、普通与 SSE 流式调用、本地会话保存/恢复、六个文件工具、execute_command 本地命令、Agent 循环、权限审批及 ReAct/Plan 切换。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。专用网络/删除工具、进程沙箱、多 Agent 和 MCP 尚待实现；长期记忆的管理、条件自动提取、模型整理与关键词召回已实现；验证使用本地模拟模型，真实厂商兼容性需另行验证。
+当前已完成多模型配置、消息与基础提示词、普通与 SSE 流式调用、本地会话保存/恢复、六个文件工具、execute_command 本地命令、Agent 循环、权限审批及 ReAct/Plan 切换。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。专用网络/删除工具、进程沙箱、多 Agent 尚待实现；MCP 默认休眠、按需召唤已实现；长期记忆的管理、条件自动提取、模型整理与关键词召回已实现；验证使用本地模拟模型，真实厂商兼容性需另行验证。
 
 工作区会话已注册 `list_files`、`search_file`、`grep_code` 与 `read_file`：模型可浏览目录、按名称定位或按正文关键词搜索，再读取内容。工具描述通过结构化 `tools` 字段发送，由 AgentLoop 执行并回填结果，继续请求最终回答。默认每个任务最多请求模型 20 次，最后一次禁用工具用于收尾；完成的工具消息组随会话保存，恢复时不自动重放。说明见 [正文搜索](docs/architecture.md#grep-code)、[文件定位](docs/architecture.md#search-file)、[目录工具](docs/architecture.md#list-files)、[读文件工具](docs/architecture.md#read-file) 和 [Agent 循环](docs/architecture.md#agent-loop)。
 
@@ -34,7 +34,7 @@
 | [上下文模块](#module-context) | 已实现模型容量、统一组装、Token 估算、输入预算与有界历史摘要 |
 | [项目规则模块](#module-instruction) | 已实现根目录 AGENTS.md、/init、大小校验、动态加载与上下文计数 |
 | [记忆模块](#module-memory) | 已实现用户/项目记忆、条件自动提取、可恢复整理及 BM25 召回 |
-| [MCP 模块](#module-mcp) | 待实现：外部工具协议与适配 |
+| [MCP 模块](#module-mcp) | 已实现：休眠目录、按需召唤、stdio/HTTP、统一审批与任务释放 |
 | [权限模块](#module-policy) | 已实现 ask/规则 auto/full、逐文件审批、撤销和拒绝拦截；审计及进程沙箱待实现 |
 | [模式切换模块](#module-mode) | 已实现模型切换和 react/plan；multi 明确未开放 |
 | [可观测性模块](#module-observability) | 已实现简洁控制台进度；事件、指标与持久化轨迹待实现 |
@@ -43,14 +43,14 @@
 
 - Java 17、Maven 单模块。
 - 基础包：`io.github.jackfeicoder.codey`。
-- 使用 JDK HttpClient 调用兼容 Chat Completions 的接口，Jackson 2.18.2 处理 JSON。
+- 使用 JDK HttpClient 调用兼容 Chat Completions 的接口，Jackson 2.19.2 处理 JSON。
 - 使用 JLine 3.30.17 编辑终端输入，补全命令和模型参数，支持候选菜单选择。
 - Maven Shade 将运行依赖打入可执行 JAR。
 - 第一版聚焦单 Agent；上下文、持久化、MCP 按阶段加入。
 
 ## 架构概览
 
-以下为目标架构。当前实现了配置、消息、Session 本地保存/恢复、Agent 工具循环、权限审批与 CLI 流式对话；ContextBuilder 与长期记忆已实现，MCP 和完整执行事件按路线逐步实现。
+以下为目标架构。当前实现了配置、消息、Session 本地保存/恢复、Agent 工具循环、权限审批与 CLI 流式对话；ContextBuilder 与长期记忆已实现，MCP 按需工具接入已实现，完整执行事件按路线逐步实现。
 
 ```mermaid
 flowchart LR
@@ -556,7 +556,7 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
 
 ### 10. 上下文模块：context（容量、组装、预算与摘要压缩已实现）
 
-**功能**：统一组装模型输入，保留完整成功历史和本次任务的工具消息；提供各部分 Token 估算、模型容量与百分比展示。新建/恢复会话后即可估算，每次 ReAct 请求前重新组装。发送前达到水位时摘要旧历史，保留近期完整任务并重新估算；仍超过输入预算时阻止请求。原始成功历史始终保留；项目规则与长期记忆已接入；MCP 和 Skill 尚未接入。
+**功能**：统一组装模型输入，保留完整成功历史和本次任务的工具消息；提供各部分 Token 估算、模型容量与百分比展示。新建/恢复会话后即可估算，每次 ReAct 请求前重新组装。发送前达到水位时摘要旧历史，保留近期完整任务并重新估算；仍超过输入预算时阻止请求。原始成功历史始终保留；项目规则与长期记忆已接入；MCP 动态工具已接入；Skill 尚未接入。
 
 **涉及文件**：
 
@@ -826,15 +826,73 @@ CODEY_DATA_DIR/memory/
 
 <a id="module-mcp"></a>
 
-### 12. MCP 模块：mcp（待实现）
+### 12. MCP 模块：mcp（已实现）
 
-**功能（目标）**：连接外部 MCP 服务，发现工具并把外部调用适配到统一工具接口。
+**功能**：启动时只加载用户配置中的服务目录，服务器默认休眠；模型调用 `mcp_summon` 后连接并发现该服务器允许的工具，在下一轮模型请求中提供完整定义。任务内复用连接，`mcp_release`、任务正常结束、异常、预算耗尽或退出时释放连接并卸载工具。没有配置时不增加管理工具。
 
-**涉及文件**：目前只有 [mcp/package-info.java](src/main/java/io/github/jackfeicoder/codey/mcp/package-info.java)，客户端、传输与工具适配器尚未实现。
+**涉及文件**：
 
-**调用流程（计划）**：配置服务 → 连接/初始化 → 发现工具 → 注册适配工具 → ToolExecutor → 外部服务 → ToolResult。
+| 文件 | 职责 |
+|---|---|
+| `mcp/McpServerConfig.java` | 服务别名、简介、传输、凭证引用解析结果、超时和工具筛选 |
+| `mcp/McpConfigLoader.java` | 有界读取 `mcp.json`，严格校验，合并 `.env` 与环境变量 |
+| `mcp/McpConnection.java` | 连接接口，隔离 SDK 与工具注册，便于本地替身测试 |
+| `mcp/SdkMcpConnection.java` | 官方 Java SDK：stdio/Streamable HTTP、初始化、分页发现、调用和关闭 |
+| `mcp/McpConnectionManager.java` | 休眠目录、超时激活、整批注册、成本估算、释放与运行时开关 |
+| `mcp/McpControlTool.java` | `mcp_summon(server)`、`mcp_release(server)` 的说明、参数和审批 |
+| `mcp/McpToolAdapter.java` | 保留公开名与原始名、输入 Schema 校验、逐次审批、远端执行 |
+| `mcp/McpResultMapper.java` | 正文/结构化内容转换，显式错误和富媒体诊断 |
+| `tool/ToolRegistry.java`、`agent/AgentLoop.java` | 动态整批注册/卸载、每轮注册快照、任务 finally 清理 |
+| `cli/Main.java`、`SessionLauncher.java`、`CommandCatalog.java`、`CommandCompleter.java` | 配置装配、`/mcp`、帮助及子命令补全 |
 
-**实现方式（计划）**：先 stdio 与 JSON-RPC，处理请求 ID、响应匹配、超时和关闭，再扩展其他传输；具体协议版本与支持能力在接入时验证。已有 ToolRegistry 不代表已经接入 MCP。
+**配置**：在 `CODEY_CONFIG_DIR` 指定的目录（未设置时为启动目录）创建 `mcp.json`。不随会话工作区读取项目自己的 MCP 配置。仓库提供 [mcp.example.json](mcp.example.json)，示例默认禁用，先修改地址/程序和简介、填写变量，再设置 `enabled: true` 并重启。CMD 可执行 `copy mcp.example.json mcp.json`。本地 `mcp.json` 已加入 `.gitignore`。
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "description": "搜索仓库、查询 Issue 和 PR",
+      "transport": "streamable-http",
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer ${CODEY_MCP_REMOTE_TOKEN}" },
+      "activation": "lazy",
+      "enabled": true,
+      "startupTimeoutSeconds": 15,
+      "toolTimeoutSeconds": 60,
+      "enabledTools": [],
+      "disabledTools": []
+    }
+  }
+}
+```
+
+URL 必须是供应商给出的真实 MCP 端点，普通 REST API 地址不能直接接入。`stdio` 使用 `command`、`args`、可选 `env`/`cwd`，不通过 shell 拼接命令；Windows 的 `.cmd` 包装器如需 shell，应由用户显式配置 `cmd.exe` 及对应参数，优先使用真实可执行文件。`cwd` 相对配置目录解析，缺省继承 CodeY 启动目录。`${VAR}` 从进程环境或同目录 `.env` 解析，环境优先；启用服务缺失变量时配置报错且隐藏值；禁用模板允许暂不填变量。`--check-config` 校验配置但不连接服务。文件更新需重启。
+
+**调用流程**：
+
+```text
+mcp.json → 简短服务目录（名称、能力、估算定义 token）
+  → 模型 mcp_summon → 权限审批 → 连接/初始化 → tools/list 分页
+  → 校验全部定义/允许禁用列表 → 整批注册 McpToolAdapter
+  → 下一轮请求加入 MCP tools → 模型 tool_calls
+  → ToolExecutor → Schema 校验 → 逐次审批 → tools/call（原始工具名）
+  → ToolResult → 工具消息 → 继续 ReAct
+  → mcp_release 或任务 finally → 卸载工具、关闭连接
+```
+
+- 工具名使用 `mcp__服务别名__原始名`，清洗/截短后附带身份哈希，最多 64 字符；路由保存原始名，不反向拆字符串。不同服务的同名工具可共存。
+- 启动不连接、不扫描工具。简介来自配置，初次定义成本未知，可选 `estimatedTokens`；发现后计算本进程缓存估算值。目录和管理工具常驻，激活工具定义也进入现有上下文预算。估算不是服务价格，也不是完整任务 token。
+- 新工具只能在下一轮请求使用；同一响应中“先召唤再调用新工具”得到关联错误，下一轮再调用。未完整发现、重复名称、注册冲突或超限时不留下半批工具。
+- ask/auto 对激活服务与每次外部调用分别审批，不复用文件授权；full 跳过常规审批。未知外部工具不信任 `readOnlyHint`，首版 PLAN 不开放召唤或外部调用，释放仍可用。用户管道审批沿用 `CODEY_ALLOW_PIPED_APPROVALS`，无交互且未启用时不执行。
+- `/mcp` 或 `/mcp list` 查看状态；`/mcp tools 名称` 查看已激活工具；`/mcp summon 名称` 手动激活；`/mcp release 名称` 释放；`/mcp reconnect 名称` 释放后重新审批激活；`/mcp disable 名称` 立即释放并禁用；`/mcp enable 名称` 恢复本进程禁用的服务到休眠。文件中原本禁用的模板需先填配置并启用、重启以解析凭证。手动激活必须在活动会话中，保留到下一任务结束或释放/会话切换/退出。
+- 状态有 DORMANT / CONNECTING / ACTIVE / FAILED / DISABLED；连接失败不自动重试，工具失败/超时不会自动重放，写操作超时可能已在服务端生效。用户明确重连不等于重放上次操作。
+- 释放仅减少后续请求的工具定义，原有工具参数/结果及调用费用保留；目录本身也有 token 成本，工具列表变化可能影响缓存。服务商收费独立于 CodeY。
+
+**首版范围**：官方 SDK 固定 `0.17.2`、Java 17，最新协议常量为 `2025-06-18`，使用 legacy `initialize → initialized → tools/list → tools/call`，不是 2026-07-28 的现代无握手协议。以服务端与 SDK 实际协商结果为准，不承诺 modern-only 服务器兼容。支持 stdio、Streamable HTTP 与静态 headers；OAuth、旧 HTTP+SSE transport、Resources、Prompts、Sampling、多模态附件、动态通知刷新和自动重连暂不接入。服务器 instructions 不额外注入 system。
+
+**限制**：配置文件 256KiB/32 服务；每服务最多发现 256 工具、16 个非空分页游标；单 Schema 64Ki 字符、描述 8192 字符、所选工具定义总估算 32000 token。远程 Schema 引用及 `$id` 拒绝，防止本地校验隐式联网；本地 `#` 引用允许。stdio 清理父环境中 KEY/TOKEN/PASSWORD/SECRET 及 CODEY_ 变量，显式 `env` 可覆盖；关闭直接子进程由 SDK 管理，未提供 OS 沙箱或完整后代进程隔离。SDK stderr/日志不直接输出，工具错误给出脱敏说明。文本及 structuredContent 转文本，富媒体给出类型诊断，不把 base64 存入历史；结果受执行器输出上限约束。任务期间工具清单固定到这次发现结果，刷新需重新召唤。
+
+**验证**：`mvn verify` 共 932 项测试通过；新增 21 项覆盖休眠、召唤/释放、同轮提前调用拒绝、审批、Schema、超时晚到清理、整批注册、多服务、配置及真实本地 HTTP/stdio/CLI。生产 JAR 隔离冒烟以 4 次模拟 LLM 请求、1 次 MCP 业务调用验证动态工具与任务释放，未访问真实供应商或用户数据。
 
 <a id="module-policy"></a>
 
@@ -950,7 +1008,7 @@ codeY/
 | M3 | 修改代码、执行命令与验证闭环 | write_file/edit_file、execute_command、审批与 ReAct/Plan 已完成；持久审计、验证证据与失败恢复待实现 |
 | M4 | 上下文预算与历史压缩 | 模型容量、组装、估算、输入预算、自动摘要和 /compact 已实现 |
 | M5 | 会话恢复与项目记忆 | 文本/工具对话恢复与显式长期记忆已实现；执行中恢复待实现 |
-| M6 | MCP 工具接入 | 待实现 |
+| M6 | MCP 工具接入 | 已实现：stdio / Streamable HTTP、按需召唤与释放 |
 | M7 | 固定任务评估与项目展示 | 待实现 |
 
 每阶段的验收标准见 [开发路线](docs/architecture.md#roadmap)，配套学习问题见 [面试学习笔记](docs/architecture.md#interview)。

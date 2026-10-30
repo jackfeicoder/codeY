@@ -84,6 +84,8 @@ public final class DebugPrinter {
                 return tree.path("command").asText() + " · "
                         + (tree.path("workingDirectory").isTextual() ? tree.path("workingDirectory").asText() : ".");
             }
+            if (("mcp_summon".equals(call.name()) || "mcp_release".equals(call.name()))
+                    && tree != null && tree.path("server").isTextual()) return tree.path("server").asText();
             var path = tree == null ? null : tree.get("path");
             String location = path != null && path.isTextual() && !path.asText().isBlank() ? path.asText() : null;
             var pattern = tree == null ? null : tree.get("pattern");

@@ -13,6 +13,7 @@ public final class CommandCatalog {
             new Command("/permissions", "/permissions [ask|auto|full|revoke]", "查看/切换权限模式或撤销文件授权"),
             new Command("/mode", "/mode [react|plan]", "切换工作模式；multi 尚待实现"),
             new Command("/status", "/status", "查看模式、模型、估算上下文、实际用量和文件授权"),
+            new Command("/mcp", "/mcp [list|tools|enable|disable|summon|release|reconnect] [服务名]", "查看和管理 MCP 服务，默认休眠、任务结束释放"),
             new Command("/context", "/context", "查看上下文组装内容与 Token 估算拆分"),
             new Command("/remember", "/remember [--user|--project] [--always|--on-demand] [--update ID] [--title 标题] [--tags 标签1,标签2] 内容", "显式保存或更新长期记忆；项目默认按需"),
             new Command("/memory", "/memory [关键词|tidy|archives|versions|restore|rollback]", "查看/整理记忆或归档恢复，操作支持 --user|--project"),

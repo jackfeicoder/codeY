@@ -13,13 +13,13 @@ import java.util.Map;
  * 将 UTF-8 .env 文件解析为键值表；支持单行值、引号、注释和 export 前缀。
  * 不执行 shell 命令或变量插值，缺失文件可由进程环境补全配置。
  */
-final class DotEnvReader {
+public final class DotEnvReader {
     /** 文件解析工具只通过静态方法使用。 */
     private DotEnvReader() {
     }
 
     /** 逐行解析文件；格式错误报告行号，结果返回不可修改的 Map。 */
-    static Map<String, String> read(Path file) {
+    public static Map<String, String> read(Path file) {
         List<String> lines; // 文件原始行，保留顺序以定位错误。
         try {
             lines = Files.readAllLines(file, StandardCharsets.UTF_8);

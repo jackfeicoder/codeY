@@ -17,6 +17,19 @@
         <jline.version>3.30.17</jline.version>
     </properties>
     <dependencies>
+        <!-- 官方 MCP 客户端：固定 Java 17 兼容版本，协议交互由 SDK 实现。 -->
+        <dependency>
+            <groupId>io.modelcontextprotocol.sdk</groupId>
+            <artifactId>mcp</artifactId>
+            <version>0.17.2</version>
+        </dependency>
+        <!-- SDK 日志不直接输出到聊天终端；MCP 失败由有界工具结果呈现。 -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-nop</artifactId>
+            <version>2.0.16</version>
+            <scope>runtime</scope>
+        </dependency>
         <!-- 终端输入：命令补全、候选菜单和 Windows 原生控制台支持。 -->
         <dependency>
             <groupId>org.jline</groupId>
@@ -32,7 +45,7 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
-            <version>2.18.2</version>
+            <version>2.19.2</version>
         </dependency>
         <!-- 中文词典分词，Portable内置基础数据；只在本地记忆检索中使用。 -->
         <dependency>

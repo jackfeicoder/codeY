@@ -59,8 +59,8 @@ class ConsoleInputTest {
     void arrowKeyChangesMenuCandidateAndEnterConfirmsBeforeSubmission() throws Exception {
         String first = edit("/m\t\r\r");
         String next = edit("/m\t\u001b[B\r\r");
-        assertTrue(List.of("/model", "/mode", "/memory", "/more_session").contains(first), "first=" + first);
-        assertTrue(List.of("/model", "/mode", "/memory", "/more_session").contains(next), "next=" + next);
+        assertTrue(List.of("/model", "/mode", "/mcp", "/memory", "/more_session").contains(first), "first=" + first);
+        assertTrue(List.of("/model", "/mode", "/mcp", "/memory", "/more_session").contains(next), "next=" + next);
         assertNotEquals(first, next);
     }
 

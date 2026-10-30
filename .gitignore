@@ -42,3 +42,6 @@ logs/
 *.db
 *.db-shm
 *.db-wal
+
+# User MCP endpoints and credentials
+/mcp.json

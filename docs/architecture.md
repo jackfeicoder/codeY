@@ -1,10 +1,11 @@
 # CodeY 架构设计
 
-> 版本：0.1，日期：2026-10-26。当前已实现配置、消息、基础提示词、普通与 SSE 流式调用、可选工作区、本地会话管理、六个文件工具、execute_command 本地命令、AgentLoop、ask/规则 auto/full、会话文件授权、ReAct/Plan 切换、终端状态栏及按模型配置上下文容量。请求组装、Token 估算、输入预算与预警已实现，发送前有界摘要压缩与 /compact 已实现。完成的工具消息组可保存和恢复；执行中恢复、专用网络/删除工具、OS 进程沙箱、持久审计及多 Agent 仍待实现。验证使用本地替身与临时文件，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
+> 版本：0.1，日期：2026-10-30。当前已实现配置、消息、基础提示词、普通与 SSE 流式调用、可选工作区、本地会话管理、六个文件工具、execute_command 本地命令、AgentLoop、ask/规则 auto/full、会话文件授权、ReAct/Plan 切换、终端状态栏及按模型配置上下文容量。请求组装、Token 估算、输入预算与预警已实现，发送前有界摘要压缩与 /compact 已实现。完成的工具消息组可保存和恢复；执行中恢复、专用网络/删除工具、OS 进程沙箱、持久审计及多 Agent 仍待实现。验证使用本地替身与临时文件，真实厂商兼容性尚待验证。开发进度见 [开发路线](#roadmap)。
 
 ## 阅读导航
 
 - 第 1—9 节：定位、技术栈、目录、架构图、执行流程与核心策略。
+- [MCP 按需激活与任务生命周期](#mcp-lazy)
 - [模块职责与接口契约](#modules)
 - [已实现的消息模型](#messages)
 - [工具模块骨架与工具描述](#tool-foundation)
@@ -50,7 +51,7 @@ Harness 在本项目中指运行核心及其策略：Agent 循环、上下文构
 | 日志 | 初期标准输出；后续 SLF4J | M1/M3；模型内容与日志分流，避免输出密钥 |
 | 测试 | JUnit 5.10.2 + JDK HttpServer | 配置、消息及普通 HTTP / SSE 测试已实现，默认不调用真实模型 |
 | 状态存储 | 用户目录 JSON 快照，后续 JSONL 事件 | 会话选择阶段先恢复文本；M5 补工具执行状态 |
-| MCP | JSON-RPC + stdio | M6；先支持一条传输链，HTTP 后续增加 |
+| MCP | 官方 Java SDK 0.17.2、JSON-RPC、stdio / Streamable HTTP | 已实现默认休眠、召唤、统一审批与任务释放 |
 
 当前运行依赖为 Jackson 2.18.2；JUnit 5.10.2 为测试依赖。Maven Shade 3.5.1 在 package 阶段生成包含依赖与 Main 入口的可执行 JAR。此处记录已验证的项目版本，不声明其为各组件的最新版本。
 
@@ -141,7 +142,7 @@ flowchart LR
 
 CLI 是装配入口，负责创建组件和展示事件。AgentLoop 面向接口工作，避免直接操作终端。上下文、会话与记忆职责明确：会话保存发生过什么，上下文决定当前发什么，记忆保存跨会话事实。
 
-接口和数据契约详见 [模块与接口](#modules)。图中的持久化、记忆、MCP 是后续阶段能力。
+接口和数据契约详见 [模块与接口](#modules)。图中的持久化、记忆及 MCP 按需工具接入已实现；完整事件与多 Agent 继续演进。
 
 ## 5. 启动流程
 
@@ -1493,7 +1494,7 @@ write_file、edit_file、权限审批与 ReAct/Plan 已实现；继续加入 exe
 
 ### M6：MCP
 
-先实现 stdio 与一个本地 MCP 服务。HTTP、多服务管理和资源协议另行扩展。
+先实现 stdio 与一个本地 MCP 服务。当前 stdio、Streamable HTTP 与多服务管理已实现；资源协议另行扩展，详见 [MCP 按需激活](#mcp-lazy)。
 
 - [ ] 完成初始化、能力协商、工具发现与调用。
 - [ ] 工具接入同一注册、权限和执行路径。
@@ -2427,7 +2428,7 @@ ContextBuilder.build(history, currentTurn, tools, mode, step, maxSteps) 不依�
 | 可用工具定义 | ToolRegistry.definitions(ToolContext) 筛选 | 独立 tools 数组：type/function/name/description/parameters JSON Schema，不再复制为 md 提示词 |
 | 工具选择控制 | 最后一次请求 toolCallsAllowed=false | LLM 层发 tool_choice=none；原 Agent 执行防线继续生效 |
 
-模型 ID、URL、认证、stream 和 stream_options 仍由客户端按配置编码，不注入 messages；估算数字不进入 HTTP。工作区在工具筛选和真实路径执行时生效，不自动读取整个工作区或注入目录树；根目录项目规则有界读取并注入。权限审批仍由 Java policy 执行，提示词不授予工具权限。长期记忆已接入；MCP 和 Skill 待后续模块接入。
+模型 ID、URL、认证、stream 和 stream_options 仍由客户端按配置编码，不注入 messages；估算数字不进入 HTTP。工作区在工具筛选和真实路径执行时生效，不自动读取整个工作区或注入目录树；根目录项目规则有界读取并注入。权限审批仍由 Java policy 执行，提示词不授予工具权限。长期记忆已接入；MCP 动态工具已接入；Skill 待后续模块接入。
 
 ### 数据流与持久化边界
 
@@ -2830,3 +2831,45 @@ MemoryConsolidationSettings读取共享.env并由环境覆盖，重启生效。C
 ### 整理与恢复验证
 
 mvn verify共911项通过，零失败/错误/跳过；新增24项覆盖MERGE/SHORTEN/ARCHIVE/REVIEW、未提及条目保留、常驻降级复核、明确替代归档、未知/重复ID整组拒绝、并发手动写入使计划失效、持久指纹/冷却/增量、请求预算、错误/超时不应用、归档原文恢复及冲突拒绝、范围回滚、5版本上界、v1迁移、真实CLI自动/显式入口与范围隔离/补全/配置。生产JAR临时配置/数据下7次本地HTTP请求验证v1升级v2、先存主任务后自动整理、常驻错误修改被保留为复核、归档/版本在单文档、离线恢复/回滚、恢复后不立即重整、原历史不含整理请求、503保留主任务及原记忆且不重复调用。未访问真实用户记忆或真实供应商，模型语义正确性需另做样例评估。
+
+
+<a id="mcp-lazy"></a>
+## MCP 按需激活与任务生命周期（2026-10-30 已实现）
+
+### 职责与配置边界
+
+McpConfigLoader读取用户配置目录mcp.json，不自动读取当前工作区的项目配置。缺省无服务，无管理工具；有配置时mcp_summon/mcp_release作为管理工具常驻。服务条目仅在显式召唤后连接，启动、恢复历史、查看状态、--check-config都不执行服务器。配置引用.env/进程环境，环境优先，凭证不进入目录定义或会话；mcp.json忽略提交，mcp.example.json为禁用模板。详细字段与用法见README的MCP模块。
+
+McpServerConfig保存声明；McpConnection接口隔离连接实现；SdkMcpConnection适配官方SDK；McpConnectionManager拥有配置目录、连接、工具实例及状态；McpControlTool执行召唤/释放；McpToolAdapter适配普通Tool；McpResultMapper处理协议结果。Main同时为--chat和--prompt装配；SessionLauncher.withMcp保留原构造兼容性，提供/mcp命令。
+
+### 状态机与一次召唤
+
+DORMANT → CONNECTING → ACTIVE；失败转FAILED，禁用转DISABLED；release卸载后回DORMANT。enabled仅表示允许被召唤，不代表自动连接。模型通过常驻目录了解服务别名、简短能力与可选定义成本估算，首次未发现时显示未知；发现后的估算只缓存于当前进程，不持久化服务器Schema。
+
+mcp_summon参数仅server配置别名。首先经ToolExecutor/PermissionPolicy与PreparedToolOperation审批，连接工厂在守护线程执行；配置startupTimeoutSeconds作为总体激活期限，超时/中断取消任务，晚到成功连接只关闭而不注册。SDK另有初始化/请求期限。发现分页限制工具数/游标链，对完整候选批次验证名称、重复、Schema、本地引用与定义预算，再由ToolRegistry.registerAll整体提交。任一失败关闭连接，没有半批工具。重复召唤活跃服务复用连接。
+
+公开名由(本地server别名,原始工具名)确定，清洗或截短时添加12位SHA-256片段，保持64字符函数名契约；不依赖远端serverInfo.name。McpToolAdapter独立保存原始名字，tools/call只发送原始名字。过滤使用enabledTools允许集和disabledTools拒绝集，拒绝优先。
+
+### 每轮可见性与权限
+
+AgentLoop每轮重新取动态definitions，ContextBuilder/TokenEstimator统计管理目录和激活定义。发送请求前固定当轮已注册名称；召唤后新工具到下一轮才可执行，同一响应内的提前调用回填UNKNOWN_TOOL。原有因工作区或PLAN隐藏的工具仍由执行器给出明确的工作区/权限错误，不因MCP改动丢失既有错误语义。
+
+MCP工具仍经ToolExecutor → 输入Schema校验 → prepare审批 → tools/call → ToolResult。输入验证使用SDK提供的默认JSON Schema校验器，拒绝远程$ref/$dynamicRef/$recursiveRef以及$id以避免隐式联网。未知/不支持Schema会使发现或调用明确失败，不绕过校验。外部readOnlyHint不提升为可信本地READ_ONLY；首版PLAN隐藏召唤和外部工具，即使full也拒绝直接调用。mcp_release为READ_ONLY管理操作，不触发远端业务工具。
+
+ask/auto中召唤与每次外部调用分别审批；auto现有规则只自动批准普通文件，因此外部操作仍转人工。full跳过常规审批，参数、注册快照及PLAN约束保留。召唤批准只允许连接/发现，不批准随后业务操作；无文件目标不建立文件授权。审批展示服务、工具、参数预览（敏感字段隐藏），凭证头/环境值不展示。用户手动/mcp summon与reconnect也走同一工具入口。
+
+### 释放、失败与结果
+
+AgentLoop.run在finally调用ToolRegistry.finishTask，由MCP清理器释放本次全部活跃连接，无论最终答案、预算耗尽、模型错误或中断。显式释放先卸载本连接对应工具实例，再关闭连接；不同服务互不影响。手动激活保留到下一任务结束，退出到列表、切换会话和进程退出也清理。Main外层AutoCloseable再次兜底；close幂等并注销管理工具/任务清理器。执行串行，因此不在远端调用中途并发释放。
+
+激活失败不自动重试，业务调用失败不自动重放。超时并不证明远端未执行，返回明确结果未知提示。释放不删除已保存工具消息；下一次请求工具定义减小，历史及服务费用不回滚。结果文本与structuredContent转换为统一文本，isError显式失败；图片/音频等只回类型诊断，不将base64写入会话。现有ToolExecutor按Unicode码点截断并标记；协议映射另设文本构建上限，防止结果继续无界拼接。
+
+### 固定 SDK 与扩展范围
+
+SDK0.17.2兼容Java17，LATEST_PROTOCOL_VERSION=2025-06-18；由SDK实现legacy初始化/能力协商、JSON-RPC、stdio和Streamable HTTP，未混用2026-07-28的server/discover和逐请求_meta。现代协议独占服务器可能不兼容，需要未来统一升级SDK和测试。HTTP使用完整path/query及静态headers，不跟随重定向；OAuth另行实现。stdio用argv，不由CodeY隐式包装shell，env清理父密钥再合并显式配置；cwd仅工作目录，不是沙箱。SDK负责关闭直接子进程，首版不承诺子孙进程隔离。
+
+工具列表只在每次召唤时同步，不应用动态通知；Resources/Prompts/Sampling/富媒体附件/自动重连/跨任务保活后置。服务器instructions暂不注入。限制为32服务、256KiB配置、每服务256工具/16非空游标、单Schema64Ki字符、描述8192字符、允许工具定义估算总量32000tok；输入预算仍由上下文模块最后检查。
+
+### MCP 验证记录
+
+mvn verify：932项，零失败/错误/跳过。新增21项覆盖隔离连接、实际本地Streamable HTTP与stdio子进程、CLI手动激活/审批/退出、配置与环境引用；固定SDK真实握手、完整端点query、认证头、分页、原始工具名调用、isError、stdio argv/env/cwd及直接子进程关闭均通过。生产JAR冒烟使用临时配置/数据，验证--check-config不连接、默认休眠、模型召唤、下一轮新定义、两层ask审批、结果回填、任务释放及第二任务无外部工具；4次本地模拟LLM请求、1次MCP业务调用，凭证未进入请求给模型的内容、终端或会话。真实厂商、OAuth和modern-only服务不在本次验证范围。
