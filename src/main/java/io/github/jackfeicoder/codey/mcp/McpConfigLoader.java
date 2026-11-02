@@ -50,7 +50,7 @@ public final class McpConfigLoader {
                 var entry = it.next(); String name = entry.getKey(); JsonNode n = entry.getValue();
                 if (!name.matches("[A-Za-z][A-Za-z0-9_-]{0,31}")) throw new IllegalArgumentException();
                 keys(n, Set.of("description","transport","url","command","args","env","headers","cwd","enabled",
-                        "enabledTools","disabledTools","startupTimeoutSeconds","toolTimeoutSeconds","estimatedTokens","activation"));
+                        "enabledTools","disabledTools","startupTimeoutSeconds","toolTimeoutSeconds","estimatedTokens","activation","auth"));
                 String description = text(n,"description",null);
                 if (description == null || description.isBlank() || description.length() > 500 || description.chars().anyMatch(Character::isISOControl)) throw new IllegalArgumentException();
                 String transport = text(n,"transport",null);
@@ -74,10 +74,17 @@ public final class McpConfigLoader {
                     if (uri.getHost() == null || !Set.of("http","https").contains(uri.getScheme()) || uri.getUserInfo()!=null || uri.getFragment()!=null) throw new IllegalArgumentException();
                 }
                 if (cwd != null) cwd = dir.resolve(cwd).toAbsolutePath().normalize().toString();
+                McpAuthSettings auth=McpAuthSettings.legacy(transport,headers);
+                if(n.has("auth")) {
+                    JsonNode a=n.get("auth");keys(a,Set.of("mode","clientId","scopes","callbackPort"));
+                    auth=new McpAuthSettings(text(a,"mode","auto"),text(a,"clientId",null),strings(a.get("scopes")),number(a,"callbackPort",0,0,65535));
+                    if(transport.equals("stdio")&&!auth.mode().equals("none"))throw new IllegalArgumentException();
+                    if(Set.of("auto","oauth").contains(auth.mode())&&headers.keySet().stream().anyMatch(k->k.equalsIgnoreCase("Authorization")))throw new IllegalArgumentException();
+                }
                 Long estimate = n.has("estimatedTokens") ? number(n,"estimatedTokens",0,0,1000000) * 1L : null;
                 result.add(new McpServerConfig(name,description,transport,url,command,args,env,headers,cwd,enabled,
                         new LinkedHashSet<>(strings(n.get("enabledTools"))),new LinkedHashSet<>(strings(n.get("disabledTools"))),
-                        number(n,"startupTimeoutSeconds",15,1,120),number(n,"toolTimeoutSeconds",60,1,600),estimate));
+                        number(n,"startupTimeoutSeconds",15,1,120),number(n,"toolTimeoutSeconds",60,1,600),estimate,auth));
             }
             return List.copyOf(result);
         } catch (Exception invalid) { throw invalidConfig(); }

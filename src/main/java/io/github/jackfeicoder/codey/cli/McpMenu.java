@@ -44,15 +44,23 @@ public final class McpMenu {
             var config=manager.config(name);
             output.println("服务："+name+" | "+manager.state(name)+" | "+config.transport());
             output.println("能力："+clean(config.description()));
+            output.println("认证方式："+config.auth().mode()+"（不展示凭证）");
             output.println("当前工具："+clean(manager.tools(name)));
             output.println("休眠表示已注册、尚未连接；任务中按需加载，任务结束释放，配置继续保留。");
             boolean disabled=manager.state(name).equals("DISABLED");
             output.println("e "+(disabled?"启用（恢复为休眠）":"停用（保留注册信息）")+"；回车或 b 返回列表。");
+            boolean oauth=config.transport().equals("streamable-http")&&java.util.Set.of("auto","oauth").contains(config.auth().mode());
+            if(oauth)output.println("a 清除本地 OAuth 授权（下次任务重新登录；不撤销远端令牌）");
             String action=input.readSetup("服务> ",false);
             if(action==null) return false;
             action=action.strip();
             if(action.isEmpty()||action.equalsIgnoreCase("b")||back(action)) return true;
-            if(!action.equalsIgnoreCase("e")) { output.println("请选择 e 或回车返回。"); continue; }
+            if(oauth&&action.equalsIgnoreCase("a")) {
+                try{output.println(manager.resetAuthentication(name)?"已清除本地 OAuth 凭证；注册信息保留，下次需要时重新授权。":"当前宿主未提供 OAuth 凭证管理。");}
+                catch(io.github.jackfeicoder.codey.tool.ToolException failed){output.println("OAuth 凭证清除失败，原记录保留。");}
+                continue;
+            }
+            if(!action.equalsIgnoreCase("e")) { output.println("请选择菜单中的操作或回车返回。"); continue; }
             if(store==null) { output.println("当前宿主未提供 MCP 配置存储，仅支持查看。"); continue; }
             try {
                 manager.applyConfiguration(store.setEnabled(name,disabled));

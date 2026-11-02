@@ -191,8 +191,11 @@ public final class Main {
                 });
                 AgentResult result;
                 var promptTools = createTools(agentSettings, CommandSettings.load(startup, environment));
-                try (var mcp = new io.github.jackfeicoder.codey.mcp.McpConnectionManager(promptTools,
-                        io.github.jackfeicoder.codey.mcp.McpConfigLoader.load(startup, environment))) {
+                try (var auth = new io.github.jackfeicoder.codey.mcp.oauth.OAuthManager(
+                        new io.github.jackfeicoder.codey.mcp.oauth.OAuthTokenStore(SessionSettings.load(startup, environment).dataDirectory()),
+                        io.github.jackfeicoder.codey.mcp.oauth.OAuthInteraction.unavailable());
+                     var mcp = new io.github.jackfeicoder.codey.mcp.McpConnectionManager(promptTools,
+                        io.github.jackfeicoder.codey.mcp.McpConfigLoader.load(startup, environment),auth.connections())) {
                     result = new AgentLoop(client, promptTools, agentSettings.maxIterations(), debug,
                             contexts, snapshot -> { }, budget,
                             new HistoryCompactor(client, budget, compaction, contexts, debug), () -> { })
@@ -267,10 +270,13 @@ public final class Main {
         PrintWriter errors = new PrintWriter(System.err, true,
                 console == null ? StandardCharsets.UTF_8 : console.charset());
         var chatTools = createTools(agentSettings, commandSettings);
-        try (var mcp = new io.github.jackfeicoder.codey.mcp.McpConnectionManager(chatTools,
-                io.github.jackfeicoder.codey.mcp.McpConfigLoader.load(startup, environment));
-             ConsoleInput consoleInput = ConsoleInput.open(input, output,
-                () -> ConfigLoader.loadModelCatalog(startup, environment))) {
+        try (ConsoleInput consoleInput = ConsoleInput.open(input, output,
+                () -> ConfigLoader.loadModelCatalog(startup, environment));
+             var auth = new io.github.jackfeicoder.codey.mcp.oauth.OAuthManager(
+                new io.github.jackfeicoder.codey.mcp.oauth.OAuthTokenStore(settings.dataDirectory()),
+                new ConsoleOAuthInteraction(consoleInput,output,permissionSettings.pipedApprovals()));
+             var mcp = new io.github.jackfeicoder.codey.mcp.McpConnectionManager(chatTools,
+                io.github.jackfeicoder.codey.mcp.McpConfigLoader.load(startup, environment),auth.connections())) {
             var debug = consoleInput.progressPrinter(output); // 原生终端统一进度样式，管道保留简洁文本。
             return new SessionLauncher(startup, settings, new JsonSessionStore(settings.dataDirectory()), name -> {
                 // 历史浏览不执行此工厂；准备继续会话时才校验目标 Profile。

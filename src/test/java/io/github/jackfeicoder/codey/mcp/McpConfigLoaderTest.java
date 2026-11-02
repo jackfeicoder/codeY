@@ -29,4 +29,11 @@ class McpConfigLoaderTest {
         write("{\"mcpServers\":{\"server\":{\"description\":\"x\",\"enabled\":false,\"transport\":\"stdio\",\"command\":\"java\",\"args\":[\"-jar\",\"server.jar\"],\"env\":{\"TOKEN\":\"${MISSING}\"}}}}");
         var c=McpConfigLoader.load(root,Map.of()).get(0);assertFalse(c.enabled());assertEquals(List.of("-jar","server.jar"),c.args());
     }
+    @Test void oauthSettingsRoundTripAndExplicitAuthorizationConflictsAreRejected()throws Exception {
+        write("{\"mcpServers\":{\"service\":{\"description\":\"fixture\",\"transport\":\"streamable-http\",\"url\":\"https://example.com/mcp\",\"auth\":{\"mode\":\"oauth\",\"clientId\":\"public-client\",\"scopes\":[\"docs:read\"],\"callbackPort\":8900}}}}");
+        var c=McpConfigLoader.load(root,Map.of()).get(0);assertEquals("oauth",c.auth().mode());assertEquals(8900,c.auth().callbackPort());assertEquals(List.of("docs:read"),c.auth().scopes());
+        write("{\"mcpServers\":{\"service\":{\"description\":\"fixture\",\"transport\":\"streamable-http\",\"url\":\"https://example.com/mcp\",\"headers\":{\"Authorization\":\"Bearer fixture\"},\"auth\":{\"mode\":\"auto\"}}}}");
+        assertThrows(io.github.jackfeicoder.codey.config.ConfigException.class,()->McpConfigLoader.load(root,Map.of()));
+    }
+
 }

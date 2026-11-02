@@ -836,6 +836,9 @@ CODEY_DATA_DIR/memory/
 |---|---|
 | `mcp/McpServerConfig.java` | 服务别名、简介、传输、凭证引用解析结果、超时和工具筛选 |
 | `mcp/McpConfigLoader.java` | 有界读取 `mcp.json`，严格校验，合并 `.env` 与环境变量 |
+| `mcp/McpAuthSettings.java` | HTTP auto/oauth/none/manual 策略及公共客户端、scope、回调端口 |
+| `mcp/oauth/` | 自动发现、PKCE 浏览器授权、回调校验、DPAPI 缓存与刷新 |
+| `cli/ConsoleOAuthInteraction.java` | 授权链接、系统浏览器和必要的公共 client_id 输入；不新增命令 |
 | `mcp/McpConfigStore.java` | 注册配置预检、文件锁、保留已有服务及变量引用、原子保存 |
 | `cli/McpRegistrationWizard.java` | `/mcp register` 分步填写 HTTP/stdio 参数、凭证隐藏输入、取消与立即生效 |
 | `cli/McpMenu.java` | `/mcp` 查看服务目录/详情，菜单注册和持久化启停；不隐式连接 |
@@ -879,7 +882,7 @@ URL 必须是供应商给出的真实 MCP 端点，普通 REST API 地址不能�
 serverName：github
 能力简介：搜索仓库、查询 Issue 和 PR
 MCP 服务地址：https://实际服务方的端点/mcp
-认证 [1 无 / 2 Bearer Token / 3 自定义请求头或API Key]：2
+认证 [0 自动发现OAuth / 1 无 / 2 Bearer Token / 3 自定义头 / 4 配置OAuth客户端]：2
 Token来源 [1 引用.env/环境变量 / 2 隐藏输入并存入本地mcp.json]：2
 Token：********
 确认保存并注册？[Y/n]：y
@@ -899,13 +902,13 @@ Token：********
 
 各客户端配置外壳不同：Claude Code 使用 `type`/JSON，Codex 使用 TOML 配置表，DSH 使用插件配置中的 `serverName`/`transport`；CodeY 将向导输入统一保存为现有 `transport`/JSON 格式，不直接导入其他客户端配置。通信协议并未规定各产品必须共用同一种配置文件。参考 [Claude Code](https://code.claude.com/docs/en/mcp)、[Codex](https://developers.openai.com/codex/mcp)、[DSH](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/mcp/mcp-client/README.md)。
 
-认证值可引用已存在的 `.env` 或环境变量（只填写变量名），也可直接隐藏输入。隐藏输入的值会以明文存入本地 `mcp.json`，不加密；交互终端使用掩码，向导全部输入不进入 JLine 历史、模型消息或会话记录。普通管道输入由调用者负责自己的终端回显/重定向记录。程序不自动修改 `.env`，不会把解析后的其他服务凭证反写进配置。OAuth 登录暂未接入。
+认证值可引用已存在的 `.env` 或环境变量（只填写变量名），也可直接隐藏输入。隐藏输入的值会以明文存入本地 `mcp.json`，不加密；交互终端使用掩码，向导全部输入不进入 JLine 历史、模型消息或会话记录。普通管道输入由调用者负责自己的终端回显/重定向记录。程序不自动修改 `.env`，不会把解析后的其他服务凭证反写进配置。HTTP 已支持 OAuth 自动发现与浏览器授权，默认选项为 0；手动凭证行为保留。
 
 `/cancel`、`/back`、`/exit`、Ctrl+C 或 EOF 取消向导，不保存草稿；取消确认也不写文件。保存采用锁内读取/校验/合并和同目录原子替换，同名服务不覆盖，其他条目及 `${VAR}` 引用保留，损坏文件或占用锁时报告未保存。支持首次从空目录注册；注册后只把新服务加入当前管理器，已有活跃连接不受影响。目录立即更新，服务继续休眠，后续召唤仍走审批。注册向导是用户命令，不是模型工具；在 PLAN 中保存配置也不会启动服务。默认初始化/调用超时仍为 15/60 秒，工具筛选等高级字段可手动配置。
 
 注册向导验证：`mvn verify` 共 **948** 项通过，新增16项覆盖HTTP/stdio参数、Bearer/自定义头/变量引用、取消/EOF、非法输入重填、文件锁与重复名保护、浏览页无模型注册、活动会话立即获得目录、凭证掩码及JLine历史隔离。生产JAR隔离冒烟验证首次注册、立即召唤调用、任务释放及重启加载，未访问真实服务或用户配置。
 
-**日常使用**：注册一次后，直接提出任务，例如“请使用 context7 查询 Spring 配置优先级”。模型从 `mcp_summon` 的目录描述选择服务，审批后连接并在下一轮调用工具；用户不再输入加载/释放命令。菜单查看不会连接；启停配置跨进程保留。重启读取已保存目录，服务仍休眠。注册信息与连接生命周期独立，任务结束释放连接不删除配置。OAuth 尚未实现，现有凭证仍按注册时的静态配置使用。
+**日常使用**：注册一次后，直接提出任务，例如“请使用 context7 查询 Spring 配置优先级”。模型从 `mcp_summon` 的目录描述选择服务，审批后连接并在下一轮调用工具；用户不再输入加载/释放命令。菜单查看不会连接；启停配置跨进程保留。重启读取已保存目录，服务仍休眠。注册信息与连接生命周期独立，任务结束释放连接不删除配置。HTTP 自动模式在需要时引导浏览器授权；明确选择的手动凭证继续按静态配置使用。
 
 **调用流程**：
 
@@ -927,13 +930,58 @@ mcp.json → 简短服务目录（名称、能力、估算定义 token）
 - 状态有 DORMANT / CONNECTING / ACTIVE / FAILED / DISABLED；连接失败不自动重试，工具失败/超时不会自动重放，写操作超时可能已在服务端生效。用户明确重连不等于重放上次操作。
 - 释放仅减少后续请求的工具定义，原有工具参数/结果及调用费用保留；目录本身也有 token 成本，工具列表变化可能影响缓存。服务商收费独立于 CodeY。
 
-**首版范围**：官方 SDK 固定 `0.17.2`、Java 17，最新协议常量为 `2025-06-18`，使用 legacy `initialize → initialized → tools/list → tools/call`，不是 2026-07-28 的现代无握手协议。以服务端与 SDK 实际协商结果为准，不承诺 modern-only 服务器兼容。支持 stdio、Streamable HTTP 与静态 headers；OAuth、旧 HTTP+SSE transport、Resources、Prompts、Sampling、多模态附件、动态通知刷新和自动重连暂不接入。服务器 instructions 不额外注入 system。
+**首版范围**：官方 SDK 固定 `0.17.2`、Java 17，最新协议常量为 `2025-06-18`，使用 legacy `initialize → initialized → tools/list → tools/call`，不是 2026-07-28 的现代无握手协议。以服务端与 SDK 实际协商结果为准，不承诺 modern-only 服务器兼容。支持 stdio、Streamable HTTP、静态 headers 与 HTTP OAuth；旧 HTTP+SSE transport、Resources、Prompts、Sampling、多模态附件、动态通知刷新和自动重连暂不接入。服务器 instructions 不额外注入 system。
 
 **限制**：配置文件 256KiB/32 服务；每服务最多发现 256 工具、16 个非空分页游标；单 Schema 64Ki 字符、描述 8192 字符、所选工具定义总估算 32000 token。远程 Schema 引用及 `$id` 拒绝，防止本地校验隐式联网；本地 `#` 引用允许。stdio 清理父环境中 KEY/TOKEN/PASSWORD/SECRET 及 CODEY_ 变量，显式 `env` 可覆盖；关闭直接子进程由 SDK 管理，未提供 OS 沙箱或完整后代进程隔离。SDK stderr/日志不直接输出，工具错误给出脱敏说明。文本及 structuredContent 转文本，富媒体给出类型诊断，不把 base64 存入历史；结果受执行器输出上限约束。任务期间工具清单固定到这次发现结果，刷新需重新召唤。
 
 **入口精简验证**：`mvn verify` 共 **953** 项通过；生产 JAR 隔离测试覆盖注册后模型自动召唤/调用/释放、查看菜单不连接、菜单启停跨重启保存，以及凭证与菜单输入不进入聊天历史。
 
 **验证**：`mvn verify` 共 932 项测试通过；新增 21 项覆盖休眠、召唤/释放、同轮提前调用拒绝、审批、Schema、超时晚到清理、整批注册、多服务、配置及真实本地 HTTP/stdio/CLI。生产 JAR 隔离冒烟以 4 次模拟 LLM 请求、1 次 MCP 业务调用验证动态工具与任务释放，未访问真实供应商或用户数据。
+
+<a id="mcp-oauth"></a>
+### MCP OAuth 自动认证（已实现）
+
+用户入口仍为 `/mcp`、`/mcp register`，不增加 login/logout/auth 命令。HTTP 注册默认选择 **0 自动发现 OAuth**：有缓存则复用/刷新，匿名服务直接连接，需要授权时才打开浏览器。1 明确匿名，2/3 手动 Token/请求头，4 可配置预注册公共 client_id 与固定回调端口；stdio 继续使用环境变量或服务自身认证流程。
+
+```text
+用户任务 → 模型 mcp_summon → 原有权限审批
+  → OAuthManager：检查认证模式及加密缓存
+  → 无可用缓存时探测 MCP、读取 WWW-Authenticate/受保护资源元数据
+  → 校验 resource，发现并校验 issuer、端点与 PKCE S256 能力
+  → 公共客户端动态注册，或使用/询问预注册 client_id
+  → 系统浏览器授权 → 回环回调 → state/可选 issuer 校验
+  → code + PKCE verifier 换取 access_token/可选 refresh_token
+  → DPAPI 加密保存 → SDK 初始化、发现并加载工具
+  → 每次 HTTP 请求前获取有效 Bearer；必要时刷新/轮换
+```
+
+OAuth 是获取/刷新令牌的流程，Bearer 是请求携带令牌的方式，两者不互斥。MCP SDK 使用逐请求 `httpRequestCustomizer` 获取凭证，不将访问令牌固定在构造时的请求头里。`OAuthManager`、`OAuthDiscovery`、`OAuthHttp`、`OAuthCallback`、`OAuthTokenStore` 分别负责协调、发现、有界 HTTP、回调和凭证存储；`McpConnection.Factory.prepare` 在宿主线程执行，避免在连接工作线程读取终端，也不让浏览器等待占用 15 秒 MCP 启动预算。
+
+可选的高级配置：
+
+```json
+"auth": {
+  "mode": "oauth",
+  "clientId": "YOUR_PUBLIC_CLIENT_ID",
+  "scopes": ["docs:read"],
+  "callbackPort": 8900
+}
+```
+
+`mode` 为 auto/oauth/none/manual；oauth 表示必须发现 OAuth，auto 可使用匿名服务。无 `auth` 的旧配置：有手动 headers 时沿用 manual，无头的 HTTP 使用 auto，stdio 使用 none。auto/oauth 与手动 Authorization 头冲突时配置报错，不擅自换账号。`clientId` 可省略以尝试动态注册，未提供动态注册时终端可询问；`callbackPort` 默认0随机，固定回调路径 `/oauth/callback`，需预注册的服务应按实际回调规则配置。scope 默认不猜测，不自动申请所有 scopes_supported。配置变更会生成新的凭证身份键。
+
+**令牌与授权边界**：
+
+- 令牌保存于 `CODEY_DATA_DIR/mcp/oauth/<身份哈希>.bin`，Windows CurrentUser DPAPI 加密；不进入 mcp.json、.env、模型消息、工具结果或会话历史。哈希绑定别名、MCP URL、auth设置和额外请求头；缓存内再次校验 resource/client_id。当前系统凭证保护只实现 Windows，其他系统不回退到明文文件。
+- 访问令牌提前少量时间刷新，保留/轮换 refresh_token；锁内重新读缓存，避免多进程重复消费同一轮换令牌。过期无刷新令牌、invalid_grant 时在下一次准备连接中引导重新授权；刷新暂时失败保留旧记录。未提供 expires_in 的令牌只在当前连接使用，下次激活重新刷新或授权。
+- 浏览器回调仅监听 127.0.0.1；校验路径、Host、随机 state 和服务提供的 iss，拒绝重复查询参数。PKCE 使用随机 verifier + SHA-256/S256。回调等待默认3分钟，完成/拒绝/异常/超时后关闭监听。认证 HTTP 单次8/10秒、有界响应、无重定向；公开远端使用 HTTPS，回环 HTTP 仅用于本地服务测试。
+- 同一任务授权失败后不反复打开浏览器；任务结束重置该尝试状态，下个任务可以重试。授权发生在原有召唤审批之后；OAuth 授予服务方权限，不代替 ask/auto/full 对业务工具的审批。
+- 活跃连接中不会在后台打开浏览器；刷新失效会报告错误。业务请求401、超时或结果未知时不自动重放。访问令牌在到期前被撤销时，可在 `/mcp` 服务详情选 `a` 清除本地授权，下次任务重新登录；它不删除注册信息，也不等于撤销服务端令牌。
+- 无交互授权入口（如 --prompt）只复用/刷新已有授权，需要首次授权则返回 AUTH_REQUIRED；CLI管道只有显式启用管道交互审批时才允许引导授权。系统浏览器未自动打开时可复制终端显示的临时授权链接。
+
+**验证**：`mvn verify` 共 **980** 项全部通过。新增27项覆盖本地授权服务器发现、PKCE、错误state/issuer、拒绝/超时、客户端注册、缓存复用、刷新与轮换、未知寿命、非交互模式、资源绑定、Windows真实DPAPI、SDK逐请求新令牌及业务401不重放。生产JAR使用临时加密凭证验证过期缓存刷新、Bearer注入、模型工具调用、跨进程菜单启停与凭证隔离；未使用真实账号或打开真实授权页面。
+
+当前支持公共客户端授权码 + PKCE、资源/发行者发现、可选 DCR、预注册 client_id 和 refresh_token；机密客户端 client_secret、Device Code、远端撤销接口、其他操作系统凭证库尚未实现。MCP协议仍沿用固定SDK支持的legacy版本，OAuth接入并不等于升级整个MCP协议。参考 [MCP 2025-06-18 授权规范](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization)、[原生应用 OAuth](https://www.rfc-editor.org/rfc/rfc8252.html)、[受保护资源元数据](https://www.rfc-editor.org/rfc/rfc9728.html)。
 
 <a id="module-policy"></a>
 

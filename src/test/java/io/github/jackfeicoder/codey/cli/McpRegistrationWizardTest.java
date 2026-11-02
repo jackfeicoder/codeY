@@ -132,4 +132,18 @@ class McpRegistrationWizardTest {
         }
     }
 
+    @Test void httpDefaultsToAutomaticOAuthWithoutAddingLoginCommands() throws Exception {
+        try(var manager=manager()) {
+            wizard("1\nremote\n查询资料\nhttps://example.com/mcp\n\ny\n",manager,Map.of());
+            assertEquals("auto",manager.config("remote").auth().mode());assertEquals(0,opens.get());
+            assertTrue(CommandCatalog.commands().stream().noneMatch(c->c.name().equals("/oauth")||c.name().equals("/login")));
+        }
+    }
+    @Test void preRegisteredOAuthClientAndCallbackPortCanBeConfigured() throws Exception {
+        try(var manager=manager()) {
+            wizard("1\nremote\n查询资料\nhttps://example.com/mcp\n4\npublic-client\n8900\ny\n",manager,Map.of());
+            assertEquals("oauth",manager.config("remote").auth().mode());assertEquals("public-client",manager.config("remote").auth().clientId());assertEquals(8900,manager.config("remote").auth().callbackPort());
+        }
+    }
+
 }

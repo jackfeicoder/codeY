@@ -19,6 +19,10 @@ public final class SdkMcpConnection implements McpConnection {
     private final List<RemoteTool> tools;
     private SdkMcpConnection(McpSyncClient client,List<RemoteTool> tools) { this.client=client; this.tools=List.copyOf(tools); }
     public static McpConnection open(McpServerConfig config) {
+        return open(config,config::headers);
+    }
+    /** 每个 HTTP 请求动态取凭证；刷新只发生在发送之前，不重放失败业务调用。 */
+    public static McpConnection open(McpServerConfig config,java.util.function.Supplier<Map<String,String>> headers) {
         McpClientTransport transport;
         if(config.transport().equals("stdio")) {
             var params=ServerParameters.builder(config.command()).args(config.args()).env(config.env()).build();
@@ -42,7 +46,8 @@ public final class SdkMcpConnection implements McpConnection {
             transport=HttpClientStreamableHttpTransport.builder(origin).endpoint(endpoint)
                     .clientBuilder(HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER))
                     .connectTimeout(Duration.ofSeconds(config.startupTimeoutSeconds()))
-                    .customizeRequest(r -> config.headers().forEach(r::header)).openConnectionOnStartup(false).build();
+                    .httpRequestCustomizer((request,method,address,body,context) -> headers.get().forEach(request::setHeader))
+                    .openConnectionOnStartup(false).build();
         }
         var client=McpClient.sync(transport).requestTimeout(Duration.ofSeconds(config.toolTimeoutSeconds()))
                 .initializationTimeout(Duration.ofSeconds(config.startupTimeoutSeconds()))
@@ -64,15 +69,21 @@ public final class SdkMcpConnection implements McpConnection {
                 if(cursor!=null && (!cursors.add(cursor)||cursors.size()>16)) throw new IllegalArgumentException();
             } while(cursor!=null);
             return new SdkMcpConnection(client,tools);
-        } catch(RuntimeException failed) { client.close(); throw new ToolException(ToolResult.ErrorCode.EXECUTION_FAILED,
+        } catch(RuntimeException failed) { client.close(); rethrowAuth(failed); throw new ToolException(ToolResult.ErrorCode.EXECUTION_FAILED,
                 "MCP connection or discovery failed; check transport, authentication and protocol compatibility."); }
     }
     @Override public List<RemoteTool> tools() { return tools; }
     @Override public String call(String rawName,com.fasterxml.jackson.databind.JsonNode args) {
         try { return McpResultMapper.map(client.callTool(new McpSchema.CallToolRequest(rawName,JSON.convertValue(args,Map.class)))); }
         catch(ToolException expected) { throw expected; }
-        catch(RuntimeException failed) { throw new ToolException(ToolResult.ErrorCode.EXECUTION_FAILED,
+        catch(RuntimeException failed) { rethrowAuth(failed); throw new ToolException(ToolResult.ErrorCode.EXECUTION_FAILED,
                 "MCP request failed or timed out; execution outcome may be unknown. Do not automatically replay writes."); }
+    }
+    /** SDK 可能包裹请求定制器异常；只透传本地认证错误，不回显任意远端响应。 */
+    private static void rethrowAuth(RuntimeException failure) {
+        Throwable cause=failure;
+        for(int i=0;i<10&&cause!=null;i++,cause=cause.getCause())
+            if(cause instanceof ToolException tool&&(tool.code()==ToolResult.ErrorCode.AUTH_REQUIRED||tool.code()==ToolResult.ErrorCode.AUTH_FAILED))throw tool;
     }
     @Override public void close() { client.close(); }
 }

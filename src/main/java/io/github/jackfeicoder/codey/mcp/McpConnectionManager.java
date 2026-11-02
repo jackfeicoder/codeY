@@ -100,6 +100,7 @@ public final class McpConnectionManager implements AutoCloseable {
         if(active(name)) return "MCP "+name+" already active; tools are available in the next request.";
         states.put(name,"CONNECTING"); McpConnection connection=null;
         try {
+            factory.prepare(config); // OAuth 独立预算，审批已在控制工具中完成。
             connection=connect(config);
             var batch=new ArrayList<McpToolAdapter>(); var rawNames=new HashSet<String>(); long tokens=0;
             var remoteTools=connection.tools();
@@ -164,6 +165,10 @@ public final class McpConnectionManager implements AutoCloseable {
         } else { release(name); disabled.add(name); }
         refreshControls();
     }
+    /** 用户显式要求下次重新授权；不向模型开放令牌删除能力。 */
+    public boolean resetAuthentication(String name) {
+        var config=config(name);release(name);return factory.resetAuthentication(config);
+    }
     public String tools(String name) {
         config(name); var current=active.get(name);
         return current==null?"MCP "+name+" is "+state(name)+"; tools are not loaded.":current.tools.stream().map(t->t.definition().name()).toList().toString();
@@ -172,7 +177,10 @@ public final class McpConnectionManager implements AutoCloseable {
         controls.forEach(registry::unregister); controls.clear();
         controls.add(new McpControlTool(this,true)); controls.add(new McpControlTool(this,false)); registry.registerAll(controls);
     }
-    public void releaseAll() { for(String name:List.copyOf(active.keySet())) release(name); }
+    public void releaseAll() {
+        for(String name:List.copyOf(active.keySet())) release(name);
+        factory.endTask();
+    }
     private static void closeQuietly(McpConnection connection) {
         boolean interrupted=Thread.interrupted();
         try { connection.close(); } catch(RuntimeException ignored) { } finally { if(interrupted) Thread.currentThread().interrupt(); }

@@ -59,12 +59,25 @@ public final class McpRegistrationWizard {
         output.flush();
     }
 
-    /** HTTP 的 URL 是 MCP 端点，认证最终统一投影为 headers；OAuth 首版未接入。 */
+    /** HTTP 默认自动发现 OAuth；手动 Token/自定义头继续可选，不新增登录命令。 */
     private void http(ObjectNode entry) throws IOException {
         entry.put("transport","streamable-http");
         entry.put("url",field("MCP 服务地址（完整 http/https 端点）> ",false,McpRegistrationWizard::httpUrl,"请输入有效的 http/https MCP 端点，不含用户名/密码或片段。"));
-        String auth=choice("认证 [1 无 / 2 Bearer Token / 3 自定义请求头或API Key]（默认1）> ","1",List.of("1","2","3"));
-        if(auth.equals("1")) return;
+        String auth=choice("认证 [0 自动发现OAuth / 1 无 / 2 Bearer Token / 3 自定义头 / 4 配置OAuth客户端]（默认0）> ","0",List.of("0","1","2","3","4"));
+        if(auth.equals("0")||auth.equals("4")) {
+            var settings=entry.putObject("auth").put("mode",auth.equals("4")?"oauth":"auto");
+            if(auth.equals("4")) {
+                String client=field("预注册公共 client_id（回车尝试动态注册）> ",false,s->s.length()<=2048,"client_id 过长。");
+                if(!client.isEmpty())settings.put("clientId",client);
+                String port=field("本地回调端口（回车随机；固定回调路径 /oauth/callback）> ",false,s->{
+                    try{return s.isEmpty()||(Integer.parseInt(s)>0&&Integer.parseInt(s)<=65535);}catch(NumberFormatException e){return false;}
+                },"端口范围应为1..65535，或回车随机。");
+                if(!port.isEmpty())settings.put("callbackPort",Integer.parseInt(port));
+            }
+            return;
+        }
+        if(auth.equals("1")) {entry.putObject("auth").put("mode","none");return;}
+        entry.putObject("auth").put("mode","manual");
         var headers=entry.putObject("headers");
         if(auth.equals("2")) { headers.put("Authorization","Bearer "+credential("Token（不含 Bearer 前缀）")); return; }
         output.println("按服务方说明添加请求头，例如 X-API-Key；头值填写完整内容。空名称结束。");

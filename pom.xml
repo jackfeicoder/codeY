@@ -17,6 +17,12 @@
         <jline.version>3.30.17</jline.version>
     </properties>
     <dependencies>
+        <!-- Windows OAuth 令牌使用当前用户 DPAPI 加密，不落入明文 MCP 配置。 -->
+        <dependency>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna-platform</artifactId>
+            <version>5.16.0</version>
+        </dependency>
         <!-- 官方 MCP 客户端：固定 Java 17 兼容版本，协议交互由 SDK 实现。 -->
         <dependency>
             <groupId>io.modelcontextprotocol.sdk</groupId>
