@@ -21,6 +21,14 @@ class CommandCompleterTest {
     private final CommandCompleter completer = new CommandCompleter(() -> catalog, () -> true);
 
     @Test
+    void completesMcpRegistration() {
+        var completer = new CommandCompleter(List::of, () -> true);
+        assertEquals(List.of("register"),values(completer,"/mcp reg"));
+        assertEquals(List.of("register"),values(completer,"/mcp "));
+        assertTrue(values(completer,"/mcp s").isEmpty());
+    }
+
+    @Test
     void completesCommandsAndListArgumentWithoutLoadingModels() {
         var commandsOnly = new CommandCompleter(() -> { throw new AssertionError("No config lookup expected"); }, () -> true);
         assertEquals(List.of("/help"), values(commandsOnly, "/h"));

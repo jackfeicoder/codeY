@@ -836,6 +836,9 @@ CODEY_DATA_DIR/memory/
 |---|---|
 | `mcp/McpServerConfig.java` | 服务别名、简介、传输、凭证引用解析结果、超时和工具筛选 |
 | `mcp/McpConfigLoader.java` | 有界读取 `mcp.json`，严格校验，合并 `.env` 与环境变量 |
+| `mcp/McpConfigStore.java` | 注册配置预检、文件锁、保留已有服务及变量引用、原子保存 |
+| `cli/McpRegistrationWizard.java` | `/mcp register` 分步填写 HTTP/stdio 参数、凭证隐藏输入、取消与立即生效 |
+| `cli/McpMenu.java` | `/mcp` 查看服务目录/详情，菜单注册和持久化启停；不隐式连接 |
 | `mcp/McpConnection.java` | 连接接口，隔离 SDK 与工具注册，便于本地替身测试 |
 | `mcp/SdkMcpConnection.java` | 官方 Java SDK：stdio/Streamable HTTP、初始化、分页发现、调用和关闭 |
 | `mcp/McpConnectionManager.java` | 休眠目录、超时激活、整批注册、成本估算、释放与运行时开关 |
@@ -845,7 +848,7 @@ CODEY_DATA_DIR/memory/
 | `tool/ToolRegistry.java`、`agent/AgentLoop.java` | 动态整批注册/卸载、每轮注册快照、任务 finally 清理 |
 | `cli/Main.java`、`SessionLauncher.java`、`CommandCatalog.java`、`CommandCompleter.java` | 配置装配、`/mcp`、帮助及子命令补全 |
 
-**配置**：在 `CODEY_CONFIG_DIR` 指定的目录（未设置时为启动目录）创建 `mcp.json`。不随会话工作区读取项目自己的 MCP 配置。仓库提供 [mcp.example.json](mcp.example.json)，示例默认禁用，先修改地址/程序和简介、填写变量，再设置 `enabled: true` 并重启。CMD 可执行 `copy mcp.example.json mcp.json`。本地 `mcp.json` 已加入 `.gitignore`。
+**配置**：推荐直接输入 `/mcp register` 使用注册向导；也可在 `CODEY_CONFIG_DIR` 指定的目录（未设置时为启动目录）创建 `mcp.json`。不随会话工作区读取项目自己的 MCP 配置。仓库提供 [mcp.example.json](mcp.example.json)，示例默认禁用，先修改地址/程序和简介、填写变量，再设置 `enabled: true` 并重启。CMD 可执行 `copy mcp.example.json mcp.json`。本地 `mcp.json` 已加入 `.gitignore`。
 
 ```json
 {
@@ -866,7 +869,43 @@ CODEY_DATA_DIR/memory/
 }
 ```
 
-URL 必须是供应商给出的真实 MCP 端点，普通 REST API 地址不能直接接入。`stdio` 使用 `command`、`args`、可选 `env`/`cwd`，不通过 shell 拼接命令；Windows 的 `.cmd` 包装器如需 shell，应由用户显式配置 `cmd.exe` 及对应参数，优先使用真实可执行文件。`cwd` 相对配置目录解析，缺省继承 CodeY 启动目录。`${VAR}` 从进程环境或同目录 `.env` 解析，环境优先；启用服务缺失变量时配置报错且隐藏值；禁用模板允许暂不填变量。`--check-config` 校验配置但不连接服务。文件更新需重启。
+URL 必须是供应商给出的真实 MCP 端点，普通 REST API 地址不能直接接入。`stdio` 使用 `command`、`args`、可选 `env`/`cwd`，不通过 shell 拼接命令；Windows 的 `.cmd` 包装器如需 shell，应由用户显式配置 `cmd.exe` 及对应参数，优先使用真实可执行文件。`cwd` 相对配置目录解析，缺省继承 CodeY 启动目录。`${VAR}` 从进程环境或同目录 `.env` 解析，环境优先；启用服务缺失变量时配置报错且隐藏值；禁用模板允许暂不填变量。`--check-config` 校验配置但不连接服务。手动文件更新需重启；`/mcp register` 保存并立即生效。
+
+**交互注册**：`/mcp register` 在会话列表或聊天中均可执行，不需要先选择模型。`/mcp` 会显示入口，`/mcp reg` 按 Tab 可补全。
+
+```text
+/mcp register
+连接方式 [1 HTTP / 2 stdio]：1
+serverName：github
+能力简介：搜索仓库、查询 Issue 和 PR
+MCP 服务地址：https://实际服务方的端点/mcp
+认证 [1 无 / 2 Bearer Token / 3 自定义请求头或API Key]：2
+Token来源 [1 引用.env/环境变量 / 2 隐藏输入并存入本地mcp.json]：2
+Token：********
+确认保存并注册？[Y/n]：y
+已注册 MCP：github | DORMANT。服务目录已立即更新，无需重启。
+```
+
+| 参数 | HTTP | stdio | 含义 |
+|---|---|---|---|
+| serverName | 必填 | 必填 | 本地别名，保存为 `mcpServers` 下的键，不是远端返回的服务名 |
+| description | 必填 | 必填 | 用户提供的一句话能力简介，进入 `mcp_summon` 描述 |
+| url | 必填 | — | 服务方给出的完整 MCP 端点 |
+| headers | 按需 | — | 无认证 / Bearer / 自定义头；API Key 的头名按服务文档填写 |
+| command | — | 必填 | 可执行程序名/路径，参数另填，不将整条 shell 命令混在一起 |
+| args | — | 可选 | 每行一个参数，回车结束；空格路径原样保存，不加额外引号 |
+| cwd | — | 可选 | 已存在目录；相对配置目录解析，留空继承 CodeY 启动目录 |
+| env | — | 可选 | 子进程要求的变量名及其值，可引用已有变量或隐藏输入 |
+
+各客户端配置外壳不同：Claude Code 使用 `type`/JSON，Codex 使用 TOML 配置表，DSH 使用插件配置中的 `serverName`/`transport`；CodeY 将向导输入统一保存为现有 `transport`/JSON 格式，不直接导入其他客户端配置。通信协议并未规定各产品必须共用同一种配置文件。参考 [Claude Code](https://code.claude.com/docs/en/mcp)、[Codex](https://developers.openai.com/codex/mcp)、[DSH](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/mcp/mcp-client/README.md)。
+
+认证值可引用已存在的 `.env` 或环境变量（只填写变量名），也可直接隐藏输入。隐藏输入的值会以明文存入本地 `mcp.json`，不加密；交互终端使用掩码，向导全部输入不进入 JLine 历史、模型消息或会话记录。普通管道输入由调用者负责自己的终端回显/重定向记录。程序不自动修改 `.env`，不会把解析后的其他服务凭证反写进配置。OAuth 登录暂未接入。
+
+`/cancel`、`/back`、`/exit`、Ctrl+C 或 EOF 取消向导，不保存草稿；取消确认也不写文件。保存采用锁内读取/校验/合并和同目录原子替换，同名服务不覆盖，其他条目及 `${VAR}` 引用保留，损坏文件或占用锁时报告未保存。支持首次从空目录注册；注册后只把新服务加入当前管理器，已有活跃连接不受影响。目录立即更新，服务继续休眠，后续召唤仍走审批。注册向导是用户命令，不是模型工具；在 PLAN 中保存配置也不会启动服务。默认初始化/调用超时仍为 15/60 秒，工具筛选等高级字段可手动配置。
+
+注册向导验证：`mvn verify` 共 **948** 项通过，新增16项覆盖HTTP/stdio参数、Bearer/自定义头/变量引用、取消/EOF、非法输入重填、文件锁与重复名保护、浏览页无模型注册、活动会话立即获得目录、凭证掩码及JLine历史隔离。生产JAR隔离冒烟验证首次注册、立即召唤调用、任务释放及重启加载，未访问真实服务或用户配置。
+
+**日常使用**：注册一次后，直接提出任务，例如“请使用 context7 查询 Spring 配置优先级”。模型从 `mcp_summon` 的目录描述选择服务，审批后连接并在下一轮调用工具；用户不再输入加载/释放命令。菜单查看不会连接；启停配置跨进程保留。重启读取已保存目录，服务仍休眠。注册信息与连接生命周期独立，任务结束释放连接不删除配置。OAuth 尚未实现，现有凭证仍按注册时的静态配置使用。
 
 **调用流程**：
 
@@ -884,13 +923,15 @@ mcp.json → 简短服务目录（名称、能力、估算定义 token）
 - 启动不连接、不扫描工具。简介来自配置，初次定义成本未知，可选 `estimatedTokens`；发现后计算本进程缓存估算值。目录和管理工具常驻，激活工具定义也进入现有上下文预算。估算不是服务价格，也不是完整任务 token。
 - 新工具只能在下一轮请求使用；同一响应中“先召唤再调用新工具”得到关联错误，下一轮再调用。未完整发现、重复名称、注册冲突或超限时不留下半批工具。
 - ask/auto 对激活服务与每次外部调用分别审批，不复用文件授权；full 跳过常规审批。未知外部工具不信任 `readOnlyHint`，首版 PLAN 不开放召唤或外部调用，释放仍可用。用户管道审批沿用 `CODEY_ALLOW_PIPED_APPROVALS`，无交互且未启用时不执行。
-- `/mcp` 或 `/mcp list` 查看状态；`/mcp tools 名称` 查看已激活工具；`/mcp summon 名称` 手动激活；`/mcp release 名称` 释放；`/mcp reconnect 名称` 释放后重新审批激活；`/mcp disable 名称` 立即释放并禁用；`/mcp enable 名称` 恢复本进程禁用的服务到休眠。文件中原本禁用的模板需先填配置并启用、重启以解析凭证。手动激活必须在活动会话中，保留到下一任务结束或释放/会话切换/退出。
+- 用户入口仅保留 `/mcp` 服务管理菜单和 `/mcp register` 注册向导。`/mcp` 输入序号/服务名查看能力、连接状态及已加载工具，输入 `r` 注册，回车返回。服务详情中输入 `e` 启用/停用，变化原子保存到 `mcp.json` 并立即生效；停用保留注册信息、卸载活跃工具，启用只恢复休眠，不自动连接。缺失凭证时启用失败，原状态保留。旧的 list/tools/summon/release/reconnect/enable/disable 子命令已移除，不再展示或补全；连接、加载、使用与释放由模型工具及宿主生命周期完成。
 - 状态有 DORMANT / CONNECTING / ACTIVE / FAILED / DISABLED；连接失败不自动重试，工具失败/超时不会自动重放，写操作超时可能已在服务端生效。用户明确重连不等于重放上次操作。
 - 释放仅减少后续请求的工具定义，原有工具参数/结果及调用费用保留；目录本身也有 token 成本，工具列表变化可能影响缓存。服务商收费独立于 CodeY。
 
 **首版范围**：官方 SDK 固定 `0.17.2`、Java 17，最新协议常量为 `2025-06-18`，使用 legacy `initialize → initialized → tools/list → tools/call`，不是 2026-07-28 的现代无握手协议。以服务端与 SDK 实际协商结果为准，不承诺 modern-only 服务器兼容。支持 stdio、Streamable HTTP 与静态 headers；OAuth、旧 HTTP+SSE transport、Resources、Prompts、Sampling、多模态附件、动态通知刷新和自动重连暂不接入。服务器 instructions 不额外注入 system。
 
 **限制**：配置文件 256KiB/32 服务；每服务最多发现 256 工具、16 个非空分页游标；单 Schema 64Ki 字符、描述 8192 字符、所选工具定义总估算 32000 token。远程 Schema 引用及 `$id` 拒绝，防止本地校验隐式联网；本地 `#` 引用允许。stdio 清理父环境中 KEY/TOKEN/PASSWORD/SECRET 及 CODEY_ 变量，显式 `env` 可覆盖；关闭直接子进程由 SDK 管理，未提供 OS 沙箱或完整后代进程隔离。SDK stderr/日志不直接输出，工具错误给出脱敏说明。文本及 structuredContent 转文本，富媒体给出类型诊断，不把 base64 存入历史；结果受执行器输出上限约束。任务期间工具清单固定到这次发现结果，刷新需重新召唤。
+
+**入口精简验证**：`mvn verify` 共 **953** 项通过；生产 JAR 隔离测试覆盖注册后模型自动召唤/调用/释放、查看菜单不连接、菜单启停跨重启保存，以及凭证与菜单输入不进入聊天历史。
 
 **验证**：`mvn verify` 共 932 项测试通过；新增 21 项覆盖休眠、召唤/释放、同轮提前调用拒绝、审批、Schema、超时晚到清理、整批注册、多服务、配置及真实本地 HTTP/stdio/CLI。生产 JAR 隔离冒烟以 4 次模拟 LLM 请求、1 次 MCP 业务调用验证动态工具与任务释放，未访问真实供应商或用户数据。
 

@@ -204,6 +204,27 @@ public final class ConsoleInput implements AutoCloseable {
         catch (UserInterruptException | EndOfFileException cancelled) { return null; }
     }
 
+    /** 注册向导专用输入：关闭补全和编辑器历史；凭证在交互终端隐藏，EOF/Ctrl+C 取消。 */
+    public String readSetup(String prompt, boolean secret) throws IOException {
+        completeCommands = false;
+        if (reader == null) {
+            if (secret && System.console() != null) {
+                char[] chars = System.console().readPassword("%s", prompt);
+                if (chars == null) return null;
+                try { return new String(chars); } finally { java.util.Arrays.fill(chars, '\0'); }
+            }
+            output.print(prompt); output.flush(); return plain.readLine();
+        }
+        Object previous = reader.getVariable(LineReader.DISABLE_HISTORY);
+        reader.setVariable(LineReader.DISABLE_HISTORY,true);
+        try { return reader.readLine(theme().text(ConsoleTheme.Tone.COMMAND,prompt), secret ? Character.valueOf('*') : null); }
+        catch (UserInterruptException | EndOfFileException cancelled) { return null; }
+        finally {
+            if (previous == null) reader.getVariables().remove(LineReader.DISABLE_HISTORY);
+            else reader.setVariable(LineReader.DISABLE_HISTORY,previous);
+        }
+    }
+
     /** 关闭终端恢复原始模式，普通输入由进程持有。 */
     @Override
     public void close() throws IOException {

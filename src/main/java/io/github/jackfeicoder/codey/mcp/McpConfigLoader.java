@@ -18,14 +18,28 @@ public final class McpConfigLoader {
     public static List<McpServerConfig> load(Path startup, Map<String,String> environment) {
         Path dir = ConfigLoader.configurationDirectory(startup, environment);
         Path file = dir.resolve("mcp.json");
-        if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) return List.of();
+        try { return parse(dir, environment, readDocument(file)); }
+        catch (Exception invalid) { throw invalidConfig(); }
+    }
+
+    /** 保留原始变量引用及其他服务，用于交互注册时增量保存；缺失文件返回空目录。 */
+    static com.fasterxml.jackson.databind.node.ObjectNode readDocument(Path file) throws java.io.IOException {
+        if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
+            var document = JSON.createObjectNode(); document.putObject("mcpServers"); return document;
+        }
+        if (Files.isSymbolicLink(file) || !Files.isRegularFile(file) || Files.size(file) > 262144)
+            throw new IllegalArgumentException();
+        byte[] bytes;
+        try (var in = Files.newInputStream(file)) { bytes = in.readNBytes(262145); }
+        if (bytes.length > 262144) throw new IllegalArgumentException();
+        JsonNode document = JSON.readTree(bytes);
+        if (document == null || !document.isObject()) throw new IllegalArgumentException();
+        return (com.fasterxml.jackson.databind.node.ObjectNode) document;
+    }
+
+    /** 校验候选配置并解析凭证；注册前复用同一规则，不为校验临时覆盖配置文件。 */
+    static List<McpServerConfig> parse(Path dir, Map<String,String> environment, JsonNode document) {
         try {
-            if (Files.isSymbolicLink(file) || !Files.isRegularFile(file) || Files.size(file) > 262144)
-                throw new IllegalArgumentException();
-            byte[] bytes;
-            try (var in = Files.newInputStream(file)) { bytes = in.readNBytes(262145); }
-            if (bytes.length > 262144) throw new IllegalArgumentException();
-            JsonNode document = JSON.readTree(bytes);
             keys(document, Set.of("mcpServers"));
             JsonNode servers = document.get("mcpServers");
             if (servers == null || !servers.isObject() || servers.size() > 32) throw new IllegalArgumentException();
@@ -66,7 +80,10 @@ public final class McpConfigLoader {
                         number(n,"startupTimeoutSeconds",15,1,120),number(n,"toolTimeoutSeconds",60,1,600),estimate));
             }
             return List.copyOf(result);
-        } catch (Exception invalid) { throw new ConfigException("Invalid mcp.json: check fields, transport, limits and environment references (values hidden)."); }
+        } catch (Exception invalid) { throw invalidConfig(); }
+    }
+    private static ConfigException invalidConfig() {
+        return new ConfigException("Invalid mcp.json: check fields, transport, limits and environment references (values hidden).");
     }
     private static void keys(JsonNode n, Set<String> allowed) {
         if (n==null || !n.isObject()) throw new IllegalArgumentException();

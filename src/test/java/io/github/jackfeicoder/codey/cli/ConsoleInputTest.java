@@ -74,6 +74,35 @@ class ConsoleInputTest {
         assertEquals("/help", edit("/h\t\r", 1));
     }
 
+    @Test
+    void setupSecretsAreMaskedAndNeverEnterEditorHistory() throws Exception {
+        var bytes = new ByteArrayInputStream("first\rfixture-private-token\r\u0010\r".getBytes(StandardCharsets.UTF_8));
+        var display = new ByteArrayOutputStream();
+        var terminal = new DumbTerminal("fixture", "xterm", bytes, display, StandardCharsets.UTF_8);
+        terminal.setSize(new org.jline.terminal.Size(100, 25));
+        try (var input = new ConsoleInput(new BufferedReader(new StringReader("")), new PrintWriter(display), terminal)) {
+            assertEquals("first",input.readLine("You> "));
+            assertEquals("fixture-private-token",input.readSetup("Token> ",true));
+            assertEquals("first",input.readLine("You> "));
+        }
+        assertFalse(display.toString(StandardCharsets.UTF_8).contains("fixture-private-token"));
+    }
+
+    @Test
+    void setupNonSecretFieldsAlsoStayOutOfEditorHistoryAndEofCancels() throws Exception {
+        var bytes = new ByteArrayInputStream("first\rserver-name\r\u0010\r".getBytes(StandardCharsets.UTF_8));
+        var terminal = new DumbTerminal("fixture", "xterm", bytes, new ByteArrayOutputStream(), StandardCharsets.UTF_8);
+        terminal.setSize(new org.jline.terminal.Size(100, 25));
+        try (var input = new ConsoleInput(new BufferedReader(new StringReader("")),new PrintWriter(new StringWriter()),terminal)) {
+            assertEquals("first",input.readLine("You> "));
+            assertEquals("server-name",input.readSetup("Name> ",false));
+            assertEquals("first",input.readLine("You> "));
+        }
+        try (var input = new ConsoleInput(new BufferedReader(new StringReader("")),new PrintWriter(new StringWriter()))) {
+            assertNull(input.readSetup("Token> ",true));
+        }
+    }
+
     private String edit(String keys, int rows) throws Exception {
         var bytes = new ByteArrayInputStream(keys.getBytes(StandardCharsets.UTF_8));
         try (var terminal = new DumbTerminal("fixture", "xterm", bytes, new ByteArrayOutputStream(), StandardCharsets.UTF_8)) {

@@ -37,7 +37,7 @@ public final class CommandCompleter implements Completer {
         }
         String command = line.words().get(0);
         if ("/mcp".equals(command) && line.wordIndex() == 1) {
-            for (String option : List.of("list", "tools", "enable", "disable", "summon", "release", "reconnect")) add(candidates,prefix,option,"MCP 服务管理");
+            for (String option : List.of("register")) add(candidates,prefix,option,"MCP 服务管理");
         } else if ("/memory".equals(command) && line.wordIndex() == 1) {
             for (String option : List.of("tidy", "archives", "versions", "restore", "rollback")) add(candidates,prefix,option,"记忆整理与恢复");
         } else if ("/memory".equals(command) && line.wordIndex() == 2) {

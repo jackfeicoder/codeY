@@ -276,8 +276,15 @@ public final class SessionLauncher {
 
     /** MCP 由 Main 装配；旧构造入口保持无外部服务，便于嵌入和测试。 */
     private io.github.jackfeicoder.codey.mcp.McpConnectionManager mcp;
+    private io.github.jackfeicoder.codey.mcp.McpConfigStore mcpConfigStore;
     public SessionLauncher withMcp(io.github.jackfeicoder.codey.mcp.McpConnectionManager manager) {
         this.mcp = java.util.Objects.requireNonNull(manager); return this;
+    }
+
+    /** 注册使用和启动读取完全相同的目录与环境快照，不读取会话项目的配置。 */
+    public SessionLauncher withMcp(io.github.jackfeicoder.codey.mcp.McpConnectionManager manager,
+                                   io.github.jackfeicoder.codey.mcp.McpConfigStore configStore) {
+        withMcp(manager); this.mcpConfigStore = java.util.Objects.requireNonNull(configStore); return this;
     }
 
     /** EOF 或 /exit 结束；错误保存会话返回 1，参数配置错误由 Main 分类。 */
@@ -402,33 +409,13 @@ public final class SessionLauncher {
         }
     }
 
-    /** MCP 管理不进入业务历史；召唤/重连仍走相同工具审批入口。 */
-    private void mcpCommand(String args) {
-        if (mcp == null) { output.println("未配置 MCP 服务。"); return; }
-        var words = args.isBlank() ? new String[0] : args.split("\\s+");
-        if (words.length == 0 || (words.length == 1 && words[0].equals("list"))) {
-            for (String name : mcp.names()) output.println(name + " | " + mcp.state(name));
-            output.print(mcp.catalog()); return;
-        }
-        if (words.length != 2) { output.println("用法：/mcp [list|tools|enable|disable|summon|release|reconnect] [服务名]"); return; }
-        String action = words[0], name = words[1];
-        try {
-            switch (action) {
-                case "tools" -> output.println(mcp.tools(name));
-                case "enable", "disable" -> { mcp.enabled(name, action.equals("enable")); output.println(name + " | " + mcp.state(name)); }
-                case "release" -> output.println(mcp.release(name));
-                case "summon", "reconnect" -> {
-                    if (active == null || browsing) { output.println("请先进入会话，再激活 MCP 服务。"); return; }
-                    if (action.equals("reconnect")) mcp.release(name);
-                    var json = new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode().put("server",name);
-                    var result = new io.github.jackfeicoder.codey.tool.ToolExecutor(tools).execute(
-                            new io.github.jackfeicoder.codey.tool.ToolCall(java.util.UUID.randomUUID().toString(), "mcp_summon", json.toString()),
-                            new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions));
-                    output.println(result.status() + "：" + result.output());
-                }
-                default -> output.println("未知 MCP 子命令。");
-            }
-        } catch (io.github.jackfeicoder.codey.tool.ToolException failed) { output.println("MCP：" + failed.getMessage()); }
+    /** 只保留查看菜单与注册入口；服务器连接和释放交由模型/任务生命周期。 */
+    private void mcpCommand(String args) throws IOException {
+        if (mcp == null) { output.println("当前宿主未提供 MCP 模块。"); return; }
+        var menu = new McpMenu(input,output,mcp,mcpConfigStore);
+        if (args.isBlank()) menu.run();
+        else if (args.equals("register")) menu.register();
+        else output.println("MCP 用法：/mcp 查看管理菜单；/mcp register 注册服务。服务由 Agent 按需加载，无需手动连接或释放。");
     }
 
     /** 更新全局列表快照，下一页沿用它，避免排序变化导致选错序号。 */

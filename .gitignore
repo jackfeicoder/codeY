@@ -45,3 +45,6 @@ logs/
 
 # User MCP endpoints and credentials
 /mcp.json
+
+/mcp.json.lock
+/.mcp-register-*.tmp

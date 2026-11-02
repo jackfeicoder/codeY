@@ -283,7 +283,7 @@ public final class Main {
                 return new SessionLauncher.ModelChoice(profiles.activeSelection(), new ChatCompletionsClient(config, streamingSettings),
                         new ChatCompletionsClient(titleConfig), capabilities);
             }, PromptLoader::loadBase, consoleInput, output, errors, options, chatTools, debug,
-                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings, budgetSettings, compactionSettings, MemorySettings.load(startup, environment), MemoryExtractionSettings.load(startup, environment), MemoryConsolidationSettings.load(startup, environment)).withMcp(mcp).run();
+                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings, budgetSettings, compactionSettings, MemorySettings.load(startup, environment), MemoryExtractionSettings.load(startup, environment), MemoryConsolidationSettings.load(startup, environment)).withMcp(mcp, new io.github.jackfeicoder.codey.mcp.McpConfigStore(startup, environment)).run();
         }
     }
 

@@ -2856,11 +2856,11 @@ AgentLoop每轮重新取动态definitions，ContextBuilder/TokenEstimator统计�
 
 MCP工具仍经ToolExecutor → 输入Schema校验 → prepare审批 → tools/call → ToolResult。输入验证使用SDK提供的默认JSON Schema校验器，拒绝远程$ref/$dynamicRef/$recursiveRef以及$id以避免隐式联网。未知/不支持Schema会使发现或调用明确失败，不绕过校验。外部readOnlyHint不提升为可信本地READ_ONLY；首版PLAN隐藏召唤和外部工具，即使full也拒绝直接调用。mcp_release为READ_ONLY管理操作，不触发远端业务工具。
 
-ask/auto中召唤与每次外部调用分别审批；auto现有规则只自动批准普通文件，因此外部操作仍转人工。full跳过常规审批，参数、注册快照及PLAN约束保留。召唤批准只允许连接/发现，不批准随后业务操作；无文件目标不建立文件授权。审批展示服务、工具、参数预览（敏感字段隐藏），凭证头/环境值不展示。用户手动/mcp summon与reconnect也走同一工具入口。
+ask/auto中召唤与每次外部调用分别审批；auto现有规则只自动批准普通文件，因此外部操作仍转人工。full跳过常规审批，参数、注册快照及PLAN约束保留。召唤批准只允许连接/发现，不批准随后业务操作；无文件目标不建立文件授权。审批展示服务、工具、参数预览（敏感字段隐藏），凭证头/环境值不展示。用户不再使用手动召唤/重连命令；模型调用mcp_summon后仍走同一执行和审批入口。
 
 ### 释放、失败与结果
 
-AgentLoop.run在finally调用ToolRegistry.finishTask，由MCP清理器释放本次全部活跃连接，无论最终答案、预算耗尽、模型错误或中断。显式释放先卸载本连接对应工具实例，再关闭连接；不同服务互不影响。手动激活保留到下一任务结束，退出到列表、切换会话和进程退出也清理。Main外层AutoCloseable再次兜底；close幂等并注销管理工具/任务清理器。执行串行，因此不在远端调用中途并发释放。
+AgentLoop.run在finally调用ToolRegistry.finishTask，由MCP清理器释放本次全部活跃连接，无论最终答案、预算耗尽、模型错误或中断。显式释放先卸载本连接对应工具实例，再关闭连接；不同服务互不影响。任务中的激活服务在任务结束时释放，退出到列表、切换会话和进程退出也清理。Main外层AutoCloseable再次兜底；close幂等并注销管理工具/任务清理器。执行串行，因此不在远端调用中途并发释放。
 
 激活失败不自动重试，业务调用失败不自动重放。超时并不证明远端未执行，返回明确结果未知提示。释放不删除已保存工具消息；下一次请求工具定义减小，历史及服务费用不回滚。结果文本与structuredContent转换为统一文本，isError显式失败；图片/音频等只回类型诊断，不将base64写入会话。现有ToolExecutor按Unicode码点截断并标记；协议映射另设文本构建上限，防止结果继续无界拼接。
 
@@ -2873,3 +2873,33 @@ SDK0.17.2兼容Java17，LATEST_PROTOCOL_VERSION=2025-06-18；由SDK实现legacy�
 ### MCP 验证记录
 
 mvn verify：932项，零失败/错误/跳过。新增21项覆盖隔离连接、实际本地Streamable HTTP与stdio子进程、CLI手动激活/审批/退出、配置与环境引用；固定SDK真实握手、完整端点query、认证头、分页、原始工具名调用、isError、stdio argv/env/cwd及直接子进程关闭均通过。生产JAR冒烟使用临时配置/数据，验证--check-config不连接、默认休眠、模型召唤、下一轮新定义、两层ask审批、结果回填、任务释放及第二任务无外部工具；4次本地模拟LLM请求、1次MCP业务调用，凭证未进入请求给模型的内容、终端或会话。真实厂商、OAuth和modern-only服务不在本次验证范围。
+
+
+### MCP 交互注册：/mcp register
+
+参考CC的add命令、Codex的mcp add和DSH的连接条目，将用户输入投影为CodeY已有配置格式；核心HTTP参数url/headers与stdio参数command/args/env/cwd相同，但配置外壳不统一。MCP协议不规定产品配置文件格式。serverName在向导中表示本地别名，写入mcpServers的对象键；能力简介由用户提供，不额外调用模型生成。
+
+调用流程：SessionLauncher.mcpCommand(register) → McpRegistrationWizard → ConsoleInput.readSetup → McpConfigStore.validate → 用户确认 → 文件锁内重新读取原文档 → 合并新条目/完整校验 → 临时文件force/原子移动 → McpConnectionManager.register → refreshControls → 下一次模型请求拿到更新目录。注册在浏览页和活动聊天页均可执行，既不选择模型也不连接服务器。旧构造入口仍可单独注入管理器；Main以withMcp(manager,store)注入与加载一致的配置目录和环境。
+
+HTTP询问端点及无认证/Bearer/自定义请求头；stdio询问程序、每行一个argv、可选已存在cwd和逐个env。服务器参数以其接入文档为准，不替用户猜测API Key头名。凭证来源支持已有变量引用和隐藏输入：前者保存${VAR}，按环境高于.env解析；后者直接保存本地明文值，提示不加密。向导不修改.env，原有条目不反写为已解析凭证。OAuth后置，注册不自动进行联网测试。
+
+ConsoleInput.readSetup关闭命令补全，以LineReader.DISABLE_HISTORY变量临时禁用编辑历史并在finally恢复；secret采用掩码，原生Console降级用readPassword，管道只读取、不输出值。输入和配置不进入业务会话，密钥不出现在摘要、mcp_summon目录和模型请求。/cancel、/back、/exit、Ctrl+C及EOF统一取消；提交前无文件写入。
+
+McpConfigLoader拆出有界readDocument和同一parse校验规则，McpConfigStore复用它们，无需为校验覆盖实际文件。配置文件上限256KiB、最多32服务，锁为mcp.json.lock（已忽略提交），拒绝符号链接路径，锁占用/原文档无效/候选无效/重复名称/超限/原子移动失败均不覆盖原文件。持久化和内存预检分别检查同名，保存只添加新服务，未实现同名替换、编辑、删除和reload。McpConnectionManager从空目录注册时也会安装控制工具；任务清理钩子始终挂载，避免首次注册后的连接遗漏释放。关闭仍注销钩子。
+
+字段说明、完整向导示例及各客户端官方参考链接见README的MCP模块。手动编辑文件仍需重启；向导成功保存的新服务立即生效且保持DORMANT，已有活跃连接不被重建。隐藏凭证输入保障终端展示/历史隔离，不等于配置加密或系统凭证库。
+
+注册验证：mvn verify总948项，零失败/错误/跳过；新增16项覆盖向导分支、变量与隐藏凭证、目录热注册与任务清理、取消/EOF/拒绝提交、错误重填、文件增量合并/原文保留/锁占用/目录优先级、实际JLine掩码与历史恢复，以及会话列表和活动聊天入口。生产JAR临时配置/数据下先无mcp.json，通过/mcp register生成配置并立即完成模型召唤、HTTP认证与工具调用；随后任务释放，再启动进程可加载同一服务目录且仍休眠。4次模拟LLM请求、1次MCP业务调用，未访问真实供应商/用户数据。
+
+
+### MCP 用户入口收敛（2026-11-02）
+
+用户只需/mcp管理菜单与/mcp register注册向导；CommandCatalog/Completer只展示这两个入口。旧list/tools/summon/release/reconnect/enable/disable子命令不执行，返回简短用法提示，不转为业务模型请求。模型侧mcp_summon/mcp_release及动态工具不变，连接、加载和释放仍复用AgentLoop/ToolExecutor。
+
+McpMenu读取内存目录展示名称、状态与能力说明，序号或别名进入详情，r进入注册，回车/0返回。详情仅显示非敏感元数据与已加载工具，不连接、不发送凭证；e启用/停用，回车/b返回列表。所有菜单输入通过ConsoleInput.readSetup，不加入编辑历史和聊天消息；无模型/无工作区的会话浏览页也可管理。
+
+用户启停调用McpConfigStore.setEnabled，与注册共用文件锁内读取/校验/增量修改/原子替换。其他服务及原始变量引用保留；启用重新解析当前.env/环境引用，缺失凭证拒绝写入，原文件和内存状态不变。成功保存后McpConnectionManager.applyConfiguration卸载本连接、更新配置与禁用集并刷新控制工具描述。停用持久生效且保留注册；重启后仍停用；启用仅回到DORMANT，不创建进程或发网络请求。
+
+“服务注册长期存在”和“连接按任务释放”分别管理：持久化存储保存目录；模型按能力选择召唤；宿主校验、审批、调用、finally释放。OAuth没有在本次修改中扩展，当前令牌有效性由现有静态认证与服务端响应判断。编辑、删除和OAuth授权入口后续按实际需求放入菜单，不继续增加独立命令。
+
+入口精简验证：mvn verify总953项，零失败/错误/跳过。新增菜单测试覆盖查看无连接/无凭证泄露、活跃服务停用释放、跨重启启停持久化、缺失凭证启用失败保持原文档、菜单首次注册；CLI回归改为模型主动召唤，保留PLAN/审批/任务清理验证，旧子命令不执行。生产JAR临时配置/数据下验证两入口、注册后模型完整调用链、菜单停用后重启仍停用、再次启用只恢复休眠，所有管理操作不新增模型或MCP请求；4次模拟LLM请求、1次MCP业务调用。

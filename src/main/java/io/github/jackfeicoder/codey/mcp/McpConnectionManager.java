@@ -30,7 +30,30 @@ public final class McpConnectionManager implements AutoCloseable {
             if(configs.putIfAbsent(config.name(),config)!=null) throw new IllegalArgumentException("Duplicate MCP server alias.");
             if(!config.enabled()) disabled.add(config.name());
         }
-        if(!configs.isEmpty()) { refreshControls(); registry.onTaskFinished(taskCleanup); }
+        if(!configs.isEmpty()) refreshControls();
+        registry.onTaskFinished(taskCleanup);
+    }
+    /** 用户向导新增服务前预检；只允许新别名，不替换活动连接或本进程禁用状态。 */
+    public void checkRegistration(String name) {
+        if(closed || configs.containsKey(name) || configs.size()>=32)
+            throw new IllegalArgumentException("MCP service already exists, manager is closed, or catalog is full.");
+        if(controls.isEmpty() && (registry.find("mcp_summon").isPresent() || registry.find("mcp_release").isPresent()))
+            throw new IllegalArgumentException("MCP management tool names are already registered.");
+    }
+    /** 配置持久化后立即更新目录；此处不连接服务，下次请求自动获得新说明。 */
+    public void register(McpServerConfig config) {
+        checkRegistration(config.name());
+        configs.put(config.name(),config);
+        if(!config.enabled()) disabled.add(config.name());
+        refreshControls();
+    }
+    /** 持久化用户启停后同步本进程；更新不创建连接，禁用即时卸载现有工具。 */
+    public void applyConfiguration(McpServerConfig config) {
+        if(closed || !configs.containsKey(config.name())) throw new IllegalArgumentException("MCP service is not registered.");
+        release(config.name());
+        configs.put(config.name(),config);
+        if(config.enabled()) disabled.remove(config.name()); else disabled.add(config.name());
+        refreshControls();
     }
     public McpServerConfig config(String name) {
         var config=configs.get(name);

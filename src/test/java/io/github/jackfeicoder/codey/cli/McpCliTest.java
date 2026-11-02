@@ -36,24 +36,43 @@ class McpCliTest {
                 new SessionLauncher.Options(null,true,"fixture",null,null),tools,DebugPrinter.NONE,List::of,20,new PermissionSettings(PermissionMode.ASK,true)).withMcp(manager).run());
     }
     private static LlmResponse done(){return new LlmResponse(Message.assistant("done"),"stop",null);}
-    @Test void commandsManageServerAndTaskUsesSameApprovalAndReleases()throws Exception {
+    @Test void modelManagesActivationAndTaskReleasesWithoutManualConnectionCommands() throws Exception {
         var modelCalls=new AtomicInteger();
         try(var manager=manager()) {
-            run("/help\n/mcp\n/mcp tools fixture\n/mcp summon fixture\ny\nfind issue\ny\n/mcp tools fixture\n/mcp disable fixture\n/mcp enable fixture\n/exit\n",manager,request->{
-                if(modelCalls.incrementAndGet()==1){assertTrue(request.tools().stream().anyMatch(t->t.name().equals("mcp__fixture__search")));
-                    return new LlmResponse(Message.assistantToolCalls(List.of(new ToolCall("call","mcp__fixture__search","{}"))),"tool_calls",null);}
+            run("/help\n/mcp\n\nfind issue\ny\ny\n/mcp\n\n/exit\n",manager,request->{
+                int step=modelCalls.incrementAndGet();
+                if(step==1) {
+                    assertTrue(request.tools().stream().noneMatch(t->t.name().equals("mcp__fixture__search")));
+                    return new LlmResponse(Message.assistantToolCalls(List.of(new ToolCall("summon","mcp_summon","{\"server\":\"fixture\"}"))),"tool_calls",null);
+                }
+                if(step==2) {
+                    assertTrue(request.tools().stream().anyMatch(t->t.name().equals("mcp__fixture__search")));
+                    return new LlmResponse(Message.assistantToolCalls(List.of(new ToolCall("call","mcp__fixture__search","{}"))),"tool_calls",null);
+                }
                 return done();
             });
-            assertEquals(1,opens.get());assertEquals(1,closed.get());assertEquals(1,calls.get());assertFalse(manager.active("fixture"));
-            assertTrue(out.toString().contains("/mcp [list"));assertTrue(out.toString().contains("DORMANT"));assertTrue(out.toString().contains("DISABLED"));
-            var saved=new JsonSessionStore(root.resolve("data")).list().sessions().get(0);assertEquals(4,saved.messages().size());
-            assertFalse(saved.messages().stream().anyMatch(m->m.content()!=null&&m.content().contains("/mcp summon")));assertEquals("",errors.toString());
+            assertEquals(3,modelCalls.get());assertEquals(1,opens.get());assertEquals(1,closed.get());assertEquals(1,calls.get());
+            assertFalse(manager.active("fixture"));assertTrue(out.toString().contains("/mcp [register]"));
+            var saved=new JsonSessionStore(root.resolve("data")).list().sessions().get(0);assertEquals(6,saved.messages().size());
+            assertFalse(saved.messages().stream().anyMatch(m->m.content()!=null&&m.content().startsWith("/mcp")));assertEquals("",errors.toString());
         }
     }
-    @Test void planDeniesSummonAndExitClosesManuallyActivatedServer()throws Exception {
+    @Test void planDeniesModelActivationAndReactCanSummonLater() throws Exception {
+        var steps=new AtomicInteger();
         try(var manager=manager()) {
-            run("/mode plan\n/mcp summon fixture\n/mode react\n/mcp summon fixture\ny\n/exit\n",manager,r->done());
-            assertEquals(1,opens.get());assertEquals(1,closed.get());assertTrue(out.toString().contains("PLAN"));assertEquals(0,calls.get());
+            run("/mode plan\ntry plan\n/mode react\ntry react\ny\n/exit\n",manager,request->{
+                int step=steps.incrementAndGet();
+                if(step==1||step==3) return new LlmResponse(Message.assistantToolCalls(List.of(new ToolCall("summon-"+step,"mcp_summon","{\"server\":\"fixture\"}"))),"tool_calls",null);
+                if(step==2) assertTrue(request.messages().get(request.messages().size()-1).content().contains("PERMISSION_DENIED"));
+                return done();
+            });
+            assertEquals(1,opens.get());assertEquals(1,closed.get());assertEquals(0,calls.get());assertEquals("",errors.toString());
+        }
+    }
+    @Test void oldSubcommandsDoNotConnectOrBecomeModelTasks() throws Exception {
+        try(var manager=manager()) {
+            run("/mcp list\n/mcp tools fixture\n/mcp summon fixture\n/mcp release fixture\n/mcp reconnect fixture\n/mcp enable fixture\n/mcp disable fixture\n/exit\n",manager,r->{throw new AssertionError("No model request expected");});
+            assertEquals(0,opens.get());assertEquals(0,calls.get());assertTrue(out.toString().contains("Agent 按需加载"));
         }
     }
 }
