@@ -51,10 +51,25 @@ public final class DebugPrinter {
                 + (path == null ? "" : " · " + shortText(path)));
     }
 
-    /** 不追加工具正文；命令只显示退出/超时摘要，其他失败只显示类别。 */
+    /** 不追加原始工具正文；MCP 只展示宿主生成的诊断字段，命令显示退出/超时摘要。 */
     public void toolFailed(int step, ToolResult result) {
         if (result.status() == ToolResult.Status.ERROR) {
             line(Kind.ERROR, "  [第 " + step + " 轮] " + shortText(result.name()) + " 失败 · " + result.errorCode());
+            if (result.errorCode().name().startsWith("MCP_")) {
+                try {
+                    var detail=MAPPER.readTree(result.output());
+                    if(detail!=null && detail.path("mcpDiagnostic").asBoolean()) {
+                        line(Kind.ERROR,"    MCP "+shortText(detail.path("server").asText())
+                                +" · 阶段 "+shortText(detail.path("stage").asText())
+                                +" · 耗时 "+detail.path("elapsedMillis").asLong()+" ms / 阶段预算 "+detail.path("timeoutSeconds").asLong()+" s"
+                                +(detail.path("stage").asText().equals("call")?"":" / 单请求 "+detail.path("requestTimeoutSeconds").asLong()+" s")
+                                +" · "+io.github.jackfeicoder.codey.mcp.McpDiagnostics.summary(result.errorCode()));
+                        line(Kind.ERROR,"    异常类型 "+shortText(detail.path("exceptionTypes").toString())
+                                +" · stderr线索 "+shortText(detail.path("stderrSignal").asText())
+                                +" · 服务端线索 "+shortText(detail.path("remoteSignal").asText()));
+                    }
+                } catch (java.io.IOException ignored) { /* 不把不可信的工具正文直接打印到终端。 */ }
+            }
         } else if ("execute_command".equals(result.name())) {
             try {
                 var body = MAPPER.readTree(result.output());

@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.atomic.*;
+import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** 真正启动隔离 HTTP/stdio 服务，验证固定 SDK 的握手、分页、路由、凭证和清理。 */
@@ -53,7 +54,8 @@ class SdkMcpConnectionTest {
             assertEquals(2,connection.tools().size());assertEquals(2,lists.get());
             String result=connection.call("echo",McpModuleTest.json("{\"query\":\"ok\"}"));assertTrue(result.contains("fixture success"));assertTrue(result.contains("7"));
             var error=assertThrows(ToolException.class,()->connection.call("echo",McpModuleTest.json("{\"query\":\"fail\"}")));
-            assertTrue(error.getMessage().contains("reported an error"));assertEquals(2,calls.get());assertTrue(endpointCorrect.get());
+            assertEquals(ToolResult.ErrorCode.MCP_REMOTE_ERROR,error.code());
+            assertEquals("call",JSON.readTree(error.getMessage()).path("stage").asText());assertEquals(2,calls.get());assertTrue(endpointCorrect.get());
         } finally {server.stop(0);}
     }
     @Test void stdioUsesArgvEnvCwdAndClosesChildProcess()throws Exception {
@@ -69,6 +71,30 @@ class SdkMcpConnectionTest {
         }
         for(int i=0;i<40&&ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false);i++)Thread.sleep(50);
         assertFalse(ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false));
+    }
+    /** 与 Windows 启动器一致，在新 JVM 中检查 UTF-8 协议结果。 */
+    @Test void utf8JvmPreservesChineseAndEmojiAcrossActualStdio()throws Exception {
+        String java=Path.of(System.getProperty("java.home"),"bin",System.getProperty("os.name").startsWith("Windows")?"java.exe":"java").toString();
+        var child=new ProcessBuilder(java,"-Dfile.encoding=UTF-8","-cp",System.getProperty("java.class.path"),UnicodeClient.class.getName()).redirectErrorStream(true).start();
+        try {
+            assertTrue(child.waitFor(15,TimeUnit.SECONDS));
+            String output=new String(child.getInputStream().readAllBytes(),StandardCharsets.UTF_8);
+            assertEquals(0,child.exitValue(),output);assertTrue(output.contains("UTF8_STDIO_OK"),output);
+        } finally {child.destroyForcibly();}
+    }
+    /** 独立 JVM 验证启动参数真正影响 SDK 字节解码，避免在已缓存 Charset 的 JVM 中改属性。 */
+    public static class UnicodeClient {
+        public static void main(String[] args)throws Exception {
+            String java=Path.of(System.getProperty("java.home"),"bin",System.getProperty("os.name").startsWith("Windows")?"java.exe":"java").toString();
+            var config=new McpServerConfig("unicode","fixture","stdio",null,java,
+                    List.of("-cp",System.getProperty("java.class.path"),StdioFixture.class.getName()),Map.of(),Map.of(),null,true,Set.of(),Set.of(),5,3,null);
+            try(var connection=SdkMcpConnection.open(config)) {
+                String expected="中文邮件📬：有新通知";
+                var result=JSON.readTree(connection.call("echo",JSON.createObjectNode().put("query",expected)));
+                if(!expected.equals(result.path("query").asText()))throw new AssertionError("UTF-8 stdio round trip changed Unicode");
+                System.out.println("UTF8_STDIO_OK");
+            }
+        }
     }
     /** 测试专用 JSONL 子进程；所有 stdout 都是协议，普通诊断使用 stderr。 */
     public static class StdioFixture {

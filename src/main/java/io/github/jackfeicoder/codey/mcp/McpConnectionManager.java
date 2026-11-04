@@ -74,6 +74,7 @@ public final class McpConnectionManager implements AutoCloseable {
     public String state(String name) { return disabled.contains(name)?"DISABLED":active(name)?"ACTIVE":states.getOrDefault(name,"DORMANT"); }
     /** 在独立守护线程连接；超时/中断后即使晚到连接成功，也只关闭而不注册。 */
     private McpConnection connect(McpServerConfig config) {
+        long started=System.nanoTime(); var diagnostic=new McpDiagnostics(config);
         var abandoned=new AtomicBoolean(); var slot=new java.util.concurrent.atomic.AtomicReference<McpConnection>();
         var pool=Executors.newSingleThreadExecutor(r->{var t=new Thread(r,"codey-mcp-connect");t.setDaemon(true);return t;});
         var future=pool.submit(()->{
@@ -84,7 +85,11 @@ public final class McpConnectionManager implements AutoCloseable {
         boolean transferred=false;
         try { var connection=future.get(config.startupTimeoutSeconds(),TimeUnit.SECONDS); transferred=true; return connection; }
         catch(InterruptedException e) { Thread.currentThread().interrupt(); throw failure(ToolResult.ErrorCode.INTERRUPTED,"MCP activation interrupted."); }
-        catch(Exception e) { throw failure(ToolResult.ErrorCode.EXECUTION_FAILED,"MCP activation failed or timed out; check configuration, authentication and protocol support."); }
+        catch(TimeoutException e) { throw diagnostic.explicit(ToolResult.ErrorCode.MCP_STARTUP_TIMEOUT,"activate",null,started); }
+        catch(ExecutionException e) {
+            if(e.getCause() instanceof ToolException expected) throw expected;
+            throw diagnostic.failure("activate",null,started,e);
+        }
         finally {
             abandoned.set(true);
             if(!transferred) {
@@ -94,6 +99,7 @@ public final class McpConnectionManager implements AutoCloseable {
         }
     }
     public String summon(String name) {
+        long started=System.nanoTime();
         if(closed) throw failure(ToolResult.ErrorCode.EXECUTION_FAILED,"MCP manager is closed.");
         var config=config(name);
         if(disabled.contains(name)) throw failure(ToolResult.ErrorCode.PERMISSION_DENIED,"MCP server is disabled; ask the user to enable it.");
@@ -124,7 +130,7 @@ public final class McpConnectionManager implements AutoCloseable {
         } catch(RuntimeException failed) {
             if(connection!=null) closeQuietly(connection); states.put(name,"FAILED");
             if(failed instanceof ToolException t) throw t;
-            throw failure(ToolResult.ErrorCode.EXECUTION_FAILED,"MCP discovery rejected: invalid/duplicate tools, unsupported schema or definition budget exceeded.");
+            throw new McpDiagnostics(config).explicit(ToolResult.ErrorCode.MCP_DISCOVERY_FAILED,"register",null,started);
         }
     }
     private static void checkRefs(JsonNode node) {

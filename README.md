@@ -939,6 +939,24 @@ mcp.json → 简短服务目录（名称、能力、估算定义 token）
 **验证**：`mvn verify` 共 932 项测试通过；新增 21 项覆盖休眠、召唤/释放、同轮提前调用拒绝、审批、Schema、超时晚到清理、整批注册、多服务、配置及真实本地 HTTP/stdio/CLI。生产 JAR 隔离冒烟以 4 次模拟 LLM 请求、1 次 MCP 业务调用验证动态工具与任务释放，未访问真实供应商或用户数据。
 
 <a id="mcp-oauth"></a>
+### MCP 通用诊断（已实现）
+
+**Windows 编码**：SDK 0.17.2 的 stdio 输入使用 JVM 默认字符集；Java 17 在部分 Windows 环境默认为 GBK，而 MCP 报文为 UTF-8。`bin/codey.cmd` 已显式设置 `-Dfile.encoding=UTF-8`，重新启动后生效。直接运行 JAR 时同样使用 `java -Dfile.encoding=UTF-8 -jar target/codey-0.1.0-SNAPSHOT.jar`，否则中文/emoji 可能在进入模型前乱码。终端原生编码仍由 CLI 单独处理；模型推测还原乱码不等于拿到了原始内容。
+
+所有 MCP 服务共用诊断链路，无需新增命令或配置。工具失败时，控制台自动显示错误类别、服务名、失败阶段和耗时，例如：
+
+```text
+mcp__qqmail__imap_get_latest_emails 失败 · MCP_CALL_TIMEOUT
+  MCP qqmail · 阶段 call · 耗时 60015 ms / 阶段预算 60 s · 等待 MCP 工具响应超时，内部执行阶段未知
+  异常类型 ["IllegalStateException","TimeoutException"] · stderr线索 NONE · 服务端线索 NONE
+```
+
+- `McpDiagnostics` 统一生成结构化错误；`SdkMcpConnection` 采集 SDK 异常类型、JSON 解析失败及 stdio 实际退出信号；`McpConnectionManager` 保留工作线程的诊断，区分外层激活超时；`DebugPrinter` 展示简洁摘要。服务端 `isError` 由 `McpResultMapper` 转成独立失败类别。
+- 阶段包括 `activate`（宿主激活期限）、`initialize`（协议初始化）、`discover`（工具发现）、`register`（定义校验/注册）、`call`（业务工具）。启动失败、启动超时、调用超时、子进程退出、协议异常、通信异常、服务端报错和无效结果分别使用 `MCP_*` 错误码。
+- 工具消息中的 `output` 为诊断 JSON，包含 `server/transport/stage/tool/elapsedMillis/timeoutSeconds/requestTimeoutSeconds/exceptionTypes`；JSON-RPC 错误保留数值 `jsonRpcCode`。初始化和发现同时受启动总期限及 SDK 单请求超时约束，因此诊断同时列出两者。控制台耗时不含用户审批等待。
+- stderr 仅保留累计行数与白名单信号，服务端错误仅提取连接拒绝、DNS、超时、认证、证书等线索；这些是服务端报告，不是宿主确认的内部原因。任意响应正文、stderr 原文、异常消息/堆栈、工具参数、URL 和凭据均不写入诊断，也不新增日志文件。成功结果仍按原有工具结果流程处理。
+- `MCP_CALL_TIMEOUT` 只证明等待超过期限，无法证明远端卡死或操作未生效。CodeY 不自动重放调用；邮箱内部连接、锁和 FETCH 等耗时，需要第三方 MCP 自身提供观测信息。诊断功能不修改服务器，也不改变休眠、任务结束释放或审批规则。
+
 ### MCP OAuth 自动认证（已实现）
 
 用户入口仍为 `/mcp`、`/mcp register`，不增加 login/logout/auth 命令。HTTP 注册默认选择 **0 自动发现 OAuth**：有缓存则复用/刷新，匿名服务直接连接，需要授权时才打开浏览器。1 明确匿名，2/3 手动 Token/请求头，4 可配置预注册公共 client_id 与固定回调端口；stdio 继续使用环境变量或服务自身认证流程。

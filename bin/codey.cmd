@@ -10,5 +10,6 @@ if not exist "%CODEY_LAUNCH_JAR%" (
 )
 rem Use the repository .env by default; an explicit config directory takes priority.
 if not defined CODEY_CONFIG_DIR set "CODEY_CONFIG_DIR=%~dp0.."
-java -jar "%CODEY_LAUNCH_JAR%" %*
+rem MCP stdio is UTF-8; SDK 0.17.2 reads it using the JVM default charset.
+java -Dfile.encoding=UTF-8 -jar "%CODEY_LAUNCH_JAR%" %*
 exit /b %errorlevel%

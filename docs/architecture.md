@@ -2864,6 +2864,22 @@ AgentLoop.run在finally调用ToolRegistry.finishTask，由MCP清理器释放本�
 
 激活失败不自动重试，业务调用失败不自动重放。超时并不证明远端未执行，返回明确结果未知提示。释放不删除已保存工具消息；下一次请求工具定义减小，历史及服务费用不回滚。结果文本与structuredContent转换为统一文本，isError显式失败；图片/音频等只回类型诊断，不将base64写入会话。现有ToolExecutor按Unicode码点截断并标记；协议映射另设文本构建上限，防止结果继续无界拼接。
 
+### MCP 通用故障诊断（2026-11-03）
+
+Windows stdio 编码补充：检查固定SDK字节码确认其出站使用UTF-8，但入站InputStreamReader未显式指定字符集，会使用Charset.defaultCharset。Java17/Windows默认GBK时，UTF-8中文与emoji会在JSON语法仍有效的情况下被错误解码，因而不会触发协议错误。启动器统一增加-Dfile.encoding=UTF-8；直接java启动也需该参数，不采用字符串二次转码修补已损坏内容。新增独立UTF-8 JVM与真实stdio子进程的中文/emoji往返回归；此问题与之前的取信超时独立，未证明超时根因。
+
+`McpDiagnostics` 是连接级、内存内的诊断采集器。SDK调用异常沿有限长度的cause链提取类型；嵌套JSON-RPC错误仅保留数值code。工具超时和激活超时分别编码为MCP_CALL_TIMEOUT/MCP_STARTUP_TIMEOUT，未识别异常不猜测为超时；宿主中断保留INTERRUPTED。stdio通过connect错误回调记录启动失败，启动成功后用守护线程调用SDK公开的awaitForExit观察实际退出。异常诊断在主动close之前生成，避免正常清理被误报为意外退出。
+
+JSON映射器包装SDK默认Jackson适配器，在readValue失败时记录协议错误标志。SDK读循环可能吞掉解析异常并让调用最终超时，这个标志使诊断保留协议层证据；该信号在连接生命周期内保留。HTTP与stdio共用映射边界。McpResultMapper将isError转换为MCP_REMOTE_ERROR，不再把远端正文拼入异常。结果为空使用MCP_INVALID_RESPONSE。
+
+调用流程：SDK故障/服务端isError → McpDiagnostics生成有界JSON → ToolException → ToolExecutor生成关联ToolResult → DebugPrinter展示摘要 → 同一诊断JSON随tool消息返回模型。原有外层connect Future.get现在分别处理TimeoutException和ExecutionException；工作线程中的ToolException原样传递，避免具体错误在第二次包装时丢失。定义校验失败使用register阶段和MCP_DISCOVERY_FAILED。
+
+诊断只包含服务别名、传输、阶段、原始工具名、单调时钟耗时、阶段预算和SDK单请求超时、有限异常类型、数值RPC码、退出布尔值、stderr累计行数及白名单信号。阶段预算从open或实际call开始，不含审批及OAuth浏览器等待；activate为宿主启动期限。stderr与服务端错误文本仅作瞬时信号提取，原文不保存、不打印、不持久化。未知正文默认不回显，不依靠正则替换后输出整段内容；诊断不保存参数、凭据、URL或邮件正文。成功业务结果保留原有内容与截断规则。
+
+诊断不会自动重试、升级权限或修改第三方服务。call失败统一提醒远端执行结果未确定；对于服务端isError，也不保证先前副作用已回滚。缺少服务器内部观测时，宿主只报告等待响应超时，不能推断邮件锁、网络或FETCH谁是根因。stdio退出观察不提供SDK未公开的退出码。初始化/发现的阶段期限与单请求期限均记录，可能先由较小期限中止。
+
+诊断验证：`mvn -q verify`共990项通过，零失败/错误/跳过。新增10项使用真实隔离stdio子进程验证超时、退出、非法stdout、服务端isError、JSON-RPC错误、缺失启动程序，以及外层错误保留、激活期限、控制台展示和未知异常不误报超时；错误响应及stderr故意带秘密哨兵，验证原文不进入诊断。现有本地HTTP/OAuth/生命周期测试同步回归。本次没有访问真实邮箱、读取授权码或修改第三方邮件MCP。
+
 ### 固定 SDK 与扩展范围
 
 SDK0.17.2兼容Java17，LATEST_PROTOCOL_VERSION=2025-06-18；由SDK实现legacy初始化/能力协商、JSON-RPC、stdio和Streamable HTTP，未混用2026-07-28的server/discover和逐请求_meta。现代协议独占服务器可能不兼容，需要未来统一升级SDK和测试。HTTP使用完整path/query及静态headers，不跟随重定向；OAuth后续接入见文末实现章节。stdio用argv，不由CodeY隐式包装shell，env清理父密钥再合并显式配置；cwd仅工作目录，不是沙箱。SDK负责关闭直接子进程，首版不承诺子孙进程隔离。

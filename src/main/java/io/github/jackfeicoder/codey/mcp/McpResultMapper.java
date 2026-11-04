@@ -9,15 +9,15 @@ public final class McpResultMapper {
     private static final ObjectMapper JSON=new ObjectMapper();
     private McpResultMapper() { }
     public static String map(McpSchema.CallToolResult result) {
-        if(result==null) throw new ToolException(ToolResult.ErrorCode.EXECUTION_FAILED,"MCP returned no result.");
+        if(result==null) throw new ToolException(ToolResult.ErrorCode.MCP_INVALID_RESPONSE,"MCP returned no result.");
         StringBuilder out=new StringBuilder();
         if(result.content()!=null) for(var block:result.content()) {
             if(block instanceof McpSchema.TextContent text) append(out,text.text());
             else append(out,"[MCP content type: " + block.type() + "; rich content is not loaded in this version.]");
         }
         if(result.structuredContent()!=null) append(out,JSON.valueToTree(result.structuredContent()).toString());
-        if(Boolean.TRUE.equals(result.isError())) throw new ToolException(ToolResult.ErrorCode.EXECUTION_FAILED,
-                "MCP tool reported an error. " + out);
+        if(Boolean.TRUE.equals(result.isError())) throw new ToolException(ToolResult.ErrorCode.MCP_REMOTE_ERROR,
+                "MCP tool reported an error. " + McpDiagnostics.signal(out.toString()));
         return out.toString();
     }
     private static void append(StringBuilder out,String text) {
