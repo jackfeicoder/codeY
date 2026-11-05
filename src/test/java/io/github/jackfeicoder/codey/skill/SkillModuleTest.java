@@ -35,6 +35,53 @@ class SkillModuleTest {
         Files.writeString(file,"\uFEFF---\r\nname: review\r\ndescription: >-\r\n  review code\r\n  when asked\r\n---\r\n正文步骤");
         var result=new SkillParser().parse(file,"user");assertEquals("review code when asked",result.definition().description());assertEquals("正文步骤",result.body());
     }
+    @Test void authorNameAndLongMultilineDescriptionDoNotRejectImportedSkills()throws Exception {
+        Path file=write(user(),"imported-review","","Review the project.");
+        String description="long metadata ".repeat(70)+"\nsecond line trigger";
+        Files.writeString(file,"---\nname: CTF Web Solver\ndescription: |\n  "+description.replace("\n","\n  ")+"\n---\nReview the project.");
+        var definition=new SkillParser().parse(file,"user").definition();
+        assertEquals("imported-review",definition.name());assertEquals("CTF Web Solver",definition.displayName());
+        assertTrue(definition.description().length()>512);assertTrue(definition.description().contains("\nsecond line trigger"));
+    }
+    @Test void missingNameAndDescriptionHaveDirectoryAndBodyFallbacks()throws Exception {
+        Path file=write(user(),"review","","# Review changes\nMore steps.");
+        Files.writeString(file,"---\nmetadata:\n  author: fixture\n---\n# Review changes\nMore steps.");
+        var parsed=new SkillParser().parse(file,"user");assertEquals("review",parsed.definition().name());assertEquals("review",parsed.definition().displayName());
+        assertEquals("Review changes",parsed.definition().description());assertFalse(parsed.warnings().isEmpty());
+        Files.writeString(file,"# Plain Markdown workflow\nRead code and report.");
+        parsed=new SkillParser().parse(file,"user");assertEquals("Plain Markdown workflow",parsed.definition().description());assertTrue(parsed.body().startsWith("# Plain"));
+        Files.writeString(file,"workflow ".repeat(500));parsed=new SkillParser().parse(file,"user");
+        assertTrue(parsed.definition().description().length()<600);assertEquals("workflow ".repeat(500).strip(),parsed.body());
+    }
+    @Test void directoryIdentifiersSupportUppercaseUnderscoresAndStableSpaceAliases()throws Exception {
+        Path file=write(user(),"My_Review","","steps");
+        assertEquals("My_Review",new SkillParser().parse(file,"user").definition().name());
+        file=write(user(),"My Review","","steps");var id=new SkillParser().parse(file,"user").definition().name();
+        assertTrue(SkillDefinition.validName(id));assertEquals(id,SkillDefinition.identifier("My Review"));
+        assertNotEquals(SkillDefinition.identifier("My-Review"),id);
+    }
+    @Test void quotedInvocationFlagsAreAcceptedButUnrecognizedValuesRemainErrors()throws Exception {
+        Path file=write(user(),"review","disable-model-invocation: 'true'\nuser-invocable: 1\n","steps");
+        var parsed=new SkillParser().parse(file,"user");assertFalse(parsed.definition().modelInvocable());assertTrue(parsed.definition().userInvocable());
+    }
+    @Test void longDescriptionIsShortenedOnlyInCatalogAndFullyAvailableAfterLoading()throws Exception {
+        Path file=write(user(),"review","","body");String description="description ".repeat(80)+"FULL_DESCRIPTION_END";
+        Files.writeString(file,"---\nname: Review Workflow\ndescription: "+description+"\n---\nbody");
+        write(user(),"other","","other body");
+        try(var service=new SkillService(settings(),new ToolRegistry())) {
+            service.beginTask(WorkspaceBinding.none());
+            assertTrue(service.context().catalog().contains("review（Review Workflow）"));assertTrue(service.context().catalog().contains("- other："));
+            assertFalse(service.context().catalog().contains("FULL_DESCRIPTION_END"));assertTrue(service.context().catalog().contains("…"));
+            service.activate("review",false);assertTrue(service.context().instructions().contains(description));
+        }
+    }
+    @Test void discoveryExplainsFailuresWithoutEchoingMalformedYamlContents()throws Exception {
+        Path file=write(user(),"bad","","steps");Files.writeString(file,"---\nname: [private-token-sentinel\n---\nsteps");
+        var found=new FileSystemSkillProvider(user()).discover(WorkspaceBinding.none());
+        assertTrue(found.skills().isEmpty());assertTrue(found.warnings().get(0).contains("YAML格式错误"));assertFalse(found.warnings().toString().contains("private-token-sentinel"));
+        Files.writeString(file,"---\nname: bad\n---\n");found=new FileSystemSkillProvider(user()).discover(WorkspaceBinding.none());
+        assertTrue(found.warnings().get(0).contains("正文为空"));
+    }
     @Test void duplicateYamlKeysAndJavaTagsAreRejected()throws Exception {
         Path file=write(user(),"review","name: other\n","正文");
         assertThrows(ToolException.class,()->new SkillParser().parse(file,"user"));

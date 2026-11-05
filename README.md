@@ -1125,7 +1125,7 @@ code-review/
 └── scripts/                  # 可选脚本；加载时不执行
 ```
 
-**格式**：UTF-8，YAML frontmatter 必须从文件开头开始（支持 BOM/CRLF）。`name` 为与目录相同的 kebab-case 名称，`description` 为不超过512字符的单行描述；`disable-model-invocation` 和 `user-invocable` 可选，默认允许双方调用，要求 YAML 布尔值。正文不能为空。未知扩展字段提示未支持，不赋予 `allowed-tools` 自动授权、`context: fork` 或动态命令等语义。YAML 安全构造器拒绝任意Java类型与重复键，限制别名、嵌套及长度。
+**格式与兼容**：UTF-8，支持 BOM/CRLF。调用标识来自目录，允许大小写、下划线及中文等字母/数字；含空格等符号的目录生成带哈希的稳定别名。frontmatter的`name`仅作显示名称，可含空格、可与目录不同，缺失时回退到目录名。`description`接受长文本和多行YAML字符串，完整保存；目录/菜单展示时再单行化、缩短并计入预算，激活后提供完整描述。缺失或无效描述回退正文首行摘要。没有frontmatter的纯Markdown也可作为流程加载并提示回退；存在但损坏的YAML仍拒绝。`disable-model-invocation`和`user-invocable`默认允许双方调用，支持布尔值及明确的true/false、yes/no、on/off、1/0；不明确的值拒绝，避免误开调用权限。正文不能为空。未知扩展字段仅提示，不赋予`allowed-tools`自动授权、`context: fork`等专属语义。安全YAML、文件大小和路径边界限制继续生效；跳过时显示具体原因，不回显可能含敏感值的YAML错误原文。
 
 ```markdown
 ---
@@ -1140,7 +1140,7 @@ user-invocable: true
 3. 报告问题位置、触发条件、影响和验证结果。
 ```
 
-**用户入口**：聊天中 `/skills` 列表，输入序号或名称，再填写任务；回车返回。`/skill code-review 检查当前修改` 直接激活并执行，Tab补全用户可调用名称。列表页只查看，进入会话后才能运行；非法或禁止用户调用的技能不触发模型请求。`/skill` 的任务参数作为用户任务传入，不实现 `$ARGUMENTS` 等模板替换。
+**用户入口**：聊天中 `/skills` 列表，输入序号或调用标识，再填写任务；回车返回。显示名称不同时单独标注，例如`tokeii0-ctfskill-ctf-web-skill [user] · 显示名称：CTF Web Solver`。`/skill code-review 检查当前修改`直接激活并执行，Tab补全调用标识。列表页只查看，进入会话后才能运行；禁止用户调用的技能不触发模型请求。`/skill`的任务参数作为用户任务传入，不实现`$ARGUMENTS`等模板替换。
 
 **涉及文件**：
 

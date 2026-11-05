@@ -24,7 +24,9 @@ public final class SkillCommands {
         if(available.isEmpty()){output.println("暂无技能。将 <名称>/SKILL.md 放入用户技能目录或工作区 .agents/skills 后重试。");return null;}
         for(int i=0;i<available.size();i++) {
             var skill=available.get(i);
-            output.println((i+1)+". "+skill.name()+" ["+skill.source()+"] · "+skill.description()
+            output.println((i+1)+". "+skill.name()+" ["+skill.source()+"]"
+                    +(skill.displayName().equals(skill.name())?"":" · 显示名称："+SkillDefinition.preview(skill.displayName(),80))
+                    +" · "+SkillDefinition.preview(skill.description(),160)
                     +" · "+(skill.modelInvocable()?"模型可调用":"仅显式调用")+(skill.userInvocable()?"":" · 用户调用已禁用"));
         }
         if(!canRun){output.println("进入会话后可 /skill 名称 任务描述。");return null;}

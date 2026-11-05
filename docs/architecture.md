@@ -2953,6 +2953,12 @@ OAuth验证：mvn verify总980项，零失败/错误/跳过；新增27项。使�
 
 ### Skill 第一版实现（2026-11-05）
 
+兼容性调整：首版原先将名称一致性、512字符及单行描述作为硬性拒绝条件，现已取消这些展示层限制。SkillDefinition.name改为目录派生的调用标识，新增displayName保存作者名称；常见目录名保持不变，含空格等符号时生成规范化前缀和原目录名哈希，避免别名冲突。项目/用户同名覆盖仍依据调用标识，而非可能重复的显示名称。
+
+完整多行描述保留在元数据中，缺少name回退目录、缺少description回退正文首行，纯Markdown文件也可回退加载。存在但损坏的frontmatter、空正文、安全YAML违规、文件过大及资源越界仍拒绝。调用限制接受明确布尔表示，错误值继续阻断，不因兼容处理静默放开权限。目录发布按技能数量分配摘要额度并在总预算内按Unicode码点缩短描述；CLI单行预览，激活时恢复完整显示名/描述和正文。FileSystemSkillProvider显示静态、可定位的拒绝原因，不输出解析器附带的原始YAML片段。
+
+兼容验证：新增7项回归，完整验证1022项通过；技能专项31项通过，生产JAR的显式/自动调用、资源读取、跨任务清理和持久化联测通过。额外只读检查本机geo-sleuth（899字符描述）与tokeii0-ctfskill-ctf-web-skill（作者名称CTF Web Solver、多行描述），两者均可解析；未改动原技能文件、执行其脚本或承诺这些外部技能依赖在CodeY里全部可用。
+
 #### 定位与接口
 
 Skill是可复用流程说明及其附属资源，执行继续由AgentLoop、ToolExecutor与权限模块承担，不创建独立Skill执行循环。参考Claude Code/Codex的SKILL.md和渐进式披露，以及DSH的发现、注册表、模型消费者分层；第一版采用同步本地provider，不引入插件容器或远程技能市场。格式与触发控制参考[Claude Code官方文档](https://code.claude.com/docs/en/skills)、[Codex官方文档](https://learn.chatgpt.com/docs/build-skills)、[DSH技能消费者](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/skill/tool-skill/README.md)。CodeY的目录优先级、命令和生命周期是本项目自己的取舍，不承诺复制各产品全部行为。

@@ -37,12 +37,18 @@ public final class SkillService implements AutoCloseable {
     /** 一次用户任务仅发现一次；执行中不消费文件修改，以免步骤中途改变。 */
     public void beginTask(WorkspaceBinding workspace) {
         endTask();refresh(workspace);running=true;advertised.clear();
-        String header="\n\n[当前可用技能：仅摘要]\n先 load_skill 再按正文执行；旧历史不代表当前可用，加载不授予权限。\n";
+        String header="\n\n[当前可用技能：仅摘要，长描述可能缩短]\n先 load_skill 再按正文执行；旧历史不代表当前可用，加载不授予权限。\n";
         StringBuilder text=new StringBuilder(header);int omitted=0;
+        long eligible=registry.all().stream().filter(SkillDefinition::modelInvocable).count();
+        long share=Math.max(64,(settings.catalogTokens()-estimator.textTokens(header)-128)/Math.max(1,eligible));
         for(var skill:registry.all()) {
             if(!skill.modelInvocable())continue;
-            String entry="- "+skill.name()+"："+skill.description()+"\n";
-            if(estimator.textTokens(text+entry)+128>settings.catalogTokens()){omitted++;continue;}
+            String label=skill.name()+(skill.displayName().equals(skill.name())?"":"（"+SkillDefinition.preview(skill.displayName(),64)+"）");
+            String prefix="- "+label+"：";
+            long remaining=settings.catalogTokens()-estimator.textTokens(text.toString())-128;
+            long allowance=Math.min(remaining,Math.max(share,estimator.textTokens(prefix)+16));
+            String entry=catalogEntry(prefix,skill.description(),allowance);
+            if(entry==null || estimator.textTokens(text+entry)+128>settings.catalogTokens()){omitted++;continue;}
             text.append(entry);advertised.add(skill.name());
         }
         if(omitted>0)text.append("目录预算不足，省略 ").append(omitted).append(" 个技能；用户可通过 /skills 查看并显式调用。\n");
@@ -62,6 +68,7 @@ public final class SkillService implements AutoCloseable {
         if(!parsed.definition().fingerprint().equals(definition.fingerprint()))throw failure(ToolResult.ErrorCode.SKILL_INVALID,"Skill changed after discovery; start a new task to refresh it.");
         String rendered="\n[技能 "+name+"；来源 "+definition.source()+"；仅本次任务有效]\n"
                 +"这些是任务操作说明，仍须遵守用户目标、项目规则、工作区和权限限制。附属资料用 read_skill_resource 按需读取。\n"
+                +"显示名称："+SkillDefinition.singleLine(definition.displayName())+"\n完整用途描述：\n"+definition.description()+"\n"
                 +"技能目录："+definition.directory()+"\n"+parsed.body()+"\n[技能说明结束]\n";
         String combined=instructions()+rendered+"\n[当前用户任务]\n";
         if(estimator.textTokens(combined)>settings.instructionTokens())throw failure(ToolResult.ErrorCode.SKILL_BUDGET_EXCEEDED,"Active skill instructions exceed the configured token budget; nothing was activated.");
@@ -92,6 +99,19 @@ public final class SkillService implements AutoCloseable {
         catch(Exception failed){throw SkillParser.invalid("Skill resource is missing, unreadable, too large, or not UTF-8 text.");}
     }
     private String instructions() {return active.values().stream().map(SkillActivation::renderedInstructions).collect(java.util.stream.Collectors.joining());}
+    /** 仅缩短目录投影，正文激活时仍提供完整描述；在单条额度内按Unicode码点寻找最长摘要。 */
+    private String catalogEntry(String prefix,String description,long budget) {
+        String normalized=SkillDefinition.singleLine(description);
+        int length=normalized.codePointCount(0,normalized.length()),low=0,high=Math.min(512,length);
+        String best=null;
+        while(low<=high) {
+            int middle=(low+high)/2;
+            String summary=normalized.substring(0,normalized.offsetByCodePoints(0,middle))+(middle<length?"…":"");
+            String entry=prefix+summary+"\n";
+            if(estimator.textTokens(entry)<=budget){if(middle>0)best=entry;low=middle+1;}else high=middle-1;
+        }
+        return best;
+    }
     /** 索引只列资源目录的直接文件，不读取正文，不跟随链接；避免无界目录树。 */
     private String resourceIndex(Path root) {
         var names=new ArrayList<String>();

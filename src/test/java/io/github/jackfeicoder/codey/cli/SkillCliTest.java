@@ -62,4 +62,11 @@ class SkillCliTest {
         var settings=SkillSettings.load(root,Map.of("CODEY_SKILL_CATALOG_TOKENS","1024"));assertEquals(root.resolve("local-skills"),settings.userDirectory());assertEquals(1024,settings.catalogTokens());
         assertThrows(ConfigException.class,()->SkillSettings.load(root,Map.of("CODEY_SKILL_RESOURCE_TOKENS","not-a-number")));
     }
+    @Test void menuUsesStableDirectoryIdAndDisplaysAuthorNameWithSingleLineSummary()throws Exception {
+        Path file=skill();Files.writeString(file,"---\nname: Review Workflow\ndescription: |\n  Review current changes\n  using evidence.\n---\nCLI_SKILL_BODY_SENTINEL");
+        var requests=new ArrayList<LlmRequest>();
+        run("/skills\n1\ncheck changes\n/exit\n",request->{requests.add(request);return new LlmResponse(Message.assistant("done"),"stop",null);});
+        assertTrue(out.toString().contains("review [user] · 显示名称：Review Workflow · Review current changes using evidence."));
+        assertEquals(1,requests.size());assertTrue(requests.get(0).messages().toString().contains("CLI_SKILL_BODY_SENTINEL"));
+    }
 }

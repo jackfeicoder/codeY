@@ -11,8 +11,8 @@ public final class LoadSkillTool implements Tool {
     @Override public ToolAccess access(){return ToolAccess.READ_ONLY;}
     @Override public ToolDefinition definition(){
         var schema=JsonNodeFactory.instance.objectNode().put("type","object").put("additionalProperties",false);
-        schema.putObject("properties").putObject("name").put("type","string");schema.putArray("required").add("name");
-        return new ToolDefinition("load_skill","按当前技能目录中的准确名称加载操作手册。正文在下一次模型请求注入，不执行脚本，不授予权限；相同任务无需重复加载。",schema);
+        schema.putObject("properties").putObject("name").put("type","string").put("description","技能目录中的调用标识，不是作者显示名称或文件路径");schema.putArray("required").add("name");
+        return new ToolDefinition("load_skill","使用当前技能目录的调用标识加载操作手册，不要使用作者显示名称。正文在下一次模型请求注入，不执行脚本，不授予权限；相同任务无需重复加载。",schema);
     }
     @Override public void validateArguments(JsonNode args,ToolContext context){if(!args.isObject()||args.size()!=1||!args.path("name").isTextual()||!SkillDefinition.validName(args.path("name").asText()))throw SkillParser.invalid("Expected {name: exact-skill-name}.");}
     @Override public String execute(JsonNode args,ToolContext context){validateArguments(args,context);return skills.activate(args.path("name").asText(),false);}

@@ -40,9 +40,11 @@ public final class FileSystemSkillProvider {
             for(Path directory:candidates) {
                 Path file=directory.resolve("SKILL.md"); if(!Files.exists(file,LinkOption.NOFOLLOW_LINKS))continue;
                 try {
-                    if(!file.toRealPath().startsWith(realRoot))throw new IllegalArgumentException();
+                    if(!file.toRealPath().startsWith(realRoot))throw SkillParser.invalid("技能路径指向发现目录外。");
                     var parsed=parser.parse(file,source); skills.add(parsed.definition());warnings.addAll(parsed.warnings());
-                } catch(Exception invalid) {warnings.add(source+" 技能条目无效，已跳过："+directory.getFileName().toString().replaceAll("[\\p{Cntrl}]"," "));}
+                } catch(io.github.jackfeicoder.codey.tool.ToolException invalid) {
+                    warnings.add(source+" 技能已跳过："+SkillDefinition.preview(directory.getFileName().toString(),128)+"；原因："+invalid.getMessage());
+                } catch(Exception invalid) {warnings.add(source+" 技能已跳过："+SkillDefinition.preview(directory.getFileName().toString(),128)+"；原因：路径解析或文件访问失败。");}
             }
         } catch(Exception failed) {warnings.add(source+" 技能目录读取失败；其他来源继续可用。");}
     }
