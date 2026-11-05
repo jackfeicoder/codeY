@@ -95,6 +95,9 @@ public final class DebugPrinter {
         if (arguments.length() > 64 * 1024) return null;
         try {
             var tree = MAPPER.readTree(arguments);
+            if("load_skill".equals(call.name()) && tree!=null && tree.path("name").isTextual())return tree.path("name").asText();
+            if("read_skill_resource".equals(call.name()) && tree!=null && tree.path("skill").isTextual() && tree.path("path").isTextual())
+                return tree.path("skill").asText()+" · "+tree.path("path").asText();
             if ("execute_command".equals(call.name()) && tree != null && tree.path("command").isTextual()) {
                 return tree.path("command").asText() + " · "
                         + (tree.path("workingDirectory").isTextual() ? tree.path("workingDirectory").asText() : ".");

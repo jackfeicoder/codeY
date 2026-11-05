@@ -145,6 +145,8 @@ public final class Main {
                             + (entry.configured() ? "配置有效" : "配置待完善"));
                 }
             } else if ("--check-config".equals(action)) {
+                var skillSettings=io.github.jackfeicoder.codey.config.SkillSettings.load(startup,environment);
+                System.out.println("Skill limits: catalog="+skillSettings.catalogTokens()+", instructions="+skillSettings.instructionTokens()+", resources="+skillSettings.resourceTokens()+" tok; discovery is deferred until a task.");
                 AgentSettings agentSettings = AgentSettings.load(startup, environment);
                 LlmConfig config = profiles.activeConfig(); // 只做本地字段校验，不发送 HTTP 请求。
                 io.github.jackfeicoder.codey.config.PermissionSettings.load(startup, environment);
@@ -195,7 +197,12 @@ public final class Main {
                         new io.github.jackfeicoder.codey.mcp.oauth.OAuthTokenStore(SessionSettings.load(startup, environment).dataDirectory()),
                         io.github.jackfeicoder.codey.mcp.oauth.OAuthInteraction.unavailable());
                      var mcp = new io.github.jackfeicoder.codey.mcp.McpConnectionManager(promptTools,
-                        io.github.jackfeicoder.codey.mcp.McpConfigLoader.load(startup, environment),auth.connections())) {
+                        io.github.jackfeicoder.codey.mcp.McpConfigLoader.load(startup, environment),auth.connections());
+                     var skills=new io.github.jackfeicoder.codey.skill.SkillService(
+                        io.github.jackfeicoder.codey.config.SkillSettings.load(startup,environment),promptTools)) {
+                    skills.beginTask(WorkspaceBinding.none());
+                    for(String warning:skills.warnings())System.err.println("[技能] "+warning);
+                    contexts=contexts.withSkills(skills::context);
                     result = new AgentLoop(client, promptTools, agentSettings.maxIterations(), debug,
                             contexts, snapshot -> { }, budget,
                             new HistoryCompactor(client, budget, compaction, contexts, debug), () -> { })
@@ -276,7 +283,9 @@ public final class Main {
                 new io.github.jackfeicoder.codey.mcp.oauth.OAuthTokenStore(settings.dataDirectory()),
                 new ConsoleOAuthInteraction(consoleInput,output,permissionSettings.pipedApprovals()));
              var mcp = new io.github.jackfeicoder.codey.mcp.McpConnectionManager(chatTools,
-                io.github.jackfeicoder.codey.mcp.McpConfigLoader.load(startup, environment),auth.connections())) {
+                io.github.jackfeicoder.codey.mcp.McpConfigLoader.load(startup, environment),auth.connections());
+             var skills=new io.github.jackfeicoder.codey.skill.SkillService(
+                io.github.jackfeicoder.codey.config.SkillSettings.load(startup,environment),chatTools)) {
             var debug = consoleInput.progressPrinter(output); // 原生终端统一进度样式，管道保留简洁文本。
             return new SessionLauncher(startup, settings, new JsonSessionStore(settings.dataDirectory()), name -> {
                 // 历史浏览不执行此工厂；准备继续会话时才校验目标 Profile。
@@ -289,7 +298,7 @@ public final class Main {
                 return new SessionLauncher.ModelChoice(profiles.activeSelection(), new ChatCompletionsClient(config, streamingSettings),
                         new ChatCompletionsClient(titleConfig), capabilities);
             }, PromptLoader::loadBase, consoleInput, output, errors, options, chatTools, debug,
-                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings, budgetSettings, compactionSettings, MemorySettings.load(startup, environment), MemoryExtractionSettings.load(startup, environment), MemoryConsolidationSettings.load(startup, environment)).withMcp(mcp, new io.github.jackfeicoder.codey.mcp.McpConfigStore(startup, environment)).run();
+                    () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings, budgetSettings, compactionSettings, MemorySettings.load(startup, environment), MemoryExtractionSettings.load(startup, environment), MemoryConsolidationSettings.load(startup, environment)).withMcp(mcp, new io.github.jackfeicoder.codey.mcp.McpConfigStore(startup, environment)).withSkills(skills).run();
         }
     }
 

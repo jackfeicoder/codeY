@@ -29,6 +29,9 @@ public final class ConsoleInput implements AutoCloseable {
     private boolean completeCommands;
     /** 仅交互终端固定底栏；管道使用可读单行，不发送 ANSI 控制码。 */
     private RuntimeStatus runtimeStatus;
+    private Supplier<List<String>> skillNames=List::of;
+    /** 补全仅在空闲输入阶段访问目录，不执行技能。 */
+    public void skillNames(Supplier<List<String>> names){skillNames=java.util.Objects.requireNonNull(names);}
     private org.jline.utils.Status footer;
 
     /** 测试与重定向使用普通输入，不依赖原生终端。 */
@@ -41,7 +44,7 @@ public final class ConsoleInput implements AutoCloseable {
     ConsoleInput(BufferedReader plain, PrintWriter output, Terminal terminal) {
         this(plain, output);
         this.terminal = java.util.Objects.requireNonNull(terminal);
-        this.reader = createReader(terminal, new CommandCompleter(List::of, () -> completeCommands));
+        this.reader = createReader(terminal, new CommandCompleter(List::of, () -> completeCommands,()->skillNames.get()));
     }
 
     /** 仅真实控制台尝试启动 JLine；环境不支持时保留原输入功能。 */
@@ -53,7 +56,7 @@ public final class ConsoleInput implements AutoCloseable {
         try {
             input.terminal = TerminalBuilder.builder().system(true).dumb(false)
                     .encoding(System.console().charset()).build();
-            input.reader = createReader(input.terminal, new CommandCompleter(models, () -> input.completeCommands));
+            input.reader = createReader(input.terminal, new CommandCompleter(models, () -> input.completeCommands,()->input.skillNames.get()));
         } catch (IOException | RuntimeException | LinkageError unsupported) {
             try { input.close(); } catch (IOException ignored) { }
             input.reader = null;

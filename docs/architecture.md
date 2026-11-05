@@ -2948,3 +2948,37 @@ auto先检查加密缓存；新服务通过无凭证GET探测401/WWW-Authenticat
 基于当前SDK的2025-06-18 MCP授权模型，整个MCP仍为legacy协议；现代协议独占服务兼容性另行处理。支持公共客户端Authorization Code+PKCE S256、HTTP发现、DCR/预注册和刷新。client_secret/Device Code/远端撤销/其他OS凭证库未实现。首次授权需要交互宿主；--prompt无首次浏览器授权，已有缓存可复用/刷新（工具本身仍受原有审批约束）。固定回调服务可配置callbackPort；缺DCR且未预注册时需用户在服务平台登记公共客户端。实际厂商可能有不同的注册/回调规则，需要分别验证。
 
 OAuth验证：mvn verify总980项，零失败/错误/跳过；新增27项。使用隔离本地HTTP授权/MCP服务器与注入浏览器交互，覆盖公开GET仍通过well-known发现受保护POST、401元数据发现、resource/issuer/S256校验、DCR/预注册、PKCE实际摘要验证、错误回调、拒绝/超时、缓存复用、多个供应器复用刷新结果与轮换、invalid_grant、无寿命令牌、headless、资源身份绑定、真实SDK动态头和业务401不重放、同任务不重复开浏览器、清除本地授权、Windows CurrentUser DPAPI密文/损坏/删除以及注册配置分支。生产JAR从真实DPAPI加密的模拟过期缓存启动，自动刷新并将新Bearer用于本地MCP工具调用，菜单跨进程启停不产生额外网络请求；4次模拟LLM请求、1次MCP业务调用。真实供应商兼容性、实际浏览器登录和其他OS系统凭证库未在本次验证。
+
+<a id="skill-module"></a>
+
+### Skill 第一版实现（2026-11-05）
+
+#### 定位与接口
+
+Skill是可复用流程说明及其附属资源，执行继续由AgentLoop、ToolExecutor与权限模块承担，不创建独立Skill执行循环。参考Claude Code/Codex的SKILL.md和渐进式披露，以及DSH的发现、注册表、模型消费者分层；第一版采用同步本地provider，不引入插件容器或远程技能市场。格式与触发控制参考[Claude Code官方文档](https://code.claude.com/docs/en/skills)、[Codex官方文档](https://learn.chatgpt.com/docs/build-skills)、[DSH技能消费者](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/skill/tool-skill/README.md)。CodeY的目录优先级、命令和生命周期是本项目自己的取舍，不承诺复制各产品全部行为。
+
+用户入口只有`/skills`菜单和`/skill 名称 [任务]`；模型入口为`load_skill`与`read_skill_resource`。SkillParser用SnakeYAML 2.3 SafeConstructor解析有界frontmatter；支持name、description和两个调用开关，未知字段警告，任意Java类型、重复键和非法布尔值拒绝。SkillDefinition保存来源、路径、调用限制和SHA-256内容指纹；SkillRegistry采用项目同名覆盖用户级。FileSystemSkillProvider只扫描根的直接技能子目录，跳过链接及不合法条目，其他来源继续可用。SkillSettings从配置目录.env和环境读取独立额度与用户目录覆盖，--check-config只校验设置、不发现技能。
+
+#### 执行链与快照
+
+SessionLauncher在每个任务开始调用SkillService.beginTask，发现用户目录与当前工作区目录；Main的--prompt无工作区，仅发现用户目录。发现阶段有界读取文件以解析元数据、计算指纹，不把正文发布给模型。目录仅包含模型可调用且预算内的名称/描述；没有额外模型分类调用。模型根据描述调用load_skill，后端检查广告目录与触发标志，重新读文件并核对发现时指纹；发现后文件变更时报错，下一任务重试。用户显式调用不经过模型选择，仍走同一activate逻辑，并检查user-invocable。explicit标志只存在宿主Java调用，模型参数无法设置。
+
+SkillActivation固定本任务正文。重复激活不重读、不重复添加；load_skill结果只包含状态和有界资源文件索引。ContextBuilder每次请求把当前目录放到system副本、激活正文放在当前user副本，原始用户消息及会话历史不被改写。显式任务历史记录技能名与任务，自动激活历史保存工具结果；正文原文不重复持久化。因此恢复对话不等于恢复技能激活，也不提供技能旧版本精确回放。任务finally通过ToolRegistry清理；SessionLauncher另有finally、Main有AutoCloseable兜底，失败和未开始模型调用的激活错误同样清理。
+
+#### 资源与预算
+
+read_skill_resource只接受已激活名称及技能内相对路径，不接受任意绝对路径。检查规范化/真实路径边界、链接、普通文件、UTF-8及字节限制；不扩大read_file的工作区范围。资源首次读取结果进入普通工具历史，再次读取同规范路径返回已读取提示；资源正文不整包加载。scripts可以作为文本查看，加载从不执行脚本；现有execute_command的工作区、工程和审批约束仍适用，首版没有跨工作区执行用户技能脚本的新权限。
+
+目录/全部正文/全部首次资源默认分别2048/8192/8192估算token，由SkillSettings限制，最终还要通过模型总输入预算。目录省略会警告，未发布条目禁止模型猜名加载、仍可用户显式调用；正文/资源不足时拒绝，不静默截断。文件限制为SKILL.md 64KiB、frontmatter 8K字符、资源32KiB；每来源最多128候选/512条目录枚举。资源索引只看references/assets/scripts直接文件，最多32项且每目录枚举最多64项。
+
+ContextSnapshot新增skillCatalog、skillInstructions、skillResources计数，保留旧构造器兼容。当前read_skill_resource的工具消息从toolResults移入skillResources，不重复计数；历史资源归history。HistoryCompactor共享同一ContextBuilder，因此活跃说明进入fixedTokens和候选校验，历史摘要不替换技能正文。目录与正文按任务重建，不需要向会话追加永不清理的技能大块文本。CLI预览没有当前任务，技能项为0；运行中的实际请求估算包含相应内容。
+
+#### 权限与边界
+
+加载和资源工具为READ_ONLY，PLAN允许读取，后续修改仍被原有权限策略拦截。Skill不授予allowed-tools权限，不解除工作区或MCP审批；文本提示不能替代后端检查。单线程宿主共享一个任务状态，尚无多Agent并发隔离。没有递归发现、向上查找仓库、文件监听、线上安装、产品专属参数替换、动态shell预执行、context:fork和远程资源提供器；这些都不作为第一版已实现能力。
+
+仓库`.agents/skills`提供code-review、fix-test两套可执行流程及按需参考清单；它们是功能资源，不新增额外说明文档。以本仓库为工作区可直接/skills或/skill试用，也可复制到用户目录跨项目使用。
+
+#### 验证
+
+`mvn -q verify`共1015项通过，零失败/错误/跳过；新增24项覆盖安全YAML、来源覆盖、调用开关、显式伪造拦截、发现变化、去重、预算、资源越界/二进制、脚本不预执行、真实Agent链、上下文独立计数、压缩保护、失败清理、CLI菜单/命令/补全及配置覆盖。生产JAR隔离冒烟验证菜单、显式首次注入、自动load_skill、按需UTF-8资源、下一任务不残留正文、会话保存和--prompt；共6次本地模拟模型请求，没有读取真实.env、用户记忆、邮箱或密钥。真实业务模型的技能选择准确率与外部技能兼容性仍需实际任务评估。

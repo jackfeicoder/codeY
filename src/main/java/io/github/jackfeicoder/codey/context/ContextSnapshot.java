@@ -14,7 +14,13 @@ public record ContextSnapshot(LlmRequest request, TokenBreakdown tokens) {
     public record TokenBreakdown(long basePrompt, long runtimeInstructions, long history,
                                  long userInput, long assistant, long toolResults,
                                  long toolDefinitions, long protocolOverhead, long summary, long projectInstructions,
-                                 long alwaysMemory, long recalledMemory) {
+                                 long alwaysMemory, long recalledMemory, long skillCatalog, long skillInstructions, long skillResources) {
+        /** 兼容旧调用；技能资源由当前任务 tool 消息单独归类。 */
+        public TokenBreakdown(long basePrompt,long runtimeInstructions,long history,long userInput,long assistant,long toolResults,
+                              long toolDefinitions,long protocolOverhead,long summary,long projectInstructions,long alwaysMemory,long recalledMemory) {
+            this(basePrompt,runtimeInstructions,history,userInput,assistant,toolResults,toolDefinitions,protocolOverhead,
+                    summary,projectInstructions,alwaysMemory,recalledMemory,0,0,0);
+        }
         public TokenBreakdown(long basePrompt, long runtimeInstructions, long history, long userInput,
                               long assistant, long toolResults, long toolDefinitions, long protocolOverhead,
                               long summary, long projectInstructions) {
@@ -31,7 +37,8 @@ public record ContextSnapshot(LlmRequest request, TokenBreakdown tokens) {
         }
         public TokenBreakdown {
             if (basePrompt < 0 || runtimeInstructions < 0 || history < 0 || userInput < 0
-                    || assistant < 0 || toolResults < 0 || toolDefinitions < 0 || protocolOverhead < 0 || summary < 0 || projectInstructions < 0 || alwaysMemory < 0 || recalledMemory < 0) {
+                    || assistant < 0 || toolResults < 0 || toolDefinitions < 0 || protocolOverhead < 0 || summary < 0 || projectInstructions < 0 || alwaysMemory < 0 || recalledMemory < 0
+                    || skillCatalog < 0 || skillInstructions < 0 || skillResources < 0) {
                 throw new IllegalArgumentException("Token estimates must be nonnegative.");
             }
         }
@@ -39,7 +46,8 @@ public record ContextSnapshot(LlmRequest request, TokenBreakdown tokens) {
         /** 当前请求输入的估算总量；不含尚未生成的模型输出，也不是累计计费量。 */
         public long total() {
             return basePrompt + runtimeInstructions + history + userInput + assistant
-                    + toolResults + toolDefinitions + protocolOverhead + summary + projectInstructions + alwaysMemory + recalledMemory;
+                    + toolResults + toolDefinitions + protocolOverhead + summary + projectInstructions + alwaysMemory + recalledMemory
+                    + skillCatalog + skillInstructions + skillResources;
         }
     }
 }

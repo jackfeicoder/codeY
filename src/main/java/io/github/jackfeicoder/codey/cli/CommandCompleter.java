@@ -18,10 +18,15 @@ public final class CommandCompleter implements Completer {
     private final Supplier<List<ModelProfiles.ProfileInfo>> models;
     /** 仅管理页和聊天输入启用；路径、标题等辅助输入关闭补全。 */
     private final BooleanSupplier enabled;
+    private final Supplier<List<String>> skills;
 
     public CommandCompleter(Supplier<List<ModelProfiles.ProfileInfo>> models, BooleanSupplier enabled) {
+        this(models,enabled,List::of);
+    }
+    public CommandCompleter(Supplier<List<ModelProfiles.ProfileInfo>> models, BooleanSupplier enabled,Supplier<List<String>> skills) {
         this.models = java.util.Objects.requireNonNull(models, "models");
         this.enabled = java.util.Objects.requireNonNull(enabled, "enabled");
+        this.skills = java.util.Objects.requireNonNull(skills,"skills");
     }
 
     /** JLine 负责显示菜单和编辑当前词；这里仅产生与当前位置匹配的候选。 */
@@ -36,7 +41,9 @@ public final class CommandCompleter implements Completer {
             return;
         }
         String command = line.words().get(0);
-        if ("/mcp".equals(command) && line.wordIndex() == 1) {
+        if ("/skill".equals(command) && line.wordIndex() == 1) {
+            for(String name:skills.get())add(candidates,prefix,name,"可显式调用的技能");
+        } else if ("/mcp".equals(command) && line.wordIndex() == 1) {
             for (String option : List.of("register")) add(candidates,prefix,option,"MCP 服务管理");
         } else if ("/memory".equals(command) && line.wordIndex() == 1) {
             for (String option : List.of("tidy", "archives", "versions", "restore", "rollback")) add(candidates,prefix,option,"记忆整理与恢复");

@@ -122,7 +122,17 @@ public final class SessionLauncher {
     /** 输入前预览与 Agent 实际请求共用同一组装器，避免两套用量计算逻辑。 */
     private final ProjectInstructionLoader instructionLoader = new ProjectInstructionLoader();
     private String lastInstructionStatus;
-    private final ContextBuilder contexts = new ContextBuilder(this::projectRules, this::selectMemories);
+    private ContextBuilder contexts = new ContextBuilder(this::projectRules, this::selectMemories);
+    private io.github.jackfeicoder.codey.skill.SkillService skills;
+    /** Main 显式装配；旧嵌入/测试构造器不访问用户技能目录。 */
+    public SessionLauncher withSkills(io.github.jackfeicoder.codey.skill.SkillService skills) {
+        this.skills=java.util.Objects.requireNonNull(skills);
+        contexts=contexts.withSkills(skills::context);
+        input.skillNames(()->skills.refresh(active==null?WorkspaceBinding.none():active.snapshot().workspace()).stream()
+                .filter(io.github.jackfeicoder.codey.skill.SkillDefinition::userInvocable)
+                .map(io.github.jackfeicoder.codey.skill.SkillDefinition::name).toList());
+        return this;
+    }
     private final MemoryService memory;
     private final AutoMemoryService autoMemory;
     private final MemoryConsolidator memoryConsolidator;
@@ -332,6 +342,14 @@ public final class SessionLauncher {
                         printContext();
                     } else if (command.equals("/mcp") || command.startsWith("/mcp ")) {
                         mcpCommand(command.substring(4).strip());
+                    } else if (command.equals("/skills")) {
+                        if(skills==null)output.println("当前宿主未启用 Skill 模块。");
+                        else {
+                            var invocation=new SkillCommands(skills,input,output).menu(active==null?WorkspaceBinding.none():active.snapshot().workspace(),active!=null&&!browsing);
+                            if(invocation!=null)runSkill(invocation);
+                        }
+                    } else if (command.equals("/skill") || command.startsWith("/skill ")) {
+                        runSkill(SkillCommands.parse(command.substring(6).strip()));
                     } else if (command.equals("/remember") || command.startsWith("/remember ")) {
                         memoryCommands().remember(command.substring(9).strip());
                         tidyMemories();
@@ -380,6 +398,8 @@ public final class SessionLauncher {
                     } else {
                         answer(line);
                     }
+                } catch (io.github.jackfeicoder.codey.tool.ToolException failed) {
+                    input.theme().line(errors,ConsoleTheme.Tone.ERROR,"Skill error ["+failed.code()+"]: "+failed.getMessage());
                 } catch (ConfigException failed) {
                     input.theme().line(errors, ConsoleTheme.Tone.ERROR, "Configuration error: " + failed.getMessage());
                 } catch (MemoryException failed) {
@@ -679,6 +699,28 @@ public final class SessionLauncher {
     private void answer(String line) { answer(line, ""); }
 
     private void answer(String line, String taskInstructions) {
+        answerWithSkill(line,taskInstructions,null);
+    }
+    private void runSkill(SkillCommands.Invocation invocation) {
+        if(skills==null){output.println("当前宿主未启用 Skill 模块。");return;}
+        if(active==null||browsing){output.println("请先进入会话，再使用 /skill。");return;}
+        answerWithSkill("使用技能 "+invocation.name()+"。任务："+invocation.task(),"",invocation.name());
+    }
+    /** 任务开始扫描、结束清理；模型调用前的格式/额度失败也不会遗留激活状态。 */
+    private void answerWithSkill(String line,String taskInstructions,String explicitSkill) {
+        try {
+            if(skills!=null) {
+                skills.beginTask(active.snapshot().workspace());
+                if(explicitSkill!=null) {
+                    skills.activate(explicitSkill,true);
+                    output.println("[技能] 已加载 "+explicitSkill+"，仅本次任务有效。");
+                }
+                new SkillCommands(skills,input,output).warnings();
+            }
+            executeAnswer(line,taskInstructions);
+        } finally {if(skills!=null)skills.endTask();}
+    }
+    private void executeAnswer(String line, String taskInstructions) {
         ContextBuilder taskContexts = taskInstructions.isEmpty() ? contexts : contexts.withTaskInstructions(taskInstructions);
         // 模型客户端/模式在任务开始时固定，运行中不消费切换命令；状态只观察响应。
         final var selectedClient = model.chat();
@@ -845,6 +887,8 @@ public final class SessionLauncher {
         output.println("  项目规则及标记：≈" + tokens.projectInstructions() + " tok");
         output.println("  用户常驻记忆：≈" + tokens.alwaysMemory() + " tok");
         output.println("  按需召回记忆：≈" + tokens.recalledMemory() + " tok（预览无新任务，暂不检索）");
+        output.println("  技能目录：≈"+tokens.skillCatalog()+" tok；当前技能说明：≈"+tokens.skillInstructions()+" tok");
+        output.println("  本次技能资源结果：≈"+tokens.skillResources()+" tok（与其他工具结果分开统计；新任务重新发现技能）");
         output.println("  基础提示词：≈" + tokens.basePrompt() + " tok");
         output.println("  运行时模式/轮次指令：≈" + tokens.runtimeInstructions() + " tok");
         output.println("  成功历史（含过去工具调用与结果）：≈" + tokens.history() + " tok");
@@ -858,7 +902,7 @@ public final class SessionLauncher {
         output.println("发送前加入当前输入，每次 ReAct 请求前重新组装；原始历史完整保存，请求可使用摘要。");
         printBudget();
         printCompaction();
-        output.println("压缩后仍超限时阻止下一次模型请求；长期记忆已接入；MCP 动态工具已接入；Skill 尚未接入。");
+        output.println("压缩后仍超限时阻止下一次模型请求；长期记忆、MCP 动态工具及 Skill 已接入。技能目录在任务开始发现，正文仅本任务激活时注入。");
     }
 
     private MemoryCommands memoryCommands() {

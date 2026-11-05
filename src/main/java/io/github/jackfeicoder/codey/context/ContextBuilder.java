@@ -23,6 +23,8 @@ public final class ContextBuilder {
     private final String taskInstructions;
     /** 接收当前任务目标与不含记忆的输入估算；宿主决定可用剩余预算。 */
     private final java.util.function.BiFunction<String, Long, MemorySelection> memories;
+    /** 技能正文是任务指令，放在当前 user 副本；目录与正文均不写回原始历史。 */
+    private final java.util.function.Supplier<io.github.jackfeicoder.codey.skill.SkillContext> skills;
     public ContextBuilder() { this(() -> ""); }
     public ContextBuilder(java.util.function.Supplier<String> projectRules) {
         this(projectRules, (query, used) -> MemorySelection.EMPTY);
@@ -33,13 +35,22 @@ public final class ContextBuilder {
     }
     private ContextBuilder(java.util.function.Supplier<String> projectRules, String taskInstructions,
                            java.util.function.BiFunction<String, Long, MemorySelection> memories) {
+        this(projectRules,taskInstructions,memories,()->io.github.jackfeicoder.codey.skill.SkillContext.EMPTY);
+    }
+    private ContextBuilder(java.util.function.Supplier<String> projectRules, String taskInstructions,
+                           java.util.function.BiFunction<String, Long, MemorySelection> memories,
+                           java.util.function.Supplier<io.github.jackfeicoder.codey.skill.SkillContext> skills) {
         this.projectRules = Objects.requireNonNull(projectRules, "projectRules");
         this.taskInstructions = Objects.requireNonNull(taskInstructions, "taskInstructions");
         this.memories = Objects.requireNonNull(memories, "memories");
+        this.skills = Objects.requireNonNull(skills, "skills");
     }
     /** 初始化任务使用独立组装器，共享规则来源，不污染其他任务。 */
     public ContextBuilder withTaskInstructions(String instructions) {
-        return new ContextBuilder(projectRules, instructions, memories);
+        return new ContextBuilder(projectRules, instructions, memories,skills);
+    }
+    public ContextBuilder withSkills(java.util.function.Supplier<io.github.jackfeicoder.codey.skill.SkillContext> skills) {
+        return new ContextBuilder(projectRules,taskInstructions,memories,skills);
     }
 
     /**
@@ -64,6 +75,8 @@ public final class ContextBuilder {
         validateCurrentTurn(currentTurn);
         String base = history.get(0).content();
         String rules = projectRules.get();
+        var skillView=skills.get();
+        String skillBody=currentTurn.isEmpty()?"":skillView.instructions();
         String runtime = (taskInstructions.isEmpty() ? "" : "\n\n[本次任务指令]\n" + taskInstructions)
                 + runtimeInstructions(mode, step, maxSteps);
         var raw = history.subList(1, history.size());
@@ -77,18 +90,22 @@ public final class ContextBuilder {
         var recent = new ArrayList<>(raw);
         if (state != null) recent.set(0, Message.user(summaryText + recent.get(0).content()));
         var messages = new ArrayList<Message>();
-        messages.add(Message.system(base + rules + runtime));
+        messages.add(Message.system(base + rules + runtime + skillView.catalog()));
         messages.addAll(recent);
         messages.addAll(currentTurn);
         var request = new LlmRequest(messages, tools, step < maxSteps);
         long past = raw.stream().mapToLong(estimator::messageBodyTokens).sum();
-        long user = 0, assistant = 0, results = 0;
+        long user = 0, assistant = 0, results = 0, resources = 0;
+        var resourceCalls=new HashSet<String>();
         for (var message : currentTurn) {
             long count = estimator.messageBodyTokens(message);
             switch (message.role()) {
                 case USER -> user += count;
-                case ASSISTANT -> assistant += count;
-                case TOOL -> results += count;
+                case ASSISTANT -> {
+                    assistant += count;
+                    message.toolCalls().stream().filter(c->c.name().equals("read_skill_resource")).forEach(c->resourceCalls.add(c.id()));
+                }
+                case TOOL -> {if(resourceCalls.contains(message.toolCallId()))resources+=count;else results += count;}
                 default -> throw new IllegalArgumentException("Unexpected system message in current turn.");
             }
         }
@@ -96,22 +113,25 @@ public final class ContextBuilder {
         // 每条消息约 4 token 的角色/边界，加回复起始开销；none 控制字段也计入估算。
         long overhead = 4L * messages.size() + 3 + (!request.toolCallsAllowed() && !tools.isEmpty() ? 4 : 0);
         long beforeMemory = estimator.textTokens(base) + estimator.textTokens(runtime) + past + user + assistant
-                + results + definitions + overhead + estimator.textTokens(summaryText) + estimator.textTokens(rules);
+                + results + resources + definitions + overhead + estimator.textTokens(summaryText) + estimator.textTokens(rules)
+                + estimator.textTokens(skillView.catalog()) + estimator.textTokens(skillBody);
         // 只用当前任务最初的用户目标查询，不把历史、工具输出或记忆自身再作为查询。
         String query = currentTurn.isEmpty() ? "" : currentTurn.get(0).content();
         var selected = memories.apply(query, beforeMemory);
         if (currentTurn.isEmpty()) selected = new MemorySelection(selected.always(), List.of());
-        messages.set(0, Message.system(base + selected.alwaysText() + rules + runtime));
-        if (!selected.recalled().isEmpty() && !currentTurn.isEmpty()) {
+        messages.set(0, Message.system(base + selected.alwaysText() + rules + runtime + skillView.catalog()));
+        if (!currentTurn.isEmpty()) {
             int index = 1 + recent.size();
-            messages.set(index, Message.user(selected.recalledText() + "\n[当前用户任务]\n" + currentTurn.get(0).content()));
+            String recalled=selected.recalled().isEmpty()?"":selected.recalledText()+"\n[当前用户任务]\n";
+            messages.set(index, Message.user(skillBody + recalled + currentTurn.get(0).content()));
         }
         long recall = selected.recalledTokens() + (!selected.recalled().isEmpty() && !currentTurn.isEmpty()
                 ? estimator.textTokens("\n[当前用户任务]\n") : 0);
         request = new LlmRequest(messages, tools, step < maxSteps);
         return new ContextSnapshot(request, new ContextSnapshot.TokenBreakdown(estimator.textTokens(base),
                 estimator.textTokens(runtime), past, user, assistant, results, definitions, overhead,
-                estimator.textTokens(summaryText), estimator.textTokens(rules), selected.alwaysTokens(), recall));
+                estimator.textTokens(summaryText), estimator.textTokens(rules), selected.alwaysTokens(), recall,
+                estimator.textTokens(skillView.catalog()),estimator.textTokens(skillBody),resources));
     }
 
     /** 运行时指令只叠加在本次 system 副本，保持原有 PLAN 和请求轮次预算语义。 */

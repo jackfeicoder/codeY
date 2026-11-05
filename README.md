@@ -6,6 +6,8 @@
 
 ## 当前进度
 
+Skill 第一版已实现：用户/项目目录自动发现、`/skills` 菜单、`/skill 名称 任务`、模型按描述选择 `load_skill`、正文按需注入及文本资源读取。仓库 `.agents/skills` 带有代码审查与测试排查两个示例；使用方式见 [Skill 模块](#module-skill)。
+
 当前已完成多模型配置、消息与基础提示词、普通与 SSE 流式调用、本地会话保存/恢复、六个文件工具、execute_command 本地命令、Agent 循环、权限审批及 ReAct/Plan 切换。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。专用网络/删除工具、进程沙箱、多 Agent 尚待实现；MCP 默认休眠、按需召唤已实现；长期记忆的管理、条件自动提取、模型整理与关键词召回已实现；验证使用本地模拟模型，真实厂商兼容性需另行验证。
 
 工作区会话已注册 `list_files`、`search_file`、`grep_code` 与 `read_file`：模型可浏览目录、按名称定位或按正文关键词搜索，再读取内容。工具描述通过结构化 `tools` 字段发送，由 AgentLoop 执行并回填结果，继续请求最终回答。默认每个任务最多请求模型 20 次，最后一次禁用工具用于收尾；完成的工具消息组随会话保存，恢复时不自动重放。说明见 [正文搜索](docs/architecture.md#grep-code)、[文件定位](docs/architecture.md#search-file)、[目录工具](docs/architecture.md#list-files)、[读文件工具](docs/architecture.md#read-file) 和 [Agent 循环](docs/architecture.md#agent-loop)。
@@ -35,6 +37,7 @@
 | [项目规则模块](#module-instruction) | 已实现根目录 AGENTS.md、/init、大小校验、动态加载与上下文计数 |
 | [记忆模块](#module-memory) | 已实现用户/项目记忆、条件自动提取、可恢复整理及 BM25 召回 |
 | [MCP 模块](#module-mcp) | 已实现：休眠目录、按需召唤、stdio/HTTP、统一审批与任务释放 |
+| [Skill 模块](#module-skill) | 已实现：用户/项目发现、显式/自动调用、正文按需注入、资源读取与预算 |
 | [权限模块](#module-policy) | 已实现 ask/规则 auto/full、逐文件审批、撤销和拒绝拦截；审计及进程沙箱待实现 |
 | [模式切换模块](#module-mode) | 已实现模型切换和 react/plan；multi 明确未开放 |
 | [可观测性模块](#module-observability) | 已实现简洁控制台进度；事件、指标与持久化轨迹待实现 |
@@ -1091,6 +1094,7 @@ codeY/
     │   │   ├── workspace/
     │   │   ├── memory/
     │   │   ├── mcp/
+    │   │   ├── skill/                 # 技能发现、任务激活与按需资源
     │   │   ├── policy/
     │   │   └── observability/
     │   └── resources/prompts/
@@ -1104,6 +1108,61 @@ codeY/
 ```
 
 详细目录与运行时数据布局见 [架构设计](docs/architecture.md)。
+
+<a id="module-skill"></a>
+
+## Skill 模块（已实现）
+
+**功能**：将复用的任务流程封装为 `SKILL.md`。Skill 提供操作说明，实际读写、命令和 MCP 调用继续由原有工具/权限体系执行。支持用户与模型两种触发，不增加分类模型请求。
+
+**安装与范围**：用户目录默认为 `~/.agents/skills/<名称>/SKILL.md`，项目目录为 `<当前工作区>/.agents/skills/<名称>/SKILL.md`。复制目录即可，无需注册。项目同名覆盖用户级，列表显示来源；没有工作区只发现用户技能。第一版只扫描直接子目录，不向父仓库遍历、不扫描 `.claude/.dsh` 等专属目录；目录与技能条目不跟随符号链接，项目目录也不允许指向工作区外。
+
+```text
+code-review/
+├── SKILL.md
+├── references/checklist.md
+├── assets/                   # 可选模板
+└── scripts/                  # 可选脚本；加载时不执行
+```
+
+**格式**：UTF-8，YAML frontmatter 必须从文件开头开始（支持 BOM/CRLF）。`name` 为与目录相同的 kebab-case 名称，`description` 为不超过512字符的单行描述；`disable-model-invocation` 和 `user-invocable` 可选，默认允许双方调用，要求 YAML 布尔值。正文不能为空。未知扩展字段提示未支持，不赋予 `allowed-tools` 自动授权、`context: fork` 或动态命令等语义。YAML 安全构造器拒绝任意Java类型与重复键，限制别名、嵌套及长度。
+
+```markdown
+---
+name: code-review
+description: 用户要求代码审查或检查当前修改时使用。
+disable-model-invocation: false
+user-invocable: true
+---
+
+1. 确认审查范围并阅读实际代码。
+2. 必要时读取 references/checklist.md。
+3. 报告问题位置、触发条件、影响和验证结果。
+```
+
+**用户入口**：聊天中 `/skills` 列表，输入序号或名称，再填写任务；回车返回。`/skill code-review 检查当前修改` 直接激活并执行，Tab补全用户可调用名称。列表页只查看，进入会话后才能运行；非法或禁止用户调用的技能不触发模型请求。`/skill` 的任务参数作为用户任务传入，不实现 `$ARGUMENTS` 等模板替换。
+
+**涉及文件**：
+
+| 文件 | 职责 |
+|---|---|
+| `config/SkillSettings` | 用户技能目录和目录/正文/资源额度 |
+| `skill/SkillDefinition`、`SkillParser` | 元数据、UTF-8/YAML解析及内容指纹 |
+| `skill/FileSystemSkillProvider`、`SkillRegistry` | 有界发现、警告、来源合并与名称查找 |
+| `skill/SkillService`、`SkillActivation`、`SkillContext` | 任务快照、触发控制、激活去重、资源读取和上下文投影 |
+| `skill/LoadSkillTool`、`ReadSkillResourceTool` | 模型加载与受限资源读取入口 |
+| `cli/SkillCommands` | 菜单与命令参数解析；补全由CommandCompleter接入 |
+| `ContextBuilder`、`ContextSnapshot` | 正文只注入一次，目录/正文/资源分别计入预算 |
+
+**调用流程**：用户输入 → SessionLauncher 调用 `beginTask` → 有界读取技能文件、解析元数据并计算指纹 → 目录进入 system 请求副本 → 模型调用 `load_skill({"name":"code-review"})` → 校验可见性及调用限制，重读文件并校验指纹 → 固定正文快照 → 下一次请求由ContextBuilder加入当前user副本 → 原有ReAct调用工具 → finally清理激活状态。显式调用走同一个activate入口，在首次模型请求前加载。加载工具只返回激活状态和有界资源索引，不返回另一份正文。发现后激活前若文件变化则报错，下一任务重新发现；激活后的正文在本任务内稳定。
+
+**按需资源**：`read_skill_resource({"skill":"code-review","path":"references/checklist.md"})` 只读取已激活技能内的UTF-8文本。真实路径边界、相对路径、链接、字节长度及token额度均检查；首次读取结果保留为工具消息，再次读取同路径只返回已读取提示，避免重复注入。资源正文不预加载，脚本源码可读取但不自动执行；第一版未增加用户级脚本越工作区执行能力。成功历史保留调用与资源结果，技能正文和激活状态不写回会话消息，旧调用记录不表示新任务已激活。
+
+**预算与边界**：默认目录2048、全部激活正文8192、全部首次资源8192估算token；分别可用 `CODEY_SKILL_CATALOG_TOKENS`、`CODEY_SKILL_INSTRUCTION_TOKENS`、`CODEY_SKILL_RESOURCE_TOKENS` 调整，仍服从模型总预算。`CODEY_SKILLS_DIR` 覆盖用户目录，相对配置目录解析，便于隔离测试。每来源最多128个技能候选、512个直接条目，SKILL.md最大64KiB/frontmatter最大8K字符，单资源32KiB。目录预算不足时警告并省略部分技能，省略项只能显式选择；正文或资源额度不足时拒绝加载，不截断核心步骤。现有工具输出仍受ToolExecutor截断标记约束。目录、正文在 `/context` 单独统计；本任务资源结果从其他工具结果中分离，历史资源计入历史。HistoryCompactor复用同一个ContextBuilder，当前激活正文进入固定预算、不会被历史摘要替换。
+
+**权限**：两个技能工具都是只读，可在PLAN下加载；技能内容作为当前任务说明而非更高优先级系统权限，不能修改工作区、解除PLAN或授予写入/外部调用权限。MCP依赖仍需模型召唤、审批；用户级资源读取不会扩大read_file范围。Skill不是脚本执行器或子Agent，也不保证导入其他产品技能后完整兼容其专属语义。
+
+**手动验证**：以本仓库为工作区，运行 `/skills` 或 `/skill code-review 检查工具模块的资源清理`；也可输入“使用代码审查技能检查当前修改”，观察 `load_skill → read_skill_resource → 原有工具`。任务结束后 `/context` 显示技能未激活；下一任务会重新发现。无工作区的 `--prompt` 同样支持用户级技能自动选择。修改技能不需要重启，只在下一个任务生效。
 
 ## 开发路线
 

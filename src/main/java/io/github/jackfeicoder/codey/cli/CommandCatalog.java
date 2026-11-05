@@ -14,6 +14,8 @@ public final class CommandCatalog {
             new Command("/mode", "/mode [react|plan]", "切换工作模式；multi 尚待实现"),
             new Command("/status", "/status", "查看模式、模型、估算上下文、实际用量和文件授权"),
             new Command("/mcp", "/mcp [register]", "查看服务菜单或注册；Agent 按需加载、自动释放"),
+            new Command("/skills", "/skills", "查看用户/项目技能并选择调用"),
+            new Command("/skill", "/skill 名称 [任务描述]", "显式加载技能并开始任务"),
             new Command("/context", "/context", "查看上下文组装内容与 Token 估算拆分"),
             new Command("/remember", "/remember [--user|--project] [--always|--on-demand] [--update ID] [--title 标题] [--tags 标签1,标签2] 内容", "显式保存或更新长期记忆；项目默认按需"),
             new Command("/memory", "/memory [关键词|tidy|archives|versions|restore|rollback]", "查看/整理记忆或归档恢复，操作支持 --user|--project"),

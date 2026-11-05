@@ -17,6 +17,12 @@
         <jline.version>3.30.17</jline.version>
     </properties>
     <dependencies>
+        <!-- 技能 frontmatter 只使用安全 YAML 构造器，不实例化任意 Java 类型。 -->
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+            <version>2.3</version>
+        </dependency>
         <!-- Windows OAuth 令牌使用当前用户 DPAPI 加密，不落入明文 MCP 配置。 -->
         <dependency>
             <groupId>net.java.dev.jna</groupId>
