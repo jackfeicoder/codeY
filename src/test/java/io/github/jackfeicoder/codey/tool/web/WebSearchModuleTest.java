@@ -181,4 +181,37 @@ class WebSearchModuleTest {
         assertEquals("brave",json.readTree(new WebSearchService(settings(),List.of(primary,backup)).search(request(),16000)).path("provider").asText());
         assertEquals(1,first.get());assertEquals(1,second.get());
     }
+    @Test void serpApiMapsGoogleFieldsAndKeepsCredentialUriOutOfResults()throws Exception {
+        endpoint("serpapi",200,"{\"search_metadata\":{\"status\":\"Success\"},\"organic_results\":[{\"title\":\"Java\",\"link\":\"https://docs.example.com/java\",\"snippet\":\"Documentation\",\"date\":\"Nov 1, 2026\"}]}",0);
+        var config=new WebSearchSettings(true,List.of(provider("serpapi")),1,3,5);
+        String body=new WebSearchService(config).search(request(),16000);var result=json.readTree(body);
+        assertEquals("serpapi",result.path("provider").asText());
+        assertEquals("Nov 1, 2026",result.path("results").get(0).path("publishedAt").asText());
+        assertTrue(capturedQuery.get().contains("engine=google"));assertTrue(capturedQuery.get().contains("api_key=fixture-serpapi-key"));
+        assertTrue(capturedQuery.get().contains("tbs=qdr%3Aw"));assertFalse(body.contains("fixture-serpapi-key"));assertFalse(body.contains("search.json?"));
+    }
+    @Test void serpApiSuccessWithoutOrganicResultsIsEmptyNotFailure()throws Exception {
+        endpoint("serpapi",200,"{\"search_metadata\":{\"status\":\"Success\"},\"error\":\"No results returned\"}",0);
+        assertTrue(new SerpApiSearchClient(provider("serpapi")).search(request(),Duration.ofSeconds(2)).results().isEmpty());
+    }
+    @ParameterizedTest @ValueSource(strings={"Error","Processing"})
+    void serpApiBusinessErrorOrPendingStatusIsNotSuccessfulSearch(String status) {
+        endpoint("serpapi",200,"{\"search_metadata\":{\"status\":\""+status+"\"},\"error\":\"PRIVATE_ERROR fixture-serpapi-key\"}",0);
+        var failed=assertThrows(WebSearchFailure.class,()->new SerpApiSearchClient(provider("serpapi")).search(request(),Duration.ofSeconds(2)));
+        assertFalse(failed.getMessage().contains("PRIVATE_ERROR"));assertFalse(failed.getMessage().contains("fixture-serpapi-key"));assertFalse(failed.fallbackAllowed());
+    }
+    @Test void configuredSerpApiReceivesFallbackFromTavily()throws Exception {
+        endpoint("tavily",503,"{}",0);endpoint("serpapi",200,"{\"search_metadata\":{\"status\":\"Success\"},\"organic_results\":[{\"title\":\"Java\",\"link\":\"https://docs.example.com/java\",\"snippet\":\"Source\"}]}",0);
+        var config=new WebSearchSettings(true,List.of(provider("tavily"),provider("serpapi")),1,3,5);
+        var body=json.readTree(new WebSearchService(config).search(request(),16000));
+        assertEquals("serpapi",body.path("provider").asText());assertEquals(2,body.path("attempts").size());assertEquals(1,tavilyCalls.get());
+    }
+    @Test void officialKeyAliasesWorkAndDedicatedKeyTakesPrecedence() {
+        var values=new HashMap<>(Map.of("CODEY_WEB_SEARCH_ENABLED","true","CODEY_WEB_SEARCH_PROVIDERS","tavily,serpapi",
+                "TAVILY_API_KEY","fixture-tavily-key","SERPAPI_API_KEY","fixture-serpapi-key"));
+        var config=WebSearchSettings.load(directory,values);assertEquals("fixture-serpapi-key",config.providers().get(1).apiKey());
+        assertEquals(URI.create("https://serpapi.com/search.json"),config.providers().get(1).endpoint());
+        values.put("CODEY_SERPAPI_API_KEY","dedicated-fixture-key");
+        assertEquals("dedicated-fixture-key",WebSearchSettings.load(directory,values).providers().get(1).apiKey());
+    }
 }

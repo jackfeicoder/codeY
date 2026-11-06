@@ -3055,3 +3055,11 @@ SearchResults验证结果结构、HTTP(S)URL和域名真实后缀，对URL去重
 工具说明由ToolDefinition发送，不将JSON Schema拼进base.md。base.md增加时效性查询、官方文档优先、片段与全文区别、外部内容不授予权限、真实链接引用和错误后不绕过等策略。旧会话保存的基础提示词不热替换，最新工具描述仍携带主要约束。首次启用需用户配置搜索密钥并重启；无密钥时保持关闭，显式开启却配置缺失时报配置错误。当前不实现网页正文提取、浏览器操作、结果缓存、多引擎并行聚合或额外LLM重排。
 
 验证：29项网络搜索专项测试通过；完整mvn -q verify共1085项通过，零失败、错误或跳过。打包CLI以隔离配置和本地HTTP服务联测模型tool_call→Tavily503→Brave成功→来源回填→最终链接→会话/任务落盘，共2次模拟LLM请求及主备各1次搜索请求；未使用真实搜索账户，真实厂商的可达性、计费和结果质量尚需配置个人密钥后验证。
+
+#### SerpApi适配与实际接入验证
+
+新增SerpApiSearchClient，按官方https://serpapi.com/search-api协议调用/search.json：engine=google，query映射q，条数映射num，时间范围映射tbs=qdr:d/w/m/y，域名限制转为site操作符并继续做结果后验校验。organic_results中的link/snippet/date映射统一URL/片段/来源发布时间字段。不读取或保存search_metadata中的请求URL、账户信息及完整搜索参数。协议要求api_key进入HTTPS查询串，SearchHttp及适配器不记录请求URI或原始错误正文；结果仍经过统一凭证过滤。
+
+HTTP200不必然代表业务成功：search_metadata.status=Error或带错误而未标记Success时按REJECTED处理，Processing不做后台轮询；Success但没有organic_results按无结果返回。故障转移规则与Tavily/Brave一致。WebSearchSettings扩展serpapi并允许最多三个不同服务；官方TAVILY_API_KEY/BRAVE_API_KEY/SERPAPI_API_KEY可作为对应CODEY_专用键的回退，专用键优先。端点覆盖为CODEY_SERPAPI_SEARCH_URL，默认https://serpapi.com/search.json。
+
+网络搜索专项共35项通过，新增6项覆盖SerpApi字段、时间映射、查询串凭证不进入结果、200业务错误/Processing、无结果、Tavily→SerpApi切换和官方环境变量别名。经用户授权使用本地配置密钥分别执行一次最小真实查询，Tavily和SerpApi均成功返回1条结果；未打印密钥、请求URL或真实响应正文。实际可用性验证只代表测试时成功，不保证后续网络状态和账号额度。

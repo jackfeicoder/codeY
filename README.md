@@ -35,7 +35,7 @@ Skill 第一版已实现：用户/项目目录自动发现、`/skills` 菜单、
 | [会话管理模块](#module-session) | 已实现：内存历史、本地保存/恢复与标题 |
 | [任务管理与恢复模块](#module-task) | 已实现：会话绑定、执行事件落盘、失败继续、提交恢复与托管临时目录清理 |
 | [工具模块](#module-tool) | 已实现六个文件工具及 execute_command，已接入模型、审批和 CLI |
-| [网络搜索](#module-web-search) | 已实现 web_search、Tavily 主服务、可选 Brave 备用、联网审批与有界故障切换 |
+| [网络搜索](#module-web-search) | 已实现 web_search、Tavily/Brave/SerpApi 适配、联网审批与有序故障切换 |
 | [Agent 执行模块](#module-agent) | 已实现：工具循环、轮次预算、中断与完成状态 |
 | [上下文模块](#module-context) | 已实现模型容量、统一组装、Token 估算、输入预算与有界历史摘要 |
 | [项目规则模块](#module-instruction) | 已实现根目录 AGENTS.md、/init、大小校验、动态加载与上下文计数 |
@@ -96,6 +96,8 @@ CODEY_TAVILY_API_KEY=你的搜索服务密钥
 
 可选备用：将服务顺序设置为`CODEY_WEB_SEARCH_PROVIDERS=tavily,brave`，并添加`CODEY_BRAVE_API_KEY`。没有配置备用就不会自动切换到其他服务。配置需重启后生效，无需编译。`/permissions auto`允许普通公开搜索，`ask`逐次确认搜索词及服务顺序，`full`跳过常规审批；Plan遵循相同联网权限。自动模式的敏感查询识别是基础规则，不能保证识别全部私密内容。无交互审批的旧`--prompt`入口仍使用默认ask，搜索可能返回APPROVAL_REQUIRED。
 
+SerpApi 也可作为备用：设置`CODEY_WEB_SEARCH_PROVIDERS=tavily,serpapi`，填写`SERPAPI_API_KEY`或`CODEY_SERPAPI_API_KEY`。三个服务均兼容官方常用密钥变量（`TAVILY_API_KEY`、`BRAVE_API_KEY`、`SERPAPI_API_KEY`），同名服务的`CODEY_`专用变量优先；可按需排列最多三个不同服务。SerpApi使用Google搜索接口，其协议要求将密钥放入请求查询参数，程序不输出请求URI及搜索元数据，仅提取自然搜索结果。不要开启包含完整HTTP请求URI的外部调试日志。
+
 模型参数：`query`必填；`maxResults`默认5、范围1～10；`allowedDomains`可选、最多10个纯域名；`timeRange`为any/day/week/month/year。例如直接说“联网查询 Java 17 HttpClient 的取消机制，优先官方文档”。工具定义经ToolRegistry发布，策略写在现有`prompts/base.md`；老会话沿用原基础提示词快照，但会收到最新工具描述。
 
 | 文件 | 功能 |
@@ -103,7 +105,7 @@ CODEY_TAVILY_API_KEY=你的搜索服务密钥
 | `config/WebSearchSettings.java` | 独立密钥、服务顺序、端点和预算配置 |
 | `tool/builtin/WebSearchTool.java` | JSON Schema、参数校验和联网审批 |
 | `tool/web/WebSearchClient.java`、Request/Response | 厂商无关协议与数据结构 |
-| `TavilySearchClient.java`、`BraveSearchClient.java` | 请求参数/鉴权和返回结构适配 |
+| `TavilySearchClient.java`、`BraveSearchClient.java`、`SerpApiSearchClient.java` | 请求参数/鉴权和返回结构适配 |
 | `WebSearchService.java` | 每次任务尝试预算、有序切换、来源ID和输出上限 |
 | `SearchHttp.java`、`SearchResults.java`、`WebSearchFailure.java` | 可取消HTTP、正文限额、来源过滤和诊断分类 |
 

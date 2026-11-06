@@ -10,8 +10,12 @@ public final class WebSearchService {
     private final WebSearchSettings settings;
     private final List<WebSearchClient> clients;
     private int calls;
-    public WebSearchService(WebSearchSettings settings){this(settings,settings.providers().stream().map(p->
-            p.name().equals("tavily")?(WebSearchClient)new TavilySearchClient(p):new BraveSearchClient(p)).toList());}
+    public WebSearchService(WebSearchSettings settings){this(settings,settings.providers().stream().map(p->switch(p.name()) {
+        case "tavily" -> (WebSearchClient)new TavilySearchClient(p);
+        case "brave" -> new BraveSearchClient(p);
+        case "serpapi" -> new SerpApiSearchClient(p);
+        default -> throw new IllegalArgumentException("Unsupported search provider.");
+    }).toList());}
     /** 显式注入适配器，便于本地模拟和后续增加搜索引擎。 */
     public WebSearchService(WebSearchSettings settings,List<WebSearchClient> clients){this.settings=settings;this.clients=List.copyOf(clients);}
     public void resetTask(){calls=0;}
