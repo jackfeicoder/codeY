@@ -30,6 +30,19 @@ class SkillModuleTest {
     }
     ToolContext context(){return new ToolContext(WorkspaceBinding.none());}
     ToolCall call(String name,String args){return new ToolCall(UUID.randomUUID().toString(),name,args);}
+    @Test void taskRecoveryRestoresVerifiedSkillAndRejectsChangedInstructions()throws Exception {
+        Path file=write(user(),"review","","ORIGINAL_SKILL_BODY");
+        try(var service=new SkillService(settings(),new ToolRegistry())) {
+            service.beginTask(WorkspaceBinding.none());service.activate("review",true);
+            var references=service.activeReferences();assertEquals(1,references.size());
+            service.endTask();service.beginTask(WorkspaceBinding.none());service.restoreReferences(references);
+            assertEquals(references,service.activeReferences());
+            service.endTask();Files.writeString(file,Files.readString(file)+"\nchanged");
+            service.beginTask(WorkspaceBinding.none());
+            assertThrows(io.github.jackfeicoder.codey.task.TaskException.class,()->service.restoreReferences(references));
+            assertTrue(service.activeReferences().isEmpty());
+        }
+    }
     @Test void parserSupportsBomCrLfAndSafeMultilineYaml()throws Exception {
         Path file=write(user(),"review","", "正文步骤");
         Files.writeString(file,"\uFEFF---\r\nname: review\r\ndescription: >-\r\n  review code\r\n  when asked\r\n---\r\n正文步骤");

@@ -48,6 +48,12 @@ public final class AgentLoop {
     private final HistoryCompactor compactor;
     /** 宿主在摘要生效后持久化派生状态；保存失败应阻止继续请求。 */
     private final Runnable onCompacted;
+    /** 可选持久任务记录；旧嵌入入口仍可使用纯内存循环。 */
+    private io.github.jackfeicoder.codey.task.TaskRun task;
+    public AgentLoop withTask(io.github.jackfeicoder.codey.task.TaskRun task) {
+        this.task = Objects.requireNonNull(task); return this;
+    }
+    public boolean recordsProgress() { return task != null; }
 
     /** 使用默认预算装配循环，注册工具由宿主负责。 */
     public AgentLoop(LlmClient client, ToolRegistry registry) { this(client, registry, DEFAULT_MAX_STEPS); }
@@ -100,7 +106,21 @@ public final class AgentLoop {
     public AgentResult run(Session session, String input, ToolContext context, AgentStreamListener stream) {
         Objects.requireNonNull(session, "session");
         Objects.requireNonNull(context, "context");
-        try { return execute(session, input, context, stream); }
+        try {
+            var result = execute(session, input, context, stream);
+            if (task != null && !result.completed()) task.stop(io.github.jackfeicoder.codey.task.TaskState.Status.BUDGET_EXHAUSTED);
+            return result;
+        } catch (RuntimeException failed) {
+            if (task != null && !(failed instanceof io.github.jackfeicoder.codey.task.TaskException)) {
+                task.stop(Thread.currentThread().isInterrupted()
+                        || failed instanceof LlmException llm && llm.kind() == LlmException.Kind.INTERRUPTED
+                        ? io.github.jackfeicoder.codey.task.TaskState.Status.INTERRUPTED
+                        : io.github.jackfeicoder.codey.task.TaskState.Status.FAILED,
+                        failed instanceof LlmException llm ? "LLM_"+llm.kind().name()
+                                : failed instanceof ContextLimitException ? "CONTEXT_LIMIT" : "EXECUTION_ERROR");
+            }
+            throw failed;
+        }
         finally { registry.finishTask(); } // 动态扩展按任务释放，失败不遗留连接。
     }
 
@@ -109,8 +129,9 @@ public final class AgentLoop {
         if (input == null || input.isBlank()) throw new IllegalArgumentException("Session requires a nonblank user input.");
         var history = session.messages(); // 原历史与本次任务分开，返回结果不依赖请求视图的下标。
         var messages = new ArrayList<Message>();
-        messages.add(Message.user(input));
+        messages.addAll(task == null ? java.util.List.of(Message.user(input)) : task.state().messages);
         Set<String> callIds = new HashSet<>(); // 同一任务内跨步骤检测重复调用 ID。
+        messages.forEach(message -> message.toolCalls().forEach(call -> callIds.add(call.id())));
         int executions = 0;
         boolean warned = false; // 一个用户任务最多输出一次预警，不把每轮都刷成同一提醒。
         boolean summaryFailed = false;
@@ -137,6 +158,7 @@ public final class AgentLoop {
             }
             LlmRequest request = snapshot.request();
             debug.round(step);
+            if (task != null) task.request(); // 网络调用前先落盘，崩溃时可识别执行边界。
             LlmResponse response;
             if (stream == null) response = client.generate(request);
             else {
@@ -155,6 +177,7 @@ public final class AgentLoop {
                     throw invalid("Model returned an empty final answer (finish_reason=" + response.finishReason() + ").");
                 }
                 messages.add(response.message());
+                if (task != null) task.assistant(response.message());
                 return new AgentResult(AgentResult.Status.COMPLETED,
                         messages, response, step, executions, finalRound);
             }
@@ -170,9 +193,11 @@ public final class AgentLoop {
                 if (!callIds.add(call.id())) throw invalid("Model reused a tool-call ID within this task.");
             }
             messages.add(response.message());
+            if (task != null) task.assistant(response.message());
             for (var call : response.toolCalls()) {
                 checkInterrupted();
                 debug.tool(step, call);
+                if (task != null) task.toolStarted(call.id());
                 var result = offered.contains(call.name()) ? executor.execute(call, context)
                         : new io.github.jackfeicoder.codey.tool.ToolResult(call.id(), call.name(),
                         io.github.jackfeicoder.codey.tool.ToolResult.Status.ERROR,
@@ -180,6 +205,7 @@ public final class AgentLoop {
                         io.github.jackfeicoder.codey.tool.ToolResult.ErrorCode.UNKNOWN_TOOL, 0, false);
                 executions++;
                 debug.toolFailed(step, result);
+                if (task != null) task.toolResult(result.toMessage());
                 checkInterrupted(); // 中断不进入下一工具或模型请求。
                 messages.add(result.toMessage()); // 错误也回填，让模型下一轮修正参数。
             }

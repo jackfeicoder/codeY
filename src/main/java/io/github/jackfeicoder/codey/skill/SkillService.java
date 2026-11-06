@@ -57,6 +57,21 @@ public final class SkillService implements AutoCloseable {
     }
     public List<String> warnings() {return warnings;}
     public List<SkillDefinition> definitions() {return registry.all();}
+    /** 任务检查点只保存已加载技能的稳定身份，不保存授权。 */
+    public List<io.github.jackfeicoder.codey.task.TaskState.SkillRef> activeReferences() {
+        return active.values().stream().map(a->new io.github.jackfeicoder.codey.task.TaskState.SkillRef(
+                a.definition().name(),a.definition().source(),a.definition().fingerprint())).toList();
+    }
+    /** 原技能变更时暂停恢复，避免悄悄用不同指令接着执行。 */
+    public void restoreReferences(List<io.github.jackfeicoder.codey.task.TaskState.SkillRef> references) {
+        requireTask();
+        for(var ref:references) {
+            var definition=registry.find(ref.name()).orElseThrow(()->new io.github.jackfeicoder.codey.task.TaskException("恢复所需技能已不存在："+ref.name()));
+            if(!definition.source().equals(ref.source()) || !definition.fingerprint().equals(ref.fingerprint()))
+                throw new io.github.jackfeicoder.codey.task.TaskException("恢复所需技能已改变："+ref.name()+"；请检查后发起新任务。");
+            activate(ref.name(),definition.userInvocable());
+        }
+    }
     /** explicit 仅由宿主命令设置，模型参数中没有可伪造的授权开关。 */
     public String activate(String name,boolean explicit) {
         requireTask();

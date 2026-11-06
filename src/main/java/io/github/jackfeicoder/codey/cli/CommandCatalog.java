@@ -17,6 +17,8 @@ public final class CommandCatalog {
             new Command("/skills", "/skills", "查看用户/项目技能并选择调用"),
             new Command("/skill", "/skill 名称 [任务描述]", "显式加载技能并开始任务"),
             new Command("/context", "/context", "查看上下文组装内容与 Token 估算拆分"),
+            new Command("/tasks", "/tasks", "查看当前会话任务、状态与累计调用次数"),
+            new Command("/continue", "/continue [任务ID]", "恢复未完成任务；也可直接输入继续"),
             new Command("/remember", "/remember [--user|--project] [--always|--on-demand] [--update ID] [--title 标题] [--tags 标签1,标签2] 内容", "显式保存或更新长期记忆；项目默认按需"),
             new Command("/memory", "/memory [关键词|tidy|archives|versions|restore|rollback]", "查看/整理记忆或归档恢复，操作支持 --user|--project"),
             new Command("/forget", "/forget 完整ID", "删除用户或当前项目的一条记忆"),

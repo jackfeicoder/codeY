@@ -51,7 +51,7 @@ public final class JsonSessionStore implements SessionStore {
                 }
                 try {
                     SessionSnapshot snapshot = load(id);
-                    if (!snapshot.messages().isEmpty()) {
+                    if (!snapshot.messages().isEmpty() || hasTasks(path)) {
                         sessions.add(snapshot);
                     }
                 } catch (SessionException invalid) {
@@ -64,6 +64,16 @@ public final class JsonSessionStore implements SessionStore {
         sessions.sort(Comparator.comparing((SessionSnapshot s) -> Instant.parse(s.updatedAt())).reversed()
                 .thenComparing(SessionSnapshot::id));
         return new Listing(sessions, warnings);
+    }
+
+    /** 第一条任务失败时成功历史仍为空，但该会话必须可从启动列表重新进入。 */
+    private boolean hasTasks(Path session) throws IOException {
+        Path tasks=session.resolve("tasks");
+        if(Files.isSymbolicLink(tasks) || !Files.isDirectory(tasks,LinkOption.NOFOLLOW_LINKS))return false;
+        try(var paths=Files.list(tasks)) {
+            return paths.anyMatch(path->SessionSnapshot.validId(path.getFileName().toString())
+                    && !Files.isSymbolicLink(path) && Files.isRegularFile(path.resolve("events.jsonl"),LinkOption.NOFOLLOW_LINKS));
+        }
     }
 
     /** 读取并验证版本、ID、提示词摘要和消息结构；错误不回显 JSON 正文。 */

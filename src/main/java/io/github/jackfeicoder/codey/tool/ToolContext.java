@@ -11,8 +11,14 @@ import io.github.jackfeicoder.codey.policy.*;
  * @param maxOutputChars 输出最多保留的 Unicode 码点数量，截断标记另存在结果字段
  * @param workMode 本次任务固定的工作模式，不从工具参数获取
  * @param permissions 当前会话审批服务；跨任务复用文件授权，不跨工作区或历史恢复
+ * @param taskTempDirectory 宿主管理的当前任务临时目录，可为空；不是权限授权或进程沙箱
  */
-public record ToolContext(WorkspaceBinding workspace, int maxOutputChars, WorkMode workMode, PermissionService permissions) {
+public record ToolContext(WorkspaceBinding workspace, int maxOutputChars, WorkMode workMode, PermissionService permissions,
+                          java.nio.file.Path taskTempDirectory) {
+    /** 旧调用没有托管临时目录，行为保持原样。 */
+    public ToolContext(WorkspaceBinding workspace, int maxOutputChars, WorkMode workMode, PermissionService permissions) {
+        this(workspace,maxOutputChars,workMode,permissions,null);
+    }
     /** 首版输出上限，避免工具结果无限增长；具体读取工具仍需限制读取量。 */
     public static final int DEFAULT_MAX_OUTPUT_CHARS = 16_000;
 

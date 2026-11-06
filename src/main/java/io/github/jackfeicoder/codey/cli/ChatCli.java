@@ -116,7 +116,8 @@ public final class ChatCli {
         }
         if (!result.completed()) {
             input.theme().line(errors, ConsoleTheme.Tone.ERROR, "Agent stopped [BUDGET_EXHAUSTED] after " + result.modelCalls()
-                    + " model requests and " + result.toolCalls() + " tool calls. This turn was not saved.");
+                    + " model requests and " + result.toolCalls() + " tool calls. "
+                    + (agent.recordsProgress()?"进度已保存，输入“继续”恢复；本轮尚未提交成功历史。":"This turn was not saved."));
             if (context.hasWorkspace()) input.theme().line(errors, ConsoleTheme.Tone.ERROR, "工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
             errors.flush();
             return false;

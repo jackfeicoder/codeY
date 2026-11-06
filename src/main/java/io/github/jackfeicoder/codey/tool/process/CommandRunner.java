@@ -23,10 +23,20 @@ public final class CommandRunner {
     /** invocation 已完成平台适配，工作目录必须由宿主验证；不通过 Shell 解释常规 argv。 */
     public Result run(List<String> invocation, Path directory, int timeoutSeconds, int outputChars, Charset charset)
             throws InterruptedException {
+        return run(invocation,directory,timeoutSeconds,outputChars,charset,Map.of());
+    }
+
+    /** 宿主注入任务临时目录等运行信息，模型参数不控制此环境映射。 */
+    public Result run(List<String> invocation, Path directory, int timeoutSeconds, int outputChars, Charset charset,
+                      Map<String,String> environment) throws InterruptedException {
         if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
         long start = System.nanoTime();
         Process process;
-        try { process = new ProcessBuilder(invocation).directory(directory.toFile()).start(); }
+        try {
+            var builder = new ProcessBuilder(invocation).directory(directory.toFile());
+            builder.environment().putAll(environment);
+            process = builder.start();
+        }
         catch (IOException failed) { throw new ToolException(ErrorCode.COMMAND_START_FAILED, "Failed to start the program. Check installation and executable permissions."); }
         var executor = Executors.newFixedThreadPool(2, action -> {
             Thread thread = new Thread(action, "codey-command-output"); thread.setDaemon(true); return thread;

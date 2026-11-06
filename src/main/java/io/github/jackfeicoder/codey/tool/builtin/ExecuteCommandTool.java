@@ -63,7 +63,8 @@ public final class ExecuteCommandTool implements Tool {
                 throw new ToolException(ToolResult.ErrorCode.FILE_CONFLICT, "Working directory changed during approval.");
             executable.verify();
             return encode(runner.run(executable.invocation(), directory.start(), options.timeoutSeconds(),
-                    settings.maxOutputChars(), settings.charset()), context);
+                    settings.maxOutputChars(), settings.charset(), context.taskTempDirectory()==null ? java.util.Map.of()
+                            : java.util.Map.of("CODEY_TASK_TMP_DIR",context.taskTempDirectory().toString())), context);
         });
     }
 

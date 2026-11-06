@@ -124,6 +124,11 @@ public final class SessionLauncher {
     private String lastInstructionStatus;
     private ContextBuilder contexts = new ContextBuilder(this::projectRules, this::selectMemories);
     private io.github.jackfeicoder.codey.skill.SkillService skills;
+    private io.github.jackfeicoder.codey.task.TaskStore tasks;
+    /** 生产入口启用会话内任务记录，测试/嵌入入口可保持内存模式。 */
+    public SessionLauncher withTasks(io.github.jackfeicoder.codey.task.TaskStore tasks) {
+        this.tasks=java.util.Objects.requireNonNull(tasks);return this;
+    }
     /** Main 显式装配；旧嵌入/测试构造器不访问用户技能目录。 */
     public SessionLauncher withSkills(io.github.jackfeicoder.codey.skill.SkillService skills) {
         this.skills=java.util.Objects.requireNonNull(skills);
@@ -340,6 +345,10 @@ public final class SessionLauncher {
                         printStatus();
                     } else if (command.equals("/context")) {
                         printContext();
+                    } else if (command.equals("/tasks")) {
+                        listTasks();
+                    } else if (command.equals("/continue") || command.startsWith("/continue ")) {
+                        continueTask(command.substring(9).strip());
                     } else if (command.equals("/mcp") || command.startsWith("/mcp ")) {
                         mcpCommand(command.substring(4).strip());
                     } else if (command.equals("/skills")) {
@@ -396,8 +405,11 @@ public final class SessionLauncher {
                     } else if (browsing) {
                         resume(command, true);
                     } else {
-                        answer(line);
+                        if (command.equals("继续") && tasks!=null && !pendingTasks().isEmpty()) continueTask("");
+                        else answer(line);
                     }
+                } catch (io.github.jackfeicoder.codey.task.TaskException failed) {
+                    input.theme().line(errors,ConsoleTheme.Tone.ERROR,"Task error: "+failed.getMessage());
                 } catch (io.github.jackfeicoder.codey.tool.ToolException failed) {
                     input.theme().line(errors,ConsoleTheme.Tone.ERROR,"Skill error ["+failed.code()+"]: "+failed.getMessage());
                 } catch (ConfigException failed) {
@@ -409,7 +421,7 @@ public final class SessionLauncher {
                             + failed.getMessage());
                 } catch (LlmException failed) {
                     input.theme().line(errors, ConsoleTheme.Tone.ERROR, "LLM error [" + failed.kind() + "]: " + failed.getMessage()
-                            + " This turn was not saved.");
+                            + (tasks==null ? " This turn was not saved." : " 本轮未提交成功历史；任务进度已独立保存，输入“继续”恢复。"));
                     if (active != null && active.snapshot().workspace().mode() == WorkspaceBinding.Mode.DIRECTORY) {
                         input.theme().line(errors, ConsoleTheme.Tone.ERROR, "工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
                     }
@@ -535,7 +547,8 @@ public final class SessionLauncher {
                 int index = Integer.parseInt(selector) - 1;
                 if (index >= 0 && index < displayed) matches.add(listing.get(index));
             } catch (NumberFormatException ignored) { }
-        } else {
+        }
+        if (matches.isEmpty() && (!allowNumber || !selector.matches("[0-9]+") || selector.length() >= 8)) {
             String normalizedId = selector.toLowerCase(java.util.Locale.ROOT);
             // 空会话默认不在列表中，但已知完整 UUID 仍可直接恢复。
             if (SessionSnapshot.validId(normalizedId)) matches.add(store.load(normalizedId));
@@ -616,6 +629,10 @@ public final class SessionLauncher {
                 + " | " + active.snapshot().workspace().display() + " | Profile " + selected.profile());
         if (!SessionSnapshot.hash(basePrompt.get()).equals(active.snapshot().promptHash())) {
             output.println("基础提示词版本已变化，本会话沿用创建时的快照。");
+        }
+        if(tasks!=null) {
+            long pending=tasks.list(active.snapshot().id()).stream().filter(t->!t.completed()).count();
+            if(pending>0)output.println("[任务] 有 "+pending+" 个未完成任务；/tasks 查看，输入“继续”恢复。");
         }
     }
 
@@ -717,10 +734,16 @@ public final class SessionLauncher {
                 }
                 new SkillCommands(skills,input,output).warnings();
             }
-            executeAnswer(line,taskInstructions);
+            if(tasks==null)executeAnswer(line,taskInstructions,null);
+            else try(var task=tasks.create(active.snapshot().id(),active.snapshot().workspace(),model.profile(),line,
+                    taskInstructions,active.session().messages())) {
+                if(skills!=null)task.withSkills(skills::activeReferences);
+                output.println("[任务] "+task.state().id+" · 进度随执行保存；/tasks 查看，继续 恢复。");
+                executeAnswer(line,task.runtimeInstructions(),task);
+            }
         } finally {if(skills!=null)skills.endTask();}
     }
-    private void executeAnswer(String line, String taskInstructions) {
+    private void executeAnswer(String line, String taskInstructions, io.github.jackfeicoder.codey.task.TaskRun task) {
         ContextBuilder taskContexts = taskInstructions.isEmpty() ? contexts : contexts.withTaskInstructions(taskInstructions);
         // 模型客户端/模式在任务开始时固定，运行中不消费切换命令；状态只观察响应。
         final var selectedClient = model.chat();
@@ -739,17 +762,62 @@ public final class SessionLauncher {
                 return response;
             }
         };
-        ChatCli chat = new ChatCli(new AgentLoop(observed, tools, maxIterations, debug, taskContexts, this::updateContext, budgetPolicy,
-                new HistoryCompactor(selectedClient, budgetPolicy, compactionSettings, taskContexts, debug), this::saveCompaction), active.session(),
-                new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions), input, output, errors);
+        var loop = new AgentLoop(observed, tools, maxIterations, debug, taskContexts, this::updateContext, budgetPolicy,
+                new HistoryCompactor(selectedClient, budgetPolicy, compactionSettings, taskContexts, debug), this::saveCompaction);
+        if(task!=null)loop.withTask(task);
+        ChatCli chat = new ChatCli(loop, active.session(),
+                new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions,
+                        task==null?null:task.tempDirectory()), input, output, errors);
         if (chat.answer(line)) {
             active.captureTurn();
             active.save();
-            if (taskInstructions.isEmpty()) {
+            if(task!=null) {
+                task.committed();
+                output.println("[任务] 已完成，托管临时目录已尝试清理；执行记录保留。"+(task.state().reason.isEmpty()?"":task.state().reason));
+            }
+            if (task==null ? taskInstructions.isEmpty() : task.state().instructions.isEmpty()) {
                 extractMemory(line, selectedClient);
                 if (!Thread.currentThread().isInterrupted()) tidyMemories();
             }
             if (!Thread.currentThread().isInterrupted()) generateTitle();
+        } else if(task!=null) {
+            output.println("[任务] 进度已保存，输入“继续”或 /continue "+task.state().id+" 接着执行。");
+        }
+    }
+
+    /** 普通历史与未完成任务分开显示，避免把失败过程伪装为成功回答。 */
+    private java.util.List<io.github.jackfeicoder.codey.task.TaskState> pendingTasks() {
+        if(tasks==null || active==null || browsing)return java.util.List.of();
+        return tasks.list(active.snapshot().id()).stream().filter(t->!t.completed()).toList();
+    }
+    private void listTasks() {
+        if(tasks==null || active==null || browsing){output.println("请先进入会话后查看任务。");return;}
+        var list=tasks.list(active.snapshot().id());
+        if(list.isEmpty())output.println("当前会话暂无任务。");
+        for(var task:list)output.println(task.id+" | "+task.status+" | 尝试 "+task.attempts+" | 模型 "+task.modelCalls
+                +" / 工具 "+task.toolCalls+" | "+ConsoleApprovalHandler.clean(task.goal.length()>100?task.goal.substring(0,100)+"…":task.goal));
+        output.println("输入 继续 恢复唯一未完成任务，或 /continue 任务ID（可用唯一前缀）选择。");
+    }
+    private void continueTask(String id) {
+        var pending=pendingTasks();
+        var matches=id.isEmpty()?pending:pending.stream().filter(t->t.id.startsWith(id)).toList();
+        if(matches.size()!=1){output.println(matches.isEmpty()?"没有匹配的未完成任务。":"存在多个未完成任务，请用 /continue 任务ID 选择。");listTasks();return;}
+        try(var task=tasks.open(active.snapshot().id(),matches.get(0).id)) {
+            var state=task.state();
+            if(!state.workspace.equals(active.snapshot().workspace()))throw new io.github.jackfeicoder.codey.task.TaskException("任务工作区与当前会话不一致。");
+            if(state.status==io.github.jackfeicoder.codey.task.TaskState.Status.COMMIT_PENDING) {
+                if(!task.alreadyCommitted(active.session().messages())) {
+                    active.session().completeAgentTurn(state.messages);active.captureTurn();active.save();
+                }
+                task.committed();output.println("[任务] 完整回答已提交，无需重新调用模型或工具。");return;
+            }
+            task.resume(model.profile(),active.session().messages());
+            try {
+                if(skills!=null){skills.beginTask(state.workspace);skills.restoreReferences(state.skills);task.withSkills(skills::activeReferences);}
+                else if(!state.skills.isEmpty())throw new io.github.jackfeicoder.codey.task.TaskException("恢复此任务需要启用原技能模块。");
+                output.println("[任务] 恢复 "+state.id+"；保留已有结果，本次重新分配 "+maxIterations+" 次模型请求预算。");
+                executeAnswer(state.goal,task.runtimeInstructions(),task);
+            }finally{if(skills!=null)skills.endTask();}
         }
     }
 
