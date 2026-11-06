@@ -160,11 +160,12 @@ class SkillModuleTest {
             assertFalse(service.context().instructions().contains("SCRIPT_SOURCE_ONLY"));assertTrue(service.readResource("review","scripts/test.ps1").contains("Write-Output"));
         }
     }
-    @Test void resourceAndInstructionBudgetsFailWithoutPartialActivation()throws Exception {
+    @Test void legacyInstructionLimitNoLongerRejectsBodyWhileResourceLimitStillApplies()throws Exception {
         Path file=write(user(),"review","","长".repeat(600));Files.writeString(file.getParent().resolve("ref.md"),"长".repeat(600));
         try(var service=new SkillService(new SkillSettings(user(),2048,256,256),new ToolRegistry())) {
-            service.beginTask(WorkspaceBinding.none());assertEquals(ToolResult.ErrorCode.SKILL_BUDGET_EXCEEDED,assertThrows(ToolException.class,()->service.activate("review",false)).code());
-            assertTrue(service.context().instructions().isEmpty());
+            service.beginTask(WorkspaceBinding.none());service.activate("review",false);
+            assertTrue(service.context().instructions().contains("长".repeat(600)));
+            assertEquals(ToolResult.ErrorCode.SKILL_BUDGET_EXCEEDED,assertThrows(ToolException.class,()->service.readResource("review","ref.md")).code());
         }
         try(var service=new SkillService(new SkillSettings(user(),2048,8192,256),new ToolRegistry())) {
             service.beginTask(WorkspaceBinding.none());service.activate("review",false);
@@ -241,6 +242,37 @@ class SkillModuleTest {
             assertEquals(ToolResult.ErrorCode.SKILL_INVALID,executor.execute(call("load_skill","{\"name\":\"publish\",\"explicit\":true}"),context()).errorCode());
             assertEquals(ToolResult.ErrorCode.PERMISSION_DENIED,executor.execute(call("load_skill","{\"name\":\"publish\"}"),context()).errorCode());
             assertEquals(ToolResult.ErrorCode.SKILL_INVALID,executor.execute(call("read_skill_resource","{\"skill\":\"publish\",\"path\":7}"),context()).errorCode());
+        }
+    }
+    @Test void bodyLargerThan8kLoadsAndTotalModelBudgetStillBlocksOversizedRequest()throws Exception {
+        write(user(),"review","","长".repeat(5000));var tools=new ToolRegistry();
+        try(var service=new SkillService(settings(),tools)) {
+            service.beginTask(WorkspaceBinding.none());service.activate("review",false);
+            var builder=new ContextBuilder().withSkills(service::context);var snapshot=builder.build(new Session("base").messages(),List.of(Message.user("review")),List.of(),WorkMode.REACT,1,20);
+            assertTrue(snapshot.tokens().skillInstructions()>8192);
+            var reserves=new io.github.jackfeicoder.codey.config.ContextBudgetSettings(512,512,new java.math.BigDecimal("0.8"));
+            var large=new ContextBudgetPolicy(new io.github.jackfeicoder.codey.config.ModelCapabilities(32768L),reserves);
+            var small=new ContextBudgetPolicy(new io.github.jackfeicoder.codey.config.ModelCapabilities(4096L),reserves);
+            assertTrue(large.evaluate(snapshot).canSend());assertFalse(small.evaluate(snapshot).canSend());
+            var agent=new AgentLoop(request->{throw new AssertionError("Over-budget request must not reach the model");},tools,20,DebugPrinter.NONE,builder,s->{},small);
+            assertThrows(ContextLimitException.class,()->agent.run(new Session("base"),"review",context()));assertEquals(SkillContext.EMPTY,service.context());
+        }
+    }
+    @Test void largeSkillStaysCompleteWhileAutomaticCompactionMakesRoomInTotalContext()throws Exception {
+        write(user(),"review","","长".repeat(5000));var tools=new ToolRegistry();
+        try(var service=new SkillService(settings(),tools)) {
+            service.beginTask(WorkspaceBinding.none());service.activate("review",false);
+            var builder=new ContextBuilder().withSkills(service::context);var session=new Session("base");
+            for(int i=0;i<4;i++)session.completeTurn("old-"+i,Message.assistant("x".repeat(12000)));
+            for(int i=0;i<3;i++)session.completeTurn("recent-"+i,Message.assistant("answer"));
+            var budget=new ContextBudgetPolicy(new io.github.jackfeicoder.codey.config.ModelCapabilities(32768L),
+                    new io.github.jackfeicoder.codey.config.ContextBudgetSettings(512,512,new java.math.BigDecimal("0.8")));
+            var cfg=new io.github.jackfeicoder.codey.config.CompactionSettings(true,new java.math.BigDecimal("0.8"),new java.math.BigDecimal("0.4"),3,512,8,5);
+            var summary=new SummaryDocument(List.of("goal"),List.of("constraint"),List.of("fact"),List.of("decision"),List.of("file"),List.of("test"),List.of("pending"),List.of("next"));
+            var compactor=new HistoryCompactor(request->new LlmResponse(Message.assistant(summary.json()),"stop",null),budget,cfg,builder,DebugPrinter.NONE);
+            var result=compactor.prepare(session,List.of(Message.user("continue")),List.of(),WorkMode.REACT,1,20,false);
+            assertTrue(result.changed(),result.reason());assertTrue(result.context().tokens().skillInstructions()>8192);
+            assertTrue(result.context().request().messages().toString().contains("长".repeat(5000)));assertTrue(budget.evaluate(result.context()).canSend());
         }
     }
 }

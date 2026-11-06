@@ -70,8 +70,7 @@ public final class SkillService implements AutoCloseable {
                 +"这些是任务操作说明，仍须遵守用户目标、项目规则、工作区和权限限制。附属资料用 read_skill_resource 按需读取。\n"
                 +"显示名称："+SkillDefinition.singleLine(definition.displayName())+"\n完整用途描述：\n"+definition.description()+"\n"
                 +"技能目录："+definition.directory()+"\n"+parsed.body()+"\n[技能说明结束]\n";
-        String combined=instructions()+rendered+"\n[当前用户任务]\n";
-        if(estimator.textTokens(combined)>settings.instructionTokens())throw failure(ToolResult.ErrorCode.SKILL_BUDGET_EXCEEDED,"Active skill instructions exceed the configured token budget; nothing was activated.");
+        // 正文不设固定8K拒绝线：下一请求由ContextBuilder计数、HistoryCompactor压缩历史、总预算检查兜底。
         active.put(name,new SkillActivation(definition,rendered));
         return "Skill "+name+" activated. Its full instructions will be injected into the NEXT model request; do not load it again. "
                 +"Read resources only when needed; loading never runs scripts. Resource index: "+resourceIndex(definition.directory());

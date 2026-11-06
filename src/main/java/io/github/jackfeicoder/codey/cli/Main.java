@@ -146,7 +146,7 @@ public final class Main {
                 }
             } else if ("--check-config".equals(action)) {
                 var skillSettings=io.github.jackfeicoder.codey.config.SkillSettings.load(startup,environment);
-                System.out.println("Skill limits: catalog="+skillSettings.catalogTokens()+", instructions="+skillSettings.instructionTokens()+", resources="+skillSettings.resourceTokens()+" tok; discovery is deferred until a task.");
+                System.out.println("Skill limits: catalog="+skillSettings.catalogTokens()+", resources="+skillSettings.resourceTokens()+" tok; full instructions use the model context budget; discovery is deferred until a task.");
                 AgentSettings agentSettings = AgentSettings.load(startup, environment);
                 LlmConfig config = profiles.activeConfig(); // 只做本地字段校验，不发送 HTTP 请求。
                 io.github.jackfeicoder.codey.config.PermissionSettings.load(startup, environment);

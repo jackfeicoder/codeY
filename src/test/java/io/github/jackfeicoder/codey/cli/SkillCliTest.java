@@ -60,6 +60,8 @@ class SkillCliTest {
     @Test void settingsResolveConfigDirectoryAndEnvironmentOverridesDotenv()throws Exception {
         Files.writeString(root.resolve(".env"),"CODEY_SKILLS_DIR=local-skills\nCODEY_SKILL_CATALOG_TOKENS=512\n");
         var settings=SkillSettings.load(root,Map.of("CODEY_SKILL_CATALOG_TOKENS","1024"));assertEquals(root.resolve("local-skills"),settings.userDirectory());assertEquals(1024,settings.catalogTokens());
+        assertEquals(0,settings.instructionTokens());
+        assertEquals(0,SkillSettings.load(root,Map.of("CODEY_SKILL_INSTRUCTION_TOKENS","8192")).instructionTokens());
         assertThrows(ConfigException.class,()->SkillSettings.load(root,Map.of("CODEY_SKILL_RESOURCE_TOKENS","not-a-number")));
     }
     @Test void menuUsesStableDirectoryIdAndDisplaysAuthorNameWithSingleLineSummary()throws Exception {

@@ -179,7 +179,7 @@ public final class ExecuteCommandTool implements Tool {
         return new ToolDefinition("execute_command", "仅用于已确认的项目任务中确有需要的构建、测试和诊断，在本地启动程序并返回 status/exitCode/stdout/stderr/超时与截断状态。"
                 + "独立单文件任务（例如单个 HTML/CSS/JS 文件）不使用本工具，修改和检查使用文件工具；用户只说测试一下也先做静态检查。"
                 + "绑定工作区目录不等于项目；先依据项目结构、配置或已有脚本确认项目及验证方式，不为每次文件修改强制运行程序。"
-                + "程序未找到时说明环境限制，不连续猜测 node/python/python3/powershell/git/cmd 等替代程序。"
+                + "COMMAND_NOT_FOUND只表示当前CodeY进程未定位到程序，不证明电脑没有安装；先核对PATH或使用用户已确认的程序绝对路径，不无依据要求重新安装，不连续猜测替代程序。"
                 + "退出码 0 不代表用户任务已完成；非零需分析日志后决定下一步。"
                 + "ask/auto 每次人工确认，full 跳过审批，plan 禁用。工作目录不是文件或网络沙箱；无交互输入。"
                 + "Windows 自动适配 .cmd/.bat，但批处理参数不支持引号、百分号、感叹号和 Shell 元字符。", schema);

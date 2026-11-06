@@ -47,7 +47,7 @@ public final class CommandResolver {
                 for (String word : words) if (word.chars().anyMatch(cp -> cp < 32 || "\"%!^&|<>()".indexOf(cp) >= 0))
                     throw new ToolException(ErrorCode.INVALID_ARGUMENTS,
                             "Windows batch arguments may not contain control characters or quote/%/!/caret/ampersand/pipe/redirection/parentheses. Use a direct executable with separate args.");
-                Path system = Path.of(System.getenv().getOrDefault("SystemRoot", "C:\\Windows"), "System32", "cmd.exe");
+                Path system = Path.of(Objects.requireNonNullElse(System.getenv("SystemRoot"), "C:\\Windows"), "System32", "cmd.exe");
                 if (!Files.isRegularFile(system)) throw new ToolException(ErrorCode.COMMAND_NOT_FOUND, "Windows command interpreter is unavailable.");
                 invocation.addAll(List.of(system.toString(), "/d", "/v:off", "/s", "/c"));
                 invocation.add("\"" + words.stream().map(word -> "\"" + word + "\"")
@@ -84,7 +84,8 @@ public final class CommandResolver {
             Path found = candidate(path.isAbsolute() ? path : directory.resolve(path));
             if (found != null) return found;
         } else {
-            String environment = System.getenv().getOrDefault("PATH", "");
+            // Windows 的 getenv(String) 按系统规则忽略变量名大小写；getenv() 返回的 Map.get 却区分大小写。
+            String environment = Objects.requireNonNullElse(System.getenv("PATH"), "");
             for (String entry : environment.split(java.util.regex.Pattern.quote(java.io.File.pathSeparator))) {
                 if (entry.isBlank()) continue;
                 if (entry.startsWith("\"") && entry.endsWith("\"")) entry = entry.substring(1, entry.length() - 1);
@@ -96,7 +97,7 @@ public final class CommandResolver {
                 } catch (java.nio.file.InvalidPathException ignored) { }
             }
         }
-        throw new ToolException(ErrorCode.COMMAND_NOT_FOUND, "Program was not found. Install it or use an explicit executable path.");
+        throw new ToolException(ErrorCode.COMMAND_NOT_FOUND, "Program was not found in this CodeY process PATH or at the supplied path. It may still be installed; use its executable path or restart CodeY after updating PATH.");
     }
 
     private static Path candidate(Path path) {

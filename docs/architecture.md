@@ -2189,6 +2189,8 @@ AgentLoop 收到模型 tool_call
 
 COMMAND_NOT_FOUND 表示定位失败，COMMAND_START_FAILED 表示启动/输入初始化失败；不回显任意底层异常。审批不可用、拒绝、PLAN、工作区/参数错误沿统一错误通道返回。中断尽力清理后抛 InterruptedException，执行器恢复中断标志，沿现有 Agent 中断逻辑停止本轮，不自动重试或提交半轮轨迹。进程实际文件副作用不因此回滚。
 
+Windows PATH兼容修复：`System.getenv().get("PATH")`的Map查找区分大小写，当实际键为Path时读取为空，导致Python、uv、curl等均被误报未找到。改用`System.getenv("PATH")`，SystemRoot同样使用单变量API，保留平台自己的大小写语义；Linux仍区分Path和PATH。真实子JVM分别注入两种拼写，使用临时程序验证解析，并回归已有命令工具测试。错误消息及工具描述明确说明“当前进程未定位到”不证明未安装，不自动修改系统PATH、绕过审批或猜测替代程序。
+
 两个日志流并发读取；各保留一半日志预算，超出的字节继续消费，避免管道满后死锁。保留缓冲有界，按宿主字符集解码，最后按 Unicode 码点限制；截断边界的残缺多字节字符可能显示替代字符，同时标记截断。最终 JSON 转义后若仍过大，继续缩短正文并设置各流截断标记，避免 ToolExecutor 截掉半个 JSON。启动前最小元数据预检失败时不产生进程副作用。
 
 ### 权限与 Windows
@@ -2975,7 +2977,11 @@ SkillActivation固定本任务正文。重复激活不重读、不重复添加�
 
 read_skill_resource只接受已激活名称及技能内相对路径，不接受任意绝对路径。检查规范化/真实路径边界、链接、普通文件、UTF-8及字节限制；不扩大read_file的工作区范围。资源首次读取结果进入普通工具历史，再次读取同规范路径返回已读取提示；资源正文不整包加载。scripts可以作为文本查看，加载从不执行脚本；现有execute_command的工作区、工程和审批约束仍适用，首版没有跨工作区执行用户技能脚本的新权限。
 
-目录/全部正文/全部首次资源默认分别2048/8192/8192估算token，由SkillSettings限制，最终还要通过模型总输入预算。目录省略会警告，未发布条目禁止模型猜名加载、仍可用户显式调用；正文/资源不足时拒绝，不静默截断。文件限制为SKILL.md 64KiB、frontmatter 8K字符、资源32KiB；每来源最多128候选/512条目录枚举。资源索引只看references/assets/scripts直接文件，最多32项且每目录枚举最多64项。
+目录/全部首次资源默认分别2048/8192估算token。正文完整加载，不再使用SkillSettings固定8K上限，统一交给ContextBuilder→HistoryCompactor→ContextBudgetPolicy：正文计入固定预算，旧历史按配置压缩，最终总输入超限时在发送前拒绝。旧CODEY_SKILL_INSTRUCTION_TOKENS忽略，旧构造参数为源码兼容保留并规范为0，不表示禁用技能。模型窗口未知时仍沿用既有UNKNOWN策略。目录省略会警告，未发布条目禁止模型猜名加载、仍可用户显式调用；资源额度不足时拒绝。文件限制为SKILL.md 64KiB、frontmatter 8K字符、资源32KiB；每来源最多128候选/512条目录枚举。资源索引只看references/assets/scripts直接文件，最多32项且每目录枚举最多64项。
+
+移除正文上限的依据：官方[Codex技能文档](https://learn.chatgpt.com/docs/build-skills)将初始目录预算与完整SKILL.md加载区分；[Claude Code技能文档](https://code.claude.com/docs/en/skills)同样将目录及按需正文分开，并建议大型参考资料拆分。本项目据此撤销自行增加的正文8K拒绝线，保留有界文件读取与统一上下文预算；不据此声称第三方产品不存在任何内部限制。本机CTF技能完整渲染约8565估算token，之前仅超过8192即被拒绝，现可完整激活；这里不执行技能脚本或实际CTF任务。
+
+正文预算调整验证：完整`mvn -q verify`共1024项通过，零失败/错误/跳过。新增覆盖大于8K技能完整加载、旧环境配置不再拒绝正文、小窗口总预算在请求前拦截，以及大技能保留完整、自动摘要压缩旧历史腾出空间。生产JAR再次通过6次本地模型请求的技能联测，并用本机8565估算token技能验证激活成功；没有执行其脚本。
 
 ContextSnapshot新增skillCatalog、skillInstructions、skillResources计数，保留旧构造器兼容。当前read_skill_resource的工具消息从toolResults移入skillResources，不重复计数；历史资源归history。HistoryCompactor共享同一ContextBuilder，因此活跃说明进入fixedTokens和候选校验，历史摘要不替换技能正文。目录与正文按任务重建，不需要向会话追加永不清理的技能大块文本。CLI预览没有当前任务，技能项为0；运行中的实际请求估算包含相应内容。
 

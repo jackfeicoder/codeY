@@ -432,6 +432,8 @@ ToolCall → Registry.find → Executor 解析 JSON / 检查工作区
 
 结果包含 `status`（completed/timed_out）、可空 `exitCode`、`stdout`、`stderr`、`durationMs`、`timedOut`、`stdoutTruncated`、`stderrTruncated`、`outputIncomplete`、`cleanupIncomplete`。外层 ToolResult.success 表示获得有效执行结果；completed + 非零 exitCode 表示程序报错。超时退出码为 null；找不到程序/启动失败分别返回 COMMAND_NOT_FOUND/COMMAND_START_FAILED。中断沿既有 INTERRUPTED 通道结束本轮；Agent 仍受单任务模型请求预算约束。
 
+Windows 程序定位使用`System.getenv("PATH")`遵循系统变量名大小写规则，兼容环境中的`Path`和`PATH`；不使用大小写敏感的环境Map读取固定大写键。`COMMAND_NOT_FOUND`表示当前CodeY进程未找到程序，不等于未安装；可使用已确认的可执行文件绝对路径，或在环境更新后重新启动终端和CodeY。裸名称仍只搜索绝对PATH条目，跳过空项/相对项，不隐式搜索工作目录。
+
 `ask`、`auto` 每次命令都人工批准，不复用文件授权，不建立长期命令授权。拒绝按真实程序、argv 和 cwd 摘要缓存，修改超时不会解除同一命令的拒绝；其他不同命令仍可独立确认，语义等价命令的识别不是完备的。`full` 跳过审批；`plan`、NONE 会话隐藏并强制拒绝命令工具。
 
 配置：`CODEY_COMMAND_TIMEOUT_SECONDS=60`、`CODEY_COMMAND_MAX_TIMEOUT_SECONDS=300`、`CODEY_COMMAND_MAX_OUTPUT_CHARS=8000`；`CODEY_COMMAND_CHARSET` 默认 Java 平台编码，可按实际程序设置 UTF-8/GBK，修改后重启。stdout/stderr 各保留一半码点预算，超出仍排空；JSON 转义后超出工具总预算会继续缩短日志并标记，保留合法 JSON。
@@ -1158,7 +1160,9 @@ user-invocable: true
 
 **按需资源**：`read_skill_resource({"skill":"code-review","path":"references/checklist.md"})` 只读取已激活技能内的UTF-8文本。真实路径边界、相对路径、链接、字节长度及token额度均检查；首次读取结果保留为工具消息，再次读取同路径只返回已读取提示，避免重复注入。资源正文不预加载，脚本源码可读取但不自动执行；第一版未增加用户级脚本越工作区执行能力。成功历史保留调用与资源结果，技能正文和激活状态不写回会话消息，旧调用记录不表示新任务已激活。
 
-**预算与边界**：默认目录2048、全部激活正文8192、全部首次资源8192估算token；分别可用 `CODEY_SKILL_CATALOG_TOKENS`、`CODEY_SKILL_INSTRUCTION_TOKENS`、`CODEY_SKILL_RESOURCE_TOKENS` 调整，仍服从模型总预算。`CODEY_SKILLS_DIR` 覆盖用户目录，相对配置目录解析，便于隔离测试。每来源最多128个技能候选、512个直接条目，SKILL.md最大64KiB/frontmatter最大8K字符，单资源32KiB。目录预算不足时警告并省略部分技能，省略项只能显式选择；正文或资源额度不足时拒绝加载，不截断核心步骤。现有工具输出仍受ToolExecutor截断标记约束。目录、正文在 `/context` 单独统计；本任务资源结果从其他工具结果中分离，历史资源计入历史。HistoryCompactor复用同一个ContextBuilder，当前激活正文进入固定预算、不会被历史摘要替换。
+**预算与边界**：目录默认2048、全部首次资源默认8192估算token，分别由`CODEY_SKILL_CATALOG_TOKENS`和`CODEY_SKILL_RESOURCE_TOKENS`控制。选中的技能正文完整加载，不再设置独立8K拒绝线，统一计入当前模型输入预算：每次请求前先尝试按原策略压缩旧历史，仍放不下则由ContextBudgetPolicy阻止请求，正文不被静默截断。旧`CODEY_SKILL_INSTRUCTION_TOKENS`已不再生效，已有.env无需手动修改该项；Java旧构造参数保留兼容并规范为0，表示服从统一预算而非禁用技能。模型容量未知时沿用已有UNKNOWN策略，不伪造已执行容量检查。
+
+`CODEY_SKILLS_DIR`覆盖用户目录，相对配置目录解析，便于隔离测试。每来源最多128个技能候选、512个直接条目，SKILL.md最大64KiB/frontmatter最大8K字符，单资源32KiB。目录预算不足时警告并省略部分技能，省略项只能显式选择；资源额度不足时拒绝读取。现有工具输出仍受ToolExecutor截断标记约束。目录、正文在`/context`单独统计；本任务资源结果从其他工具结果中分离，历史资源计入历史。HistoryCompactor复用同一个ContextBuilder，当前激活正文进入固定预算，不会被历史摘要替换。这里参考CC/Codex“目录摘要和选中正文分开管理”的原则，并不代表复制其所有额度、生命周期或压缩实现。
 
 **权限**：两个技能工具都是只读，可在PLAN下加载；技能内容作为当前任务说明而非更高优先级系统权限，不能修改工作区、解除PLAN或授予写入/外部调用权限。MCP依赖仍需模型召唤、审批；用户级资源读取不会扩大read_file范围。Skill不是脚本执行器或子Agent，也不保证导入其他产品技能后完整兼容其专属语义。
 
