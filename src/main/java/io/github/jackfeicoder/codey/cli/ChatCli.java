@@ -80,18 +80,23 @@ public final class ChatCli {
                 output.println("Unknown command. Available commands: /clear, /exit.");
                 continue;
             }
-            try {
+            var operation=input.beginOperation();
+            try (operation) {
                 answer(line);
             } catch (LlmException failed) {
-                input.theme().line(errors, ConsoleTheme.Tone.ERROR, "LLM error [" + failed.kind() + "]: " + failed.getMessage()
-                        + " This turn was not saved.");
-                if (context.hasWorkspace()) input.theme().line(errors, ConsoleTheme.Tone.ERROR, "工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
-                if (failed.kind() == LlmException.Kind.INTERRUPTED) {
-                    // 中断请求后结束交互，避免继续阻塞在终端输入。
-                    output.flush();
-                    errors.flush();
-                    return;
+                if (!(operation.cancelled() && failed.kind()==LlmException.Kind.INTERRUPTED)) {
+                    input.theme().line(errors, ConsoleTheme.Tone.ERROR, "LLM error [" + failed.kind() + "]: " + failed.getMessage()
+                            + " This turn was not saved.");
+                    if (context.hasWorkspace()) input.theme().line(errors, ConsoleTheme.Tone.ERROR, "工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
+                    if (failed.kind() == LlmException.Kind.INTERRUPTED) {
+                        // 非用户 Ctrl+C 的宿主线程中断仍向外退出。
+                        output.flush();
+                        errors.flush();
+                        return;
+                    }
                 }
+            } finally {
+                if(operation.cancelled())input.theme().line(output,ConsoleTheme.Tone.WARNING,"已停止当前操作，CodeY 仍在运行，可以继续输入。");
             }
             output.flush();
             errors.flush();

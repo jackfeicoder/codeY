@@ -33,6 +33,22 @@ public final class ConsoleInput implements AutoCloseable {
     /** 补全仅在空闲输入阶段访问目录，不执行技能。 */
     public void skillNames(Supplier<List<String>> names){skillNames=java.util.Objects.requireNonNull(names);}
     private org.jline.utils.Status footer;
+    /** 交互终端与退化的逐行输入共用相同任务取消语义。 */
+    private final OperationCancellation cancellation=new OperationCancellation();
+    private Terminal.SignalHandler previousInterruptHandler;
+    private Object previousSystemInterruptHandler;
+
+    OperationCancellation.Scope beginOperation(){return cancellation.begin();}
+    /** 包内入口也供审批取消使用；真正的系统信号由安装的处理器调用。 */
+    void cancelOperation(){cancellation.cancel();}
+
+    private void installTerminalInterruptHandler() {
+        previousInterruptHandler=terminal.handle(Terminal.Signal.INT,signal->cancelOperation());
+    }
+    /** 管道/TERM=dumb 也接管 SIGINT，避免没有 JLine 时恢复成 JVM 退出。 */
+    private void installSystemInterruptHandler() {
+        previousSystemInterruptHandler=org.jline.utils.Signals.register("INT",this::cancelOperation);
+    }
 
     /** 测试与重定向使用普通输入，不依赖原生终端。 */
     public ConsoleInput(BufferedReader plain, PrintWriter output) {
@@ -45,6 +61,7 @@ public final class ConsoleInput implements AutoCloseable {
         this(plain, output);
         this.terminal = java.util.Objects.requireNonNull(terminal);
         this.reader = createReader(terminal, new CommandCompleter(List::of, () -> completeCommands,()->skillNames.get()));
+        installTerminalInterruptHandler();
     }
 
     /** 仅真实控制台尝试启动 JLine；环境不支持时保留原输入功能。 */
@@ -52,16 +69,20 @@ public final class ConsoleInput implements AutoCloseable {
                                     Supplier<List<ModelProfiles.ProfileInfo>> models) {
         ConsoleInput input = new ConsoleInput(plain, output);
         String term = System.getenv("TERM");
-        if (System.console() == null || (term != null && term.startsWith("dumb"))) return input;
+        if (System.console() == null || (term != null && term.startsWith("dumb"))) {
+            input.installSystemInterruptHandler();return input;
+        }
         try {
-            input.terminal = TerminalBuilder.builder().system(true).dumb(false)
+            input.terminal = TerminalBuilder.builder().system(true).dumb(false).nativeSignals(true)
                     .encoding(System.console().charset()).build();
             input.reader = createReader(input.terminal, new CommandCompleter(models, () -> input.completeCommands,()->input.skillNames.get()));
+            input.installTerminalInterruptHandler();
         } catch (IOException | RuntimeException | LinkageError unsupported) {
             try { input.close(); } catch (IOException ignored) { }
             input.reader = null;
             input.terminal = null;
             output.println("当前终端未启用 Tab 补全，继续使用普通逐行输入。");
+            input.installSystemInterruptHandler();
         }
         return input;
     }
@@ -100,6 +121,9 @@ public final class ConsoleInput implements AutoCloseable {
         clean.setAmbiguousTimeout(original.getAmbiguousTimeout());
         // unbind 会保留空前缀节点，因此重建映射；MAIN 与 EMACS 原本指向同一个映射。
         lineReader.getKeyMaps().replaceAll((name, keys) -> keys == original ? clean : keys);
+        // SEND_BREAK 在当前 JLine 中只清空行；独立 widget 让审批/主输入都能明确识别取消。
+        lineReader.getWidgets().put("codey-cancel-input",()->{throw new UserInterruptException(lineReader.getBuffer().toString());});
+        lineReader.getKeyMaps().values().forEach(keys -> keys.bind(new org.jline.reader.Reference("codey-cancel-input"), "\u0003"));
         // 多个候选时直接进入菜单，方向键由 JLine 的菜单按键映射处理。
         lineReader.getWidgets().put("codey-complete", () -> {
             if (terminal.getHeight() < 4 || terminal.getWidth() < 20) {
@@ -156,7 +180,7 @@ public final class ConsoleInput implements AutoCloseable {
             if (framed) { output.println(theme().separator(terminal.getWidth())); output.flush(); }
             return value;
         }
-        catch (UserInterruptException cancelled) { return ""; }
+        catch (UserInterruptException cancelled) {Thread.interrupted();return "";}
         catch (EndOfFileException ended) { return null; }
     }
 
@@ -204,7 +228,8 @@ public final class ConsoleInput implements AutoCloseable {
         completeCommands = false;
         if (reader == null) { output.print(prompt); output.flush(); return plain.readLine(); }
         try { return reader.readLine(theme().text(ConsoleTheme.Tone.WARNING, prompt)); }
-        catch (UserInterruptException | EndOfFileException cancelled) { return null; }
+        catch (UserInterruptException cancelled) {Thread.interrupted();cancelOperation();return null;}
+        catch (EndOfFileException ended) {return null;}
     }
 
     /** 注册向导专用输入：关闭补全和编辑器历史；凭证在交互终端隐藏，EOF/Ctrl+C 取消。 */
@@ -221,7 +246,8 @@ public final class ConsoleInput implements AutoCloseable {
         Object previous = reader.getVariable(LineReader.DISABLE_HISTORY);
         reader.setVariable(LineReader.DISABLE_HISTORY,true);
         try { return reader.readLine(theme().text(ConsoleTheme.Tone.COMMAND,prompt), secret ? Character.valueOf('*') : null); }
-        catch (UserInterruptException | EndOfFileException cancelled) { return null; }
+        catch (UserInterruptException cancelled) {Thread.interrupted();return null;}
+        catch (EndOfFileException ended) {return null;}
         finally {
             if (previous == null) reader.getVariables().remove(LineReader.DISABLE_HISTORY);
             else reader.setVariable(LineReader.DISABLE_HISTORY,previous);
@@ -231,7 +257,19 @@ public final class ConsoleInput implements AutoCloseable {
     /** 关闭终端恢复原始模式，普通输入由进程持有。 */
     @Override
     public void close() throws IOException {
-        if (footer != null) footer.close();
-        if (terminal != null) terminal.close();
+        try {if (footer != null) footer.close();}
+        finally {
+            try {
+                if (terminal != null) {
+                    if(previousInterruptHandler!=null)terminal.handle(Terminal.Signal.INT,previousInterruptHandler);
+                    terminal.close();
+                }
+            } finally {
+                if(previousSystemInterruptHandler!=null) {
+                    org.jline.utils.Signals.unregister("INT",previousSystemInterruptHandler);
+                    previousSystemInterruptHandler=null;
+                }
+            }
+        }
     }
 }

@@ -326,7 +326,8 @@ public final class SessionLauncher {
                 if (line.isBlank()) continue;
                 if (!savePending()) continue; // 不覆盖未保存结果，也不重复调用模型。
                 String command = line.strip();
-                try {
+                var operation=input.beginOperation();
+                try (operation) {
                     if ("exit".equalsIgnoreCase(command)) {
                         if (browsing) {
                             output.println("Bye.");
@@ -420,12 +421,20 @@ public final class SessionLauncher {
                     input.theme().line(errors, ConsoleTheme.Tone.ERROR, (active != null && active.dirty() ? "未保存，结果仍在内存：" : "Session error: ")
                             + failed.getMessage());
                 } catch (LlmException failed) {
-                    input.theme().line(errors, ConsoleTheme.Tone.ERROR, "LLM error [" + failed.kind() + "]: " + failed.getMessage()
+                    if (!(operation.cancelled() && failed.kind()==LlmException.Kind.INTERRUPTED)) {
+                        input.theme().line(errors, ConsoleTheme.Tone.ERROR, "LLM error [" + failed.kind() + "]: " + failed.getMessage()
                             + (tasks==null ? " This turn was not saved." : " 本轮未提交成功历史；任务进度已独立保存，输入“继续”恢复。"));
-                    if (active != null && active.snapshot().workspace().mode() == WorkspaceBinding.Mode.DIRECTORY) {
-                        input.theme().line(errors, ConsoleTheme.Tone.ERROR, "工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
+                        if (active != null && active.snapshot().workspace().mode() == WorkspaceBinding.Mode.DIRECTORY) {
+                            input.theme().line(errors, ConsoleTheme.Tone.ERROR, "工具已执行的文件修改不会自动回滚；重试前请检查当前文件。");
+                        }
+                        if (failed.kind() == LlmException.Kind.INTERRUPTED) return 1;
                     }
-                    if (failed.kind() == LlmException.Kind.INTERRUPTED) return 1;
+                } finally {
+                    if(operation.cancelled()) {
+                        input.theme().line(output,ConsoleTheme.Tone.WARNING,"已停止当前操作，CodeY 仍在运行。可输入新问题，或输入“继续”恢复未完成任务。");
+                        if(active!=null && active.snapshot().workspace().mode()==WorkspaceBinding.Mode.DIRECTORY)
+                            output.println("已执行的文件修改不会自动回滚。");
+                    }
                 }
                 output.flush();
                 errors.flush();

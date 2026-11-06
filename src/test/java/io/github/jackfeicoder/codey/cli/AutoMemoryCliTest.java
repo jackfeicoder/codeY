@@ -77,7 +77,9 @@ class AutoMemoryCliTest {
         failMain = true;
         run("以后解释Java时附带面试示例\n/exit\n");
         assertEquals(1, requests.size()); assertTrue(memory().list(WorkspaceBinding.none()).isEmpty());
-        assertTrue(store().list().sessions().isEmpty()); assertFalse(Files.exists(root.resolve("data/memory/extractions")));
+        assertEquals(1,store().list().sessions().size());
+        assertTrue(store().list().sessions().get(0).messages().isEmpty());
+        assertFalse(Files.exists(root.resolve("data/memory/extractions")));
     }
     @Test void restoringHistoryDoesNotReplayOldExtraction() throws Exception {
         run("以后解释Java时附带面试示例\n/exit\n");
