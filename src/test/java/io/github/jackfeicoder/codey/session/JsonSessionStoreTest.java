@@ -192,11 +192,17 @@ class JsonSessionStoreTest {
 
     /** 用户标题不会参与路径定位；加载仅接受 UUID。 */
     @Test
-    void refusesPathSelectorsAndHidesEmptySessions() {
+    void refusesPathSelectorsAndListsEmptySessionsAfterReopening() {
         JsonSessionStore store = new JsonSessionStore(directory);
-        try (SessionService ignored = SessionService.create(store, WorkspaceBinding.none(), "fixture", "base", "title")) {
-            assertTrue(store.list().sessions().isEmpty());
+        String id;
+        try (SessionService service = SessionService.create(store, WorkspaceBinding.none(), "fixture", "base", "title")) {
+            id=service.snapshot().id();
+            assertEquals(1,store.list().sessions().size());
         }
+        var listing=new JsonSessionStore(directory).list();
+        assertEquals(1,listing.sessions().size());
+        assertEquals(id,listing.sessions().get(0).id());
+        assertTrue(listing.sessions().get(0).messages().isEmpty());
         assertThrows(SessionException.class, () -> store.load("../outside"));
         assertThrows(SessionException.class, () -> store.lock("../outside", true));
     }

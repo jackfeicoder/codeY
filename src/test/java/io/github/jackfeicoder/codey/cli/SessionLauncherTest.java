@@ -345,6 +345,23 @@ class SessionLauncherTest {
         assertTrue(harness.store.list().sessions().isEmpty());
     }
 
+    /** 显式新建但未发消息，重启后仍能在列表选择原会话开始聊天。 */
+    @Test
+    void newlyCreatedEmptySessionRemainsSelectableAfterRestart() throws Exception {
+        var store=new JsonSessionStore(directory);
+        var first=new Harness(store,false);
+        first.run("/exit\n",new SessionLauncher.Options(null,true,"尚未开始",null,null));
+        assertTrue(first.requests.isEmpty());
+        var saved=store.list().sessions().get(0);
+        assertTrue(saved.messages().isEmpty());
+        var second=new Harness(store,false);
+        second.run("1\nhello\n/exit\n",emptyOptions());
+        assertTrue(second.output.toString().contains("尚未开始"));
+        assertEquals(1,second.requests.size());
+        assertEquals(1,store.list().sessions().size());
+        assertEquals(2,store.load(saved.id()).messages().size());
+    }
+
     /** 保存持续失败时阻止下一轮调用，退出明确失败，不丢弃 dirty 状态后继续工作。 */
     @Test
     void writeFailurePreventsFurtherModelCallsAndReturnsFailureOnExit() throws Exception {
@@ -369,7 +386,8 @@ class SessionLauncherTest {
                 new SessionLauncher.Options(null, true, "title", null, null)));
         assertEquals(1, harness.requests.size());
         assertTrue(harness.errors.toString().contains("未保存"));
-        assertTrue(real.list().sessions().isEmpty());
+        assertEquals(1,real.list().sessions().size());
+        assertTrue(real.list().sessions().get(0).messages().isEmpty());
     }
 
     /** /resume 的参数可用纯数字标题，浏览模式的裸数字仍表示列表序号。 */
@@ -385,7 +403,7 @@ class SessionLauncherTest {
         assertEquals(0, eof.modelChoices);
     }
 
-    /** 空会话不在默认列表，但用户已知完整 ID 时仍可恢复后开始第一轮。 */
+    /** 空会话在默认列表可见，完整 ID 同样可恢复后开始第一轮。 */
     @Test
     void knownFullIdCanRestoreEmptySession() throws Exception {
         JsonSessionStore store = new JsonSessionStore(directory);

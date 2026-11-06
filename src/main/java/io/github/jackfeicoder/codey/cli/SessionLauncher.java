@@ -550,7 +550,7 @@ public final class SessionLauncher {
         }
         if (matches.isEmpty() && (!allowNumber || !selector.matches("[0-9]+") || selector.length() >= 8)) {
             String normalizedId = selector.toLowerCase(java.util.Locale.ROOT);
-            // 空会话默认不在列表中，但已知完整 UUID 仍可直接恢复。
+            // 已知完整 UUID 时直接加载，不受最近列表分页限制。
             if (SessionSnapshot.validId(normalizedId)) matches.add(store.load(normalizedId));
             for (SessionSnapshot snapshot : store.list().sessions()) {
                 boolean id = selector.length() >= 8 && snapshot.id().startsWith(selector.toLowerCase(java.util.Locale.ROOT));
