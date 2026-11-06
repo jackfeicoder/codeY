@@ -22,9 +22,11 @@ public record ApprovalRequest(String tool, Path root, Path target, String operat
         }
     }
     /** 文件权限授权按这个规范化目标保存；不同工作区、不同文件不会共用。 */
-    public String displayTarget() { return target == null ? (command() ? "本地命令（逐次审批）" : "未分类操作") : root.relativize(target).toString().replace('\\', '/'); }
+    public String displayTarget() { return target == null ? (webSearch()?"互联网搜索":command() ? "本地命令（逐次审批）" : "未分类操作") : root.relativize(target).toString().replace('\\', '/'); }
     /** 此类别只由可信工具构造，不由模型的参数或批准文本决定。 */
     public boolean command() { return "execute_command".equals(operation); }
+    /** 固定内置搜索类别，不授权任意联网或 MCP。 */
+    public boolean webSearch() {return "web_search".equals(tool) && "web_search".equals(operation) && target==null;}
     public String denialKey() { return tool + (actionKey == null ? "" : ":" + actionKey); }
     /** 审批范围由宿主模式决定，不接受模型指定。auto 的风险操作只批准当前一次。 */
     public ApprovalRequest reviewScope(boolean grantFile) {

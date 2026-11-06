@@ -8,7 +8,7 @@
 
 Skill 第一版已实现：用户/项目目录自动发现、`/skills` 菜单、`/skill 名称 任务`、模型按描述选择 `load_skill`、正文按需注入及文本资源读取。仓库 `.agents/skills` 带有代码审查与测试排查两个示例；使用方式见 [Skill 模块](#module-skill)。
 
-当前已完成多模型配置、消息与基础提示词、普通与 SSE 流式调用、本地会话保存/恢复、六个文件工具、execute_command 本地命令、Agent 循环、权限审批及 ReAct/Plan 切换。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。专用网络/删除工具、进程沙箱、多 Agent 尚待实现；MCP 默认休眠、按需召唤已实现；长期记忆的管理、条件自动提取、模型整理与关键词召回已实现；验证使用本地模拟模型，真实厂商兼容性需另行验证。
+当前已完成多模型配置、消息与基础提示词、普通与 SSE 流式调用、本地会话保存/恢复、六个文件工具、execute_command 本地命令、Agent 循环、权限审批及 ReAct/Plan 切换。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。网页正文抓取和删除工具、进程沙箱、多 Agent 尚待实现；MCP 默认休眠、按需召唤已实现；长期记忆的管理、条件自动提取、模型整理与关键词召回已实现；验证使用本地模拟模型，真实厂商兼容性需另行验证。
 
 工作区会话已注册 `list_files`、`search_file`、`grep_code` 与 `read_file`：模型可浏览目录、按名称定位或按正文关键词搜索，再读取内容。工具描述通过结构化 `tools` 字段发送，由 AgentLoop 执行并回填结果，继续请求最终回答。默认每个任务最多请求模型 20 次，最后一次禁用工具用于收尾；完成的工具消息组随会话保存，恢复时不自动重放。说明见 [正文搜索](docs/architecture.md#grep-code)、[文件定位](docs/architecture.md#search-file)、[目录工具](docs/architecture.md#list-files)、[读文件工具](docs/architecture.md#read-file) 和 [Agent 循环](docs/architecture.md#agent-loop)。
 
@@ -35,6 +35,7 @@ Skill 第一版已实现：用户/项目目录自动发现、`/skills` 菜单、
 | [会话管理模块](#module-session) | 已实现：内存历史、本地保存/恢复与标题 |
 | [任务管理与恢复模块](#module-task) | 已实现：会话绑定、执行事件落盘、失败继续、提交恢复与托管临时目录清理 |
 | [工具模块](#module-tool) | 已实现六个文件工具及 execute_command，已接入模型、审批和 CLI |
+| [网络搜索](#module-web-search) | 已实现 web_search、Tavily 主服务、可选 Brave 备用、联网审批与有界故障切换 |
 | [Agent 执行模块](#module-agent) | 已实现：工具循环、轮次预算、中断与完成状态 |
 | [上下文模块](#module-context) | 已实现模型容量、统一组装、Token 估算、输入预算与有界历史摘要 |
 | [项目规则模块](#module-instruction) | 已实现根目录 AGENTS.md、/init、大小校验、动态加载与上下文计数 |
@@ -78,6 +79,37 @@ CODEY_DATA_DIR/sessions/<会话ID>/
 命令进程获得 `CODEY_TASK_TMP_DIR`，可将临时脚本和中间数据写入其中。文件工具仍受工作区边界约束；第三方 MCP/脚本是否使用该目录由其实现决定。清理仅针对本任务的 `tmp/` 和检查点，执行日志、用户交付文件、工作区文件及第三方缓存保留。
 
 第一版恢复执行记录，不恢复运行中的进程、网络事务或审批授权。日志包含用户/工具正文，以本地明文存储；单任务日志上限 64MiB，超限停止新调用。当前任务仍受模型上下文预算约束，尚无任务内部压缩或自动无限续跑。`--prompt` 保持临时单条任务，持久恢复用于交互会话。设计细节见 [任务恢复](docs/architecture.md#task-recovery)。
+
+<a id="module-web-search"></a>
+
+## 网络搜索模块
+
+`web_search`通过独立搜索API返回标题、真实URL和相关片段，适用于官方文档、版本变更和外部信息查询。与LLM供应商解耦，无工作区也可使用。结果不是完整网页；网页正文读取`web_fetch`尚未实现。
+
+在`.env`启用（默认关闭，不读取或使用LLM密钥）：
+
+```dotenv
+CODEY_WEB_SEARCH_ENABLED=true
+CODEY_WEB_SEARCH_PROVIDERS=tavily
+CODEY_TAVILY_API_KEY=你的搜索服务密钥
+```
+
+可选备用：将服务顺序设置为`CODEY_WEB_SEARCH_PROVIDERS=tavily,brave`，并添加`CODEY_BRAVE_API_KEY`。没有配置备用就不会自动切换到其他服务。配置需重启后生效，无需编译。`/permissions auto`允许普通公开搜索，`ask`逐次确认搜索词及服务顺序，`full`跳过常规审批；Plan遵循相同联网权限。自动模式的敏感查询识别是基础规则，不能保证识别全部私密内容。无交互审批的旧`--prompt`入口仍使用默认ask，搜索可能返回APPROVAL_REQUIRED。
+
+模型参数：`query`必填；`maxResults`默认5、范围1～10；`allowedDomains`可选、最多10个纯域名；`timeRange`为any/day/week/month/year。例如直接说“联网查询 Java 17 HttpClient 的取消机制，优先官方文档”。工具定义经ToolRegistry发布，策略写在现有`prompts/base.md`；老会话沿用原基础提示词快照，但会收到最新工具描述。
+
+| 文件 | 功能 |
+|---|---|
+| `config/WebSearchSettings.java` | 独立密钥、服务顺序、端点和预算配置 |
+| `tool/builtin/WebSearchTool.java` | JSON Schema、参数校验和联网审批 |
+| `tool/web/WebSearchClient.java`、Request/Response | 厂商无关协议与数据结构 |
+| `TavilySearchClient.java`、`BraveSearchClient.java` | 请求参数/鉴权和返回结构适配 |
+| `WebSearchService.java` | 每次任务尝试预算、有序切换、来源ID和输出上限 |
+| `SearchHttp.java`、`SearchResults.java`、`WebSearchFailure.java` | 可取消HTTP、正文限额、来源过滤和诊断分类 |
+
+执行流程：`AgentLoop → ToolExecutor → WebSearchTool.prepare → 权限审批 → WebSearchService → 当前服务适配器 → 统一结果回填`。超时、网络故障、HTTP408/429/5xx才按顺序尝试备用，每家至多一次；空结果、400/401/403、格式错误、审批拒绝和取消不切换。结果包含实际服务、每次尝试状态/HTTP码、检索时间、来源ID和截断标记；文章发布时间只在服务提供时填写。不会抓取搜索结果页面，也不自动执行搜索片段中的命令。
+
+默认每服务超时20秒、整次搜索35秒、每次任务执行尝试最多5次逻辑搜索，通过`CODEY_WEB_SEARCH_TIMEOUT_SECONDS`、`CODEY_WEB_SEARCH_TOTAL_TIMEOUT_SECONDS`、`CODEY_WEB_SEARCH_MAX_CALLS`调整。一次逻辑搜索可包含主/备用各一次API请求；任务结束或用户继续原任务时重新分配本次额度。HTTP正文最多2MiB，结果受现有工具输出上限约束，保持完整JSON。Ctrl+C取消当前请求后停止切换，已完成结果沿用任务持久化/恢复机制。仅本地模拟测试验证协议和故障链，真实服务可用性、额度及搜索质量需用个人账号实测。
 
 ## 技术基线
 

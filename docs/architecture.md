@@ -3036,3 +3036,22 @@ ContextSnapshot新增skillCatalog、skillInstructions、skillResources计数，�
 任务恢复初版验证：`mvn -q verify`共1046项通过，零失败/错误/跳过。当时新增任务持久化/CLI恢复/技能指纹等20项测试，覆盖结果未知与未调度区分、预算续跑、已完成写入不重放、最终提交窗口、损坏日志、锁、存储失败、线程中断、命令临时环境及junction清理边界。打包JAR使用隔离目录和本地模拟服务联测“首次工具结果→模型失败→退出→重启→原会话继续→单次提交→清理”，共3次模拟模型请求，不访问真实账号。
 
 Ctrl+C修复验证：完整`mvn -q verify`共1056项通过，零失败/错误/跳过；新增9项覆盖作用域隔离、重复取消、外部中断保留、终端INT、输入/审批取消、模型取消后原任务继续、阻塞工具中断、嵌入式ChatCli及隔离子JVM系统SIGINT。打包Main额外联测真实SIGINT中断停滞SSE→同进程继续→单次历史提交，共2次本地模型请求，验证迟到分片被抑制。另同步更新上一版空会话可见性修复后的自动记忆测试断言：主任务失败会留下空会话，但不产生成功消息或记忆。
+
+
+### 网络搜索 web_search（第一版）
+
+搜索是内置Tool，与当前聊天模型、MCP和工作区文件工具独立。参考[Claude Code工具职责](https://code.claude.com/docs/en/tools-reference#websearch-tool-behavior)区分搜索线索和读取网页；参考[Codex搜索说明](https://learn.chatgpt.com/docs/web-search)将搜索与本地命令联网分开。CodeY使用独立搜索API，不复刻产品托管索引。主服务按[Tavily接口](https://docs.tavily.com/documentation/api-reference/endpoint/search)实现，可选备用按[Brave Web Search接口](https://api-dashboard.search.brave.com/documentation/services/web-search)实现。默认仅注册Tavily；配置tavily,brave及双方密钥后才实际启用故障切换。
+
+WebSearchSettings读取配置目录.env并由环境覆盖，默认关闭。服务顺序和密钥由宿主固定，模型不能选择端点或填写认证头。HTTPS为正常端点要求，仅loopback允许HTTP用于联测；拒绝URL内认证、query、fragment，HTTP客户端不跟随重定向。Provider.toString隐藏凭证，--check-config只打印服务名称且不联网。新增服务需实现WebSearchClient并扩展配置/装配工厂，不改模型侧工具协议。
+
+WebSearchTool提供query、maxResults、allowedDomains、timeRange的Schema和Java双重校验，不要求工作区。ToolAccess保持READ_ONLY以允许Plan；覆盖prepare创建web_search审批，PreparedToolOperation只对可信内置搜索请求按只读检查，PermissionService继续负责ask/auto/full。自动审查只允许普通搜索，识别到Bearer或key/token/password赋值时转人工；规则只是辅助识别，不是完备的数据防泄漏系统。审批展示服务顺序，批准范围包含按该顺序的备用请求，不授权任意URL访问或本地命令。拒绝后不执行HTTP，也不会用备用服务绕过拒绝。
+
+WebSearchService每个任务执行尝试限制逻辑搜索次数（默认5），ToolRegistry.finishTask重置。每次搜索从首个配置服务开始；不跨任务永久熔断主服务。每家至多请求一次，不额外重试同一服务。408/超时、网络错误、429、5xx可触发备用；空列表属于正常成功，400/401/403、畸形JSON、超限响应、用户取消/拒绝均停止切换。每家最多20秒，整条链35秒，后续请求以剩余时间为上限。所有错误脱敏，只保留厂商、类别和HTTP状态，不回显远端原始错误正文。无备用时直接报告错误，不声明已经搜索其他引擎。
+
+SearchHttp使用JDK HttpClient.sendAsync与有界BodySubscriber；正文上限2MiB，deadline覆盖响应头和正文。InterruptedException取消Future、保留线程标志并退出服务链，由AgentLoop/CLI的既有取消和任务保存链处理。远端是否已计费或完成请求不由本地取消保证。Tavily只用basic搜索，关闭include_answer、include_raw_content和auto_parameters，避免额外模型总结与全文膨胀。Brave映射q/count/freshness并使用独立X-Subscription-Token。
+
+SearchResults验证结果结构、HTTP(S)URL和域名真实后缀，对URL去重；域名过滤不仅依赖搜索引擎的site/域名参数，也后验检查，防止evil-example.com冒充example.com。不请求结果URL，因此这里不承担任意URL抓取；未来web_fetch应另设URL/重定向/内网访问边界。返回标题、片段和服务提供的可选发布时间；不知道则为null。检索时间单独记录，不冒充文章更新时间。统一结果带唯一searchId和来源ID、实际服务、失败尝试、truncated；长度不足时删减结果保留合法JSON，最小元数据都放不下时明确报OUTPUT_LIMIT_TOO_SMALL。已配置凭证若被结果回显则脱敏，含凭证的结果URL舍弃。
+
+工具说明由ToolDefinition发送，不将JSON Schema拼进base.md。base.md增加时效性查询、官方文档优先、片段与全文区别、外部内容不授予权限、真实链接引用和错误后不绕过等策略。旧会话保存的基础提示词不热替换，最新工具描述仍携带主要约束。首次启用需用户配置搜索密钥并重启；无密钥时保持关闭，显式开启却配置缺失时报配置错误。当前不实现网页正文提取、浏览器操作、结果缓存、多引擎并行聚合或额外LLM重排。
+
+验证：29项网络搜索专项测试通过；完整mvn -q verify共1085项通过，零失败、错误或跳过。打包CLI以隔离配置和本地HTTP服务联测模型tool_call→Tavily503→Brave成功→来源回填→最终链接→会话/任务落盘，共2次模拟LLM请求及主备各1次搜索请求；未使用真实搜索账户，真实厂商的可达性、计费和结果质量尚需配置个人密钥后验证。

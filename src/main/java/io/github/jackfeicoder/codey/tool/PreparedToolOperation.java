@@ -19,7 +19,7 @@ public final class PreparedToolOperation {
     public String execute(ToolContext context) throws InterruptedException {
         context.permissions().checkWorkspace(context.workspace());
         if (approval != null) {
-            PermissionPolicy.check(context.workMode(), approval.command() ? ToolAccess.PROCESS
+            PermissionPolicy.check(context.workMode(), approval.webSearch() ? ToolAccess.READ_ONLY : approval.command() ? ToolAccess.PROCESS
                     : approval.target() == null ? ToolAccess.UNKNOWN : ToolAccess.FILE_MUTATION);
             context.permissions().authorize(approval);
         }
