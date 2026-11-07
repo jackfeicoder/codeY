@@ -6,7 +6,7 @@ public interface ApprovalReviewer {
     enum Verdict { ALLOW, HUMAN }
     Verdict review(ApprovalRequest request);
     static ApprovalReviewer rules() {
-        return request -> (request.target() != null || request.webSearch()) && !request.sensitive() && !request.destructive()
+        return request -> (request.target() != null || request.webSearch() || request.webFetch()) && !request.sensitive() && !request.destructive()
                 ? Verdict.ALLOW : Verdict.HUMAN;
     }
 }

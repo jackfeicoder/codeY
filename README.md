@@ -8,7 +8,7 @@
 
 Skill 第一版已实现：用户/项目目录自动发现、`/skills` 菜单、`/skill 名称 任务`、模型按描述选择 `load_skill`、正文按需注入及文本资源读取。仓库 `.agents/skills` 带有代码审查与测试排查两个示例；使用方式见 [Skill 模块](#module-skill)。
 
-当前已完成多模型配置、消息与基础提示词、普通与 SSE 流式调用、本地会话保存/恢复、六个文件工具、execute_command 本地命令、Agent 循环、权限审批及 ReAct/Plan 切换。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。网页正文抓取和删除工具、进程沙箱、多 Agent 尚待实现；MCP 默认休眠、按需召唤已实现；长期记忆的管理、条件自动提取、模型整理与关键词召回已实现；验证使用本地模拟模型，真实厂商兼容性需另行验证。
+当前已完成多模型配置、消息与基础提示词、普通与 SSE 流式调用、本地会话保存/恢复、六个文件工具、execute_command 本地命令、Agent 循环、权限审批及 ReAct/Plan 切换。无参数或 `--chat` 展示所有工作区最近 10 条会话，支持分页、新建、标题/ID 恢复、改名、可选工作区和自动标题。`--prompt` 执行无工作区的单条任务。删除工具、进程沙箱、多 Agent 尚待实现；MCP 默认休眠、按需召唤已实现；长期记忆的管理、条件自动提取、模型整理与关键词召回已实现；验证使用本地模拟模型，真实厂商兼容性需另行验证。
 
 工作区会话已注册 `list_files`、`search_file`、`grep_code` 与 `read_file`：模型可浏览目录、按名称定位或按正文关键词搜索，再读取内容。工具描述通过结构化 `tools` 字段发送，由 AgentLoop 执行并回填结果，继续请求最终回答。默认每个任务最多请求模型 20 次，最后一次禁用工具用于收尾；完成的工具消息组随会话保存，恢复时不自动重放。说明见 [正文搜索](docs/architecture.md#grep-code)、[文件定位](docs/architecture.md#search-file)、[目录工具](docs/architecture.md#list-files)、[读文件工具](docs/architecture.md#read-file) 和 [Agent 循环](docs/architecture.md#agent-loop)。
 
@@ -36,6 +36,7 @@ Skill 第一版已实现：用户/项目目录自动发现、`/skills` 菜单、
 | [任务管理与恢复模块](#module-task) | 已实现：会话绑定、执行事件落盘、失败继续、提交恢复与托管临时目录清理 |
 | [工具模块](#module-tool) | 已实现六个文件工具及 execute_command，已接入模型、审批和 CLI |
 | [网络搜索](#module-web-search) | 已实现 web_search、Tavily/Brave/SerpApi 适配、联网审批与有序故障切换 |
+| [网页读取](#module-web-fetch) | 已实现静态正文提取、分页快照、地址/资源限制、审批与取消 |
 | [Agent 执行模块](#module-agent) | 已实现：工具循环、轮次预算、中断与完成状态 |
 | [上下文模块](#module-context) | 已实现模型容量、统一组装、Token 估算、输入预算与有界历史摘要 |
 | [项目规则模块](#module-instruction) | 已实现根目录 AGENTS.md、/init、大小校验、动态加载与上下文计数 |
@@ -84,7 +85,7 @@ CODEY_DATA_DIR/sessions/<会话ID>/
 
 ## 网络搜索模块
 
-`web_search`通过独立搜索API返回标题、真实URL和相关片段，适用于官方文档、版本变更和外部信息查询。与LLM供应商解耦，无工作区也可使用。结果不是完整网页；网页正文读取`web_fetch`尚未实现。
+`web_search`通过独立搜索API返回标题、真实URL和相关片段，适用于官方文档、版本变更和外部信息查询。与LLM供应商解耦，无工作区也可使用。结果不是完整网页；需要原文时由`web_fetch`读取。
 
 在`.env`启用（默认关闭，不读取或使用LLM密钥）：
 
@@ -112,6 +113,29 @@ SerpApi 也可作为备用：设置`CODEY_WEB_SEARCH_PROVIDERS=tavily,serpapi`�
 执行流程：`AgentLoop → ToolExecutor → WebSearchTool.prepare → 权限审批 → WebSearchService → 当前服务适配器 → 统一结果回填`。超时、网络故障、HTTP408/429/5xx才按顺序尝试备用，每家至多一次；空结果、400/401/403、格式错误、审批拒绝和取消不切换。结果包含实际服务、每次尝试状态/HTTP码、检索时间、来源ID和截断标记；文章发布时间只在服务提供时填写。不会抓取搜索结果页面，也不自动执行搜索片段中的命令。
 
 默认每服务超时20秒、整次搜索35秒、每次任务执行尝试最多5次逻辑搜索，通过`CODEY_WEB_SEARCH_TIMEOUT_SECONDS`、`CODEY_WEB_SEARCH_TOTAL_TIMEOUT_SECONDS`、`CODEY_WEB_SEARCH_MAX_CALLS`调整。一次逻辑搜索可包含主/备用各一次API请求；任务结束或用户继续原任务时重新分配本次额度。HTTP正文最多2MiB，结果受现有工具输出上限约束，保持完整JSON。Ctrl+C取消当前请求后停止切换，已完成结果沿用任务持久化/恢复机制。仅本地模拟测试验证协议和故障链，真实服务可用性、额度及搜索质量需用个人账号实测。
+
+<a id="module-web-fetch"></a>
+
+## 网页读取模块
+
+`web_fetch`读取用户链接或搜索结果中的公开网页，返回带行号的静态正文、来源URL、获取时间、正文指纹和分页信息。默认启用，不需要搜索服务密钥，无工作区也可使用；当前支持HTML、Markdown和纯文本，不执行JavaScript、不登录、不解析PDF/图片。
+
+用法：直接告诉Agent“读取 https://example.com 这页内容”。模型参数为`url`、`startLine`（默认1）、`maxLines`（默认120，上限300）。`hasMore/nextLine`用于继续阅读，`truncated`表示本段受到工具输出上限限制。正文先清洗并将超长行固定折行，再统一编号；同一任务分页沿用快照，核对`contentHash`可避免混用页面版本。
+
+| 文件 | 职责 |
+|---|---|
+| `config/WebFetchSettings.java` | 启用开关、下载超时、字节及次数上限 |
+| `tool/builtin/WebFetchTool.java` | 描述/Schema、参数校验和联网审批 |
+| `tool/web/WebAddressPolicy.java` | URL规范化、公开地址限制及连接时DNS校验 |
+| `tool/web/FetchHttpClient.java` | 无认证下载、重定向、总超时、大小限制与取消 |
+| `tool/web/WebContentExtractor.java` | Jsoup静态正文提取、编码处理、代码/列表/链接保留 |
+| `tool/web/WebFetchService.java`、Request/Response | 任务快照缓存、分段输出和结果元数据 |
+
+执行链：`AgentLoop → ToolExecutor → WebFetchTool.prepare → 权限 → FetchHttpClient → 正文提取 → 任务快照 → 分段结果回填`。ask逐次确认URL，auto允许普通公开页面，full跳过常规审批；Plan允许读取但仍走联网权限。HTTP升级HTTPS，仅使用标准端口，拒绝URL认证、已知令牌参数和本地/私网/保留地址；连接时的DNS解析返回经过检查的实际地址，不在检查后重新解析。默认不使用系统代理、不发送搜索密钥、Cookie或登录凭证。同域跳转重新校验，最多3跳；跨域跳转只返回`redirectUrl`，正文未读，需另发请求并重新检查权限。
+
+默认`CODEY_WEB_FETCH_TIMEOUT_SECONDS=20`、`CODEY_WEB_FETCH_MAX_BYTES=2097152`（压缩前后各自限制）、`CODEY_WEB_FETCH_MAX_CALLS=10`（每任务执行尝试的下载次数）。`CODEY_WEB_FETCH_ENABLED=false`可关闭。任务内最多缓存8页、总正文约4M字符，不额外调用LLM摘要；分页命中缓存不再下载。完成/失败均释放内存缓存，已返回片段由任务日志保存；恢复后重新下载可能得到不同hash。这里是任务级快照，没有跨任务缓存或浏览器进程。
+
+Ctrl+C取消当前下载并返回CLI；网络、HTTP错误、超限和不支持的内容类型分别报告，不无限重试。当前任务只保留返回过的段落，不把网页全文存进会话。旧会话继续使用原base.md快照，但每次请求会提供最新工具定义和关键约束。CLI的旧无交互`--prompt`入口仍使用默认ask，没有审批时会返回APPROVAL_REQUIRED。
 
 ## 技术基线
 

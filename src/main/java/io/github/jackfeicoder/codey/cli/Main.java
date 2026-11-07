@@ -153,6 +153,7 @@ public final class Main {
                 CommandSettings.load(startup, environment);
                 var search=io.github.jackfeicoder.codey.config.WebSearchSettings.load(startup,environment);
                 System.out.println("Web search: "+(search.enabled()?search.providers().stream().map(p->p.name()).toList():"disabled"));
+                System.out.println("Web fetch: "+io.github.jackfeicoder.codey.config.WebFetchSettings.load(startup,environment).enabled());
                 StreamingSettings.load(startup, environment);
                 var capabilities = ModelCapabilitiesLoader.load(startup, environment, profiles.activeProfile(), config.model());
                 var budget = new ContextBudgetPolicy(capabilities, ContextBudgetSettings.load(startup, environment)).evaluate(0);
@@ -194,7 +195,7 @@ public final class Main {
                     return memories.select(WorkspaceBinding.none(), query, limit == null ? Long.MAX_VALUE : Math.max(0, limit - used));
                 });
                 AgentResult result;
-                var promptTools = createTools(agentSettings, CommandSettings.load(startup, environment),io.github.jackfeicoder.codey.config.WebSearchSettings.load(startup,environment));
+                var promptTools = createTools(agentSettings, CommandSettings.load(startup, environment),io.github.jackfeicoder.codey.config.WebSearchSettings.load(startup,environment),io.github.jackfeicoder.codey.config.WebFetchSettings.load(startup,environment));
                 try (var auth = new io.github.jackfeicoder.codey.mcp.oauth.OAuthManager(
                         new io.github.jackfeicoder.codey.mcp.oauth.OAuthTokenStore(SessionSettings.load(startup, environment).dataDirectory()),
                         io.github.jackfeicoder.codey.mcp.oauth.OAuthInteraction.unavailable());
@@ -278,7 +279,7 @@ public final class Main {
                 ? new PrintWriter(System.out, true, StandardCharsets.UTF_8) : console.writer();
         PrintWriter errors = new PrintWriter(System.err, true,
                 console == null ? StandardCharsets.UTF_8 : console.charset());
-        var chatTools = createTools(agentSettings, commandSettings,io.github.jackfeicoder.codey.config.WebSearchSettings.load(startup,environment));
+        var chatTools = createTools(agentSettings, commandSettings,io.github.jackfeicoder.codey.config.WebSearchSettings.load(startup,environment),io.github.jackfeicoder.codey.config.WebFetchSettings.load(startup,environment));
         try (ConsoleInput consoleInput = ConsoleInput.open(input, output,
                 () -> ConfigLoader.loadModelCatalog(startup, environment));
              var auth = new io.github.jackfeicoder.codey.mcp.oauth.OAuthManager(
@@ -306,7 +307,7 @@ public final class Main {
     }
 
     /** 统一注册本阶段工具；是否向模型提供，由 Registry 按会话上下文筛选。 */
-    private static ToolRegistry createTools(AgentSettings settings, CommandSettings commands,io.github.jackfeicoder.codey.config.WebSearchSettings search) {
+    private static ToolRegistry createTools(AgentSettings settings, CommandSettings commands,io.github.jackfeicoder.codey.config.WebSearchSettings search,io.github.jackfeicoder.codey.config.WebFetchSettings fetch) {
         var tools=new ToolRegistry().register(new ReadFileTool())
                 .register(new ListFilesTool(settings.listFilesDefaultDepth())).register(new SearchFileTool())
                 .register(new GrepCodeTool()).register(new WriteFileTool()).register(new EditFileTool())
@@ -314,6 +315,10 @@ public final class Main {
         if(search.enabled()) {
             var service=new io.github.jackfeicoder.codey.tool.web.WebSearchService(search);
             tools.register(new io.github.jackfeicoder.codey.tool.builtin.WebSearchTool(service));tools.onTaskFinished(service::resetTask);
+        }
+        if(fetch.enabled()) {
+            var service=new io.github.jackfeicoder.codey.tool.web.WebFetchService(fetch);
+            tools.register(new io.github.jackfeicoder.codey.tool.builtin.WebFetchTool(service));tools.onTaskFinished(service::resetTask);
         }
         return tools;
     }

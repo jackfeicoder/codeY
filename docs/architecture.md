@@ -3063,3 +3063,19 @@ SearchResults验证结果结构、HTTP(S)URL和域名真实后缀，对URL去重
 HTTP200不必然代表业务成功：search_metadata.status=Error或带错误而未标记Success时按REJECTED处理，Processing不做后台轮询；Success但没有organic_results按无结果返回。故障转移规则与Tavily/Brave一致。WebSearchSettings扩展serpapi并允许最多三个不同服务；官方TAVILY_API_KEY/BRAVE_API_KEY/SERPAPI_API_KEY可作为对应CODEY_专用键的回退，专用键优先。端点覆盖为CODEY_SERPAPI_SEARCH_URL，默认https://serpapi.com/search.json。
 
 网络搜索专项共35项通过，新增6项覆盖SerpApi字段、时间映射、查询串凭证不进入结果、200业务错误/Processing、无结果、Tavily→SerpApi切换和官方环境变量别名。经用户授权使用本地配置密钥分别执行一次最小真实查询，Tavily和SerpApi均成功返回1条结果；未打印密钥、请求URL或真实响应正文。实际可用性验证只代表测试时成功，不保证后续网络状态和账号额度。
+### 网页正文读取 web_fetch
+
+职责独立于web_search：输入具体URL，下载静态响应并提取正文，不进行搜索、浏览器交互或额外LLM摘要。默认启用且不依赖搜索API密钥；支持text/html、application/xhtml+xml、text/markdown、text/x-markdown、text/plain。PDF、图片及其他类型明确返回WEB_FETCH_UNSUPPORTED；脚本/登录页面没有可读静态文本时说明能力边界。
+
+WebFetchTool定义url/startLine/maxLines的Schema和后端校验，身份认证和请求头不由模型填写。ToolAccess为READ_ONLY以支持Plan；prepare创建独立web_fetch审批，PreparedToolOperation与ApprovalReviewer扩展可信内置读取类别，不放行其他未分类工具。ask逐次批准，auto普通公开读取自动允许，full保留强制地址/大小限制。跨域跳转未自动跟随，结果仅返回原URL与redirectUrl，由模型另行调用后重新检查。
+
+WebAddressPolicy规范URL，HTTP升级HTTPS并移除fragment，生产仅标准端口，拒绝userinfo、明显凭证查询参数、localhost/特殊主机和数值IP URL。连接层采用Apache HttpClient 5.4.1的DnsResolver，验证DNS返回的全部IPv4/IPv6地址后直接用于连接，保持原主机名TLS验证；不先检查DNS再让JDK客户端独立解析。屏蔽内网、回环、链路本地、CGNAT、组播及保留地址，IPv6限制全球单播并排除特殊转换/隧道/文档段。包内loopback策略仅用于隔离测试，不提供env或模型开关。关闭代理自动发现、Cookie、认证缓存、自动重试、自动重定向和自动解压，不转发搜索服务认证信息。
+
+FetchHttpClient将下载放到最多2个守护工作线程，调用者通过Future受总deadline约束；Ctrl+C调用request.cancel和future.cancel并保留线程中断。连接等待/读响应的超时同时设置；同域跳转每跳重复检查、计入同一deadline，最多3跳，循环跳转失败。raw及解压后流分别限制最大2MiB（可调低），忽略Content-Length也不能越过硬限额；gzip单独有界解压，其他压缩返回不支持。超限或错误时先取消再关闭响应，避免为了连接复用无限排空错误正文。HTTP403/404等只返回状态码，不向模型回显原始错误页。
+
+WebContentExtractor使用Jsoup 1.18.1解析已下载字节，支持HTTP charset和HTML编码检测；先去除脚本/样式/导航/隐藏节点等，优先main、article，回退body。迭代DOM遍历保留标题、段落、列表、代码块和相对链接的完整URL，不触发解析器联网。纯文本/Markdown按声明编码解码，默认UTF-8且错误显式报告。清洗正文限制2M字符，超长行按最多1000 Unicode码点固定折行，再赋予稳定行号。提取为有损静态文本，不声称等于浏览器渲染或完整原始HTML。
+
+WebFetchService保存当前任务的内存Page快照及SHA-256正文指纹，最多8页、总正文4M字符，每任务执行尝试最多10次下载。分页命中缓存不重新访问网络，不自动淘汰旧页以免悄悄改变已有分页。返回requestedUrl、finalUrl、redirectUrl、title、contentType、fetchedAt、contentHash、实际起止行、总行数、content、hasMore/nextLine、truncated及cacheHit。输出动态缩减实际行数，保持JSON完整；连第一行/元数据都放不下时明确失败，避免nextLine原地循环。任务结束由ToolRegistry清空缓存，返回过的正文段随原有工具消息和任务日志持久化，全文不写入会话。恢复后的新下载可能产生新hash，工具说明及base.md提醒重新确认。
+
+Main的普通聊天及临时入口统一注册，--check-config只校验配置不请求网页。新增Jsoup和Apache HttpClient依赖，并明确绑定slf4j-api 2.0.16与已有NOP实现保持一致，防止终端出现绑定器警告。提示词策略仍放在现有base.md，工具参数说明仍走ToolDefinition，原会话基础提示词快照不强制替换。
+验证：web_fetch专项43项通过，完整mvn -q verify共1134项通过，零失败/错误/跳过。覆盖静态HTML/Markdown、UTF-8与错误编码、正文分页和快照复用、输出JSON/超长行、同域/跨域/循环重定向、URL及IP边界、混合DNS答案、Plan与审批拒绝、压缩/分块大小限制、慢响应体总超时和线程取消。打包CLI额外以本地模拟模型读取真实https://example.com/公开页面，验证真实DNS/TLS下载、正文提取、来源回填、最终链接及会话/任务保存；未调用真实模型或使用搜索密钥。真实网站内容与网络状态可变化，联测仅证明当时该公开页面可读。

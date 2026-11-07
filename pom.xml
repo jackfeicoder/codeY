@@ -17,6 +17,10 @@
         <jline.version>3.30.17</jline.version>
     </properties>
     <dependencies>
+        <!-- 网页正文解析；只处理已下载的有界内容，不使用解析器自行联网。 -->
+        <dependency><groupId>org.jsoup</groupId><artifactId>jsoup</artifactId><version>1.18.1</version></dependency>
+        <!-- 连接时使用校验后的DNS地址，保留原主机名的TLS验证。 -->
+        <dependency><groupId>org.apache.httpcomponents.client5</groupId><artifactId>httpclient5</artifactId><version>5.4.1</version></dependency>
         <!-- 技能 frontmatter 只使用安全 YAML 构造器，不实例化任意 Java 类型。 -->
         <dependency>
             <groupId>org.yaml</groupId>
@@ -36,6 +40,7 @@
             <version>0.17.2</version>
         </dependency>
         <!-- SDK 日志不直接输出到聊天终端；MCP 失败由有界工具结果呈现。 -->
+        <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId><version>2.0.16</version></dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-nop</artifactId>
