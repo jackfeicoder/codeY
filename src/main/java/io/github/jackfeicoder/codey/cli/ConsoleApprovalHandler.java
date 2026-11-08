@@ -16,10 +16,14 @@ public final class ConsoleApprovalHandler implements ApprovalHandler {
     @Override public Answer approve(ApprovalRequest request) throws InterruptedException {
         if (!available()) return Answer.UNAVAILABLE;
         input.theme().line(output, ConsoleTheme.Tone.WARNING, "\n待批准：" + clean(request.tool()) + " · " + clean(request.displayTarget()));
-        if (request.command()) output.println("本地进程继承当前用户的文件和网络权限；工作目录不是沙箱，本次批准不授权后续命令。");
+        if (request.command()) output.println("本地进程继承当前用户的文件和网络权限；工作目录不是沙箱。");
         else output.println("操作：" + clean(request.operation()) + "；字节 " + request.beforeBytes() + " → " + request.afterBytes());
-        output.println(request.fileGrant()
-                ? "批准范围：当前会话对此文件的写入、编辑、删除（按已接入工具执行）；不包含其他文件、命令或联网。"
+        output.println("影响判断：" + clean(request.impact().reason()));
+        if (request.sensitive() || request.destructive()) output.println("风险信号："+(request.sensitive()?"敏感或执行配置 ":"")+(request.destructive()?"清空/明显大幅删减或未分类外部操作":""));
+        boolean reusable = request.impact().reusable() && !request.sensitive() && !request.destructive();
+        output.println(reusable ? request.impact().taskScope()
+                ? "批准范围：当前任务中相同程序/参数/目录且构建配置不变的流程；其他命令重新检查。"
+                : "批准范围：当前会话相同搜索服务或网页源站的公开只读请求；敏感内容重新检查。"
                 : "批准范围：仅当前这一次操作，后续操作仍需按模式检查。");
         for (String line : request.preview().split("\\R", -1)) output.println(clean(line));
         return confirm("[y] 批准 / [n] 拒绝（默认）> ");

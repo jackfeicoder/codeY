@@ -118,6 +118,7 @@ public final class SessionLauncher {
     private PermissionMode permissionMode;
     private WorkMode workMode = WorkMode.REACT;
     private PermissionService permissions;
+    private final boolean allowPipedApprovals;
     private final RuntimeStatus runtimeStatus = new RuntimeStatus();
     /** 输入前预览与 Agent 实际请求共用同一组装器，避免两套用量计算逻辑。 */
     private final ProjectInstructionLoader instructionLoader = new ProjectInstructionLoader();
@@ -284,6 +285,7 @@ public final class SessionLauncher {
         this.debug = java.util.Objects.requireNonNull(debug, "debug");
         java.util.Objects.requireNonNull(permissionSettings);
         this.approvalHandler = new ConsoleApprovalHandler(input, output, permissionSettings.pipedApprovals());
+        this.allowPipedApprovals = permissionSettings.pipedApprovals();
         this.permissionMode = permissionSettings.mode();
         input.status(runtimeStatus);
         updateModes();
@@ -868,16 +870,28 @@ public final class SessionLauncher {
         if (value.isEmpty()) {
             output.println("当前权限：" + permissionMode.value() + "；ask 请求批准 / auto 规则审查 / full 跳过常规审批。");
             if (permissions != null) {
-                for (String file : permissions.grantedFiles()) output.println("  已批准文件：" + ConsoleApprovalHandler.clean(file));
-                output.println("/permissions revoke 撤销当前会话全部文件授权和拒绝记录。");
+                for (String scope : permissions.grantedScopes()) output.println("  已批准范围：" + ConsoleApprovalHandler.clean(scope));
+                output.println("当前项目构建信任："+permissions.projectTrusted()+"；/permissions trust 显式信任；revoke 撤销授权及拒绝记录。");
             }
             if (!input.isInteractive()) return;
-            value = read("选择权限 ask/auto/full（空行保持，revoke 撤销文件授权）> ");
+            value = read("选择权限 ask/auto/full（空行保持，trust 信任构建，revoke 撤销授权）> ");
             if (value == null || value.isBlank()) return;
         }
         if (value.equals("revoke")) {
             if (permissions != null) permissions.revoke();
-            output.println("已撤销当前会话文件授权和拒绝记录。");
+            output.println("已撤销当前会话范围授权、项目构建信任和拒绝记录。");
+            return;
+        }
+        if (value.equals("trust")) {
+            if (permissions == null || active == null || active.snapshot().workspace().mode() == io.github.jackfeicoder.codey.workspace.WorkspaceBinding.Mode.NONE) {
+                output.println("请先进入有工作区的会话。"); return;
+            }
+            if (!input.isInteractive() && !allowPipedApprovals) { output.println("项目构建信任需要交互确认。"); return; }
+            output.println("信任当前项目构建/测试流程及已安装工具链：auto 可执行已支持的构建参数，可能运行插件、脚本并联网。配置/脚本改变后重新检查；未知命令仍审批。信任只在当前会话有效。");
+            String answer = input.readSetup("信任当前项目？[y/N]> ",false);
+            if (answer != null && (answer.strip().equalsIgnoreCase("y") || answer.strip().equalsIgnoreCase("yes"))) {
+                permissions.trustProject(); output.println("已信任当前项目构建配置快照。");
+            } else output.println("项目构建信任保持原样。");
             return;
         }
         var next = PermissionMode.parse(value);
@@ -890,7 +904,7 @@ public final class SessionLauncher {
             if (active != null) permissions = new PermissionService(next, active.snapshot().workspace(), approvalHandler);
         }
         updateModes();
-        output.println("权限模式：" + next.value() + "（" + next.label() + "）。命令在 ask/auto 下逐次批准；full 跳过审批，工作目录不构成进程沙箱。");
+        output.println("权限模式：" + next.value() + "（" + next.label() + "）。普通工作区编辑与受限查询自动；构建、联网及 MCP 按具体范围和信任检查，full 跳过常规审批。");
     }
 
     /** 工作模式和权限分别切换；Multi 未实现时不更新任何状态。 */
@@ -918,7 +932,7 @@ public final class SessionLauncher {
                 + "；已启用已知容量的请求前预算检查。");
         printBudget();
         printCompaction();
-        output.println("文件授权 " + (permissions == null ? 0 : permissions.grantCount()) + "；拒绝记录 "
+        output.println("范围授权 " + (permissions == null ? 0 : permissions.grantCount()) + "；项目构建信任 "+(permissions != null && permissions.projectTrusted())+"；拒绝记录 "
                 + (permissions == null ? 0 : permissions.denialCount()) + "。/permissions revoke 可撤销。");
         output.println("文件权限限制来自内置工具路径检查，当前没有进程/网络沙箱。");
     }
@@ -1017,7 +1031,7 @@ public final class SessionLauncher {
         return rules.requestText();
     }
 
-    /** 显式初始化，写入继续走当前模式和逐文件审批；随后读磁盘确认实际结果。 */
+    /** 显式初始化，项目规则属于敏感写入并走当前审批；随后读磁盘确认实际结果。 */
     private void initializeProject() {
         if (active == null || browsing) {
             output.println("请先进入一个项目会话，再执行 /init。");

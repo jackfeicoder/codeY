@@ -20,6 +20,9 @@ public final class WebSearchService {
     public WebSearchService(WebSearchSettings settings,List<WebSearchClient> clients){this.settings=settings;this.clients=List.copyOf(clients);}
     public void resetTask(){calls=0;}
     public String providerNames(){return String.join(" → ",clients.stream().map(WebSearchClient::name).toList());}
+    /** 凭证/端点变化不沿用旧联网范围；仅返回摘要，不暴露配置值。 */
+    public String approvalScope(){return io.github.jackfeicoder.codey.policy.ApprovalScope.key(settings.providers().stream()
+            .map(p->io.github.jackfeicoder.codey.policy.ApprovalScope.key(p.name(),p.endpoint().toString(),p.apiKey())).toArray(String[]::new));}
     public String search(WebSearchRequest request,int maxChars)throws InterruptedException {
         if(Thread.currentThread().isInterrupted())throw new InterruptedException();
         String searchId=UUID.randomUUID().toString();

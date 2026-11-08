@@ -10,9 +10,9 @@ public final class CommandCatalog {
     /** 固定命令说明，不包含会话内容或模型凭证。 */
     private static final List<Command> COMMANDS = List.of(
             new Command("/help", "/help", "查看全部交互命令"),
-            new Command("/permissions", "/permissions [ask|auto|full|revoke]", "查看/切换权限模式或撤销文件授权"),
+            new Command("/permissions", "/permissions [ask|auto|full|trust|revoke]", "查看/切换权限、信任项目构建或撤销授权"),
             new Command("/mode", "/mode [react|plan]", "切换工作模式；multi 尚待实现"),
-            new Command("/status", "/status", "查看模式、模型、估算上下文、实际用量和文件授权"),
+            new Command("/status", "/status", "查看模式、模型、上下文用量、范围授权和项目构建信任"),
             new Command("/mcp", "/mcp [register]", "查看服务菜单或注册；Agent 按需加载、自动释放"),
             new Command("/skills", "/skills", "查看用户/项目技能并选择调用"),
             new Command("/skill", "/skill 名称 [任务描述]", "显式加载技能并开始任务"),

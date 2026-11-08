@@ -106,6 +106,7 @@ public final class AgentLoop {
     public AgentResult run(Session session, String input, ToolContext context, AgentStreamListener stream) {
         Objects.requireNonNull(session, "session");
         Objects.requireNonNull(context, "context");
+        context.permissions().beginTask();
         try {
             var result = execute(session, input, context, stream);
             if (task != null && !result.completed()) task.stop(io.github.jackfeicoder.codey.task.TaskState.Status.BUDGET_EXHAUSTED);
@@ -121,7 +122,10 @@ public final class AgentLoop {
             }
             throw failed;
         }
-        finally { registry.finishTask(); } // 动态扩展按任务释放，失败不遗留连接。
+        finally {
+            context.permissions().endTask();
+            registry.finishTask();
+        } // 动态扩展与构建流程授权按任务释放，失败不遗留连接。
     }
 
     /** 实际循环使用请求副本，打印的数据不加入消息历史。 */

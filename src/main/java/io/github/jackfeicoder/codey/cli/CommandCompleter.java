@@ -53,10 +53,11 @@ public final class CommandCompleter implements Completer {
             for (String option : List.of("--user", "--project", "--always", "--on-demand", "--update", "--title", "--tags"))
                 add(candidates, prefix, option, "长期记忆选项");
         } else if ("/permissions".equals(command) && line.wordIndex() == 1) {
-            add(candidates, prefix, "ask", "请求批准 · 每个文件首次修改时询问");
+            add(candidates, prefix, "ask", "请求批准 · 普通编辑自动，联网/构建确认范围");
             add(candidates, prefix, "auto", "帮我批准 · 普通修改自动，风险操作询问");
             add(candidates, prefix, "full", "完全访问 · 跳过常规审批，需明确确认");
-            add(candidates, prefix, "revoke", "撤销当前会话的文件授权及拒绝记录");
+            add(candidates, prefix, "trust", "显式信任当前项目构建配置 · 仅当前会话");
+            add(candidates, prefix, "revoke", "撤销范围授权、项目信任及拒绝记录");
         } else if ("/mode".equals(command) && line.wordIndex() == 1) {
             add(candidates, prefix, "react", "执行任务 · 模型与工具循环协作");
             add(candidates, prefix, "plan", "只读计划 · 探索代码并给出实施方案");

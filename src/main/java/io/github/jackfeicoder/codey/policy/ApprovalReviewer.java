@@ -1,12 +1,12 @@
 package io.github.jackfeicoder.codey.policy;
 
-/** 独立自动审查扩展点；首版规则只能确认有限普通文件操作，其他情况转人工。 */
+/** 独立审查扩展点；规则给出可解释结论，不把主模型的自我声明当成批准。 */
 @FunctionalInterface
 public interface ApprovalReviewer {
     enum Verdict { ALLOW, HUMAN }
     Verdict review(ApprovalRequest request);
     static ApprovalReviewer rules() {
-        return request -> (request.target() != null || request.webSearch() || request.webFetch()) && !request.sensitive() && !request.destructive()
+        return request -> request.impact().kind() != OperationImpact.Kind.UNKNOWN && !request.sensitive() && !request.destructive()
                 ? Verdict.ALLOW : Verdict.HUMAN;
     }
 }

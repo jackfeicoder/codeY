@@ -53,6 +53,14 @@ public final class McpConfigStore {
             ((ObjectNode)servers.get(name)).put("enabled",enabled);
         });
     }
+    /** 只由用户菜单修改信任；不向 Agent 暴露修改审批策略的工具。 */
+    public McpServerConfig setPermissions(String name, McpPermissions permissions) {
+        return mutate(name, servers -> {
+            if (!servers.has(name)) throw new ConfigException("MCP server is missing from the configuration.");
+            var p = ((ObjectNode)servers.get(name)).putObject("permissions").put("autoApproveConnect", permissions.autoApproveConnect());
+            var tools = p.putArray("readOnlyTools"); permissions.readOnlyTools().stream().sorted().forEach(tools::add);
+        });
+    }
 
     /** 注册与启停共用锁内增量修改，不将其他服务的已解析凭证反写到磁盘。 */
     private McpServerConfig mutate(String name, java.util.function.Consumer<ObjectNode> mutation) {

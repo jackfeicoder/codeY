@@ -40,11 +40,18 @@ public final class McpRegistrationWizard {
             ObjectNode entry=JSON.createObjectNode().put("description",description).put("enabled",true).put("activation","lazy");
             boolean http=!type.equals("2")&&!type.equals("stdio");
             if(http) http(entry); else stdio(entry);
+            String connect = choice("信任此 MCP 并允许按需自动启动/连接？[y/N]> ","n",List.of("y","yes","n","no"));
+            var permissions = entry.putObject("permissions").put("autoApproveConnect",connect.equals("y") || connect.equals("yes"));
+            output.println("可选：填写你已确认是查询操作的原始工具名，逗号分隔；未知或写入工具请留待逐次审批。不要仅凭 get/list 名称判断。");
+            String reads = field("可信查询工具（回车不设置，后续可在 /mcp 菜单修改）> ",false,
+                    s -> s.length() <= 4096 && s.chars().noneMatch(Character::isISOControl),"请填写一行工具名。");
+            var readTools = permissions.putArray("readOnlyTools");
+            if (!reads.isBlank()) for (String tool : reads.split(",")) if (!tool.isBlank()) readTools.add(tool.strip());
             entry.put("startupTimeoutSeconds",15).put("toolTimeoutSeconds",60);
             store.validate(name,entry);
             output.println("待注册："+ConsoleApprovalHandler.clean(name)+" | "+(http?"Streamable HTTP":"stdio"));
             output.println("能力："+ConsoleApprovalHandler.clean(description));
-            output.println("保存位置："+ConsoleApprovalHandler.clean(store.file().toString())+"；默认休眠，启动/调用仍按权限审批。");
+            output.println("保存位置："+ConsoleApprovalHandler.clean(store.file().toString())+"；默认休眠。自动连接："+permissions.path("autoApproveConnect").asBoolean()+"；可信查询工具："+ConsoleApprovalHandler.clean(readTools.toString()));
             String save=choice("确认保存并注册？[Y/n]> ","y",List.of("y","yes","n","no"));
             if(save.equals("n")||save.equals("no")) throw new Cancelled();
             // 锁内重新读取文件及检查重复名，保护其他进程刚注册的条目。

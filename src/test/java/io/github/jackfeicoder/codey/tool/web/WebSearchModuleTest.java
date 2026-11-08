@@ -114,6 +114,17 @@ class WebSearchModuleTest {
         assertEquals(ToolResult.Status.SUCCESS,execute(new WebSearchService(settings()),"{\"query\":\"Java\"}",context(PermissionMode.AUTO,WorkMode.PLAN,ApprovalHandler.unavailable())).status());
         assertEquals(ToolResult.Status.SUCCESS,execute(new WebSearchService(settings()),"{\"query\":\"Java\"}",context(PermissionMode.ASK,WorkMode.PLAN,r->ApprovalHandler.Answer.APPROVE)).status());
     }
+    @Test void askReusesSearchServiceScopeButChecksNewCredentialsAndSensitiveQueries() {
+        endpoint("tavily",200,TAVILY,0);var prompts=new AtomicInteger();
+        var context=context(PermissionMode.ASK,WorkMode.REACT,r->{prompts.incrementAndGet();return ApprovalHandler.Answer.APPROVE;});
+        var service=new WebSearchService(settings());
+        assertEquals(ToolResult.Status.SUCCESS,execute(service,"{\"query\":\"Java\"}",context).status());
+        assertEquals(ToolResult.Status.SUCCESS,execute(service,"{\"query\":\"Maven\"}",context).status());
+        assertEquals(1,prompts.get());
+        assertEquals(ToolResult.Status.SUCCESS,execute(service,"{\"query\":\"token=fixture-sensitive\"}",context).status());assertEquals(2,prompts.get());
+        var changed=new WebSearchSettings(true,List.of(new WebSearchSettings.Provider("tavily",provider("tavily").endpoint(),"changed-fixture-key")),1,3,5);
+        assertEquals(ToolResult.Status.SUCCESS,execute(new WebSearchService(changed),"{\"query\":\"Java\"}",context).status());assertEquals(3,prompts.get());
+    }
     @Test void denialAndSensitiveAutoQueryNeverReachAnyProvider() {
         endpoint("tavily",200,TAVILY,0);endpoint("brave",200,BRAVE,0);
         assertEquals(ToolResult.ErrorCode.PERMISSION_DENIED,execute(new WebSearchService(settings()),"{\"query\":\"Java\"}",context(PermissionMode.ASK,WorkMode.REACT,r->ApprovalHandler.Answer.DENY)).errorCode());

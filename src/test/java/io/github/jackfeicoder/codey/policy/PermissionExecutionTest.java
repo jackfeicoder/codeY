@@ -36,55 +36,58 @@ class PermissionExecutionTest {
     }
     private void success(ToolResult result) { assertEquals(ToolResult.Status.SUCCESS, result.status(), result.output()); }
 
-    @Test void defaultContextIsReactAskAndNeverImplicitlyApproves() throws Exception {
+    @Test void defaultAskAllowsOrdinaryEditButStillRequiresSensitiveApproval() throws Exception {
         var context = new ToolContext(workspace());
         assertEquals(WorkMode.REACT, context.workMode());
         assertEquals(PermissionMode.ASK, context.permissions().mode());
-        assertEquals(ToolResult.ErrorCode.APPROVAL_REQUIRED, execute(context, "write_file", "path", "a", "content", "x").errorCode());
-        assertFalse(Files.exists(directory.resolve("a")));
+        success(execute(context, "write_file", "path", "a", "content", "x"));
+        assertEquals(ToolResult.ErrorCode.APPROVAL_REQUIRED, execute(context, "write_file", "path", ".env", "content", "x").errorCode());
+        assertFalse(Files.exists(directory.resolve(".env")));
     }
-    @Test void askPromptsOncePerFileAndSharesGrantAcrossWriteAndEdit() throws Exception {
+    @Test void askAllowsOrdinaryEditsWithoutGrantingFutureDestructiveChanges() throws Exception {
         var seen = new ArrayList<ApprovalRequest>();
         var context = context(PermissionMode.ASK, WorkMode.REACT, request -> {
-            assertFalse(Files.exists(request.target()));
             seen.add(request); return ApprovalHandler.Answer.APPROVE;
         });
         success(execute(context, "write_file", "path", "a.txt", "content", "old"));
         success(execute(context, "edit_file", "path", "./a.txt", "oldText", "old", "newText", "new"));
         success(execute(context, "write_file", "path", "a.txt", "content", "again", "overwrite", true));
         success(execute(context, "write_file", "path", "b.txt", "content", "b"));
-        assertEquals(2, seen.size());
-        assertEquals(2, context.permissions().grantCount());
-        assertEquals(List.of("a.txt", "b.txt"), context.permissions().grantedFiles());
-        assertEquals("again", Files.readString(directory.resolve("a.txt")));
+        assertEquals(0, seen.size());
+        assertEquals(0, context.permissions().grantCount());
+        success(execute(context, "write_file", "path", "a.txt", "content", "", "overwrite", true));
+        assertEquals(1, seen.size());
+        assertTrue(seen.get(0).destructive());
+        assertFalse(seen.get(0).fileGrant());
+        assertEquals("", Files.readString(directory.resolve("a.txt")));
     }
     @Test void freshSessionDoesNotInheritApprovalAndRevokeForgetsGrant() throws Exception {
         var calls = new AtomicInteger();
         ApprovalHandler handler = request -> { calls.incrementAndGet(); return ApprovalHandler.Answer.APPROVE; };
         var first = context(PermissionMode.ASK, WorkMode.REACT, handler);
-        success(execute(first, "write_file", "path", "a", "content", "x"));
-        success(execute(context(PermissionMode.ASK, WorkMode.REACT, handler), "edit_file", "path", "a", "oldText", "x", "newText", "y"));
+        success(execute(first, "write_file", "path", ".env", "content", "x"));
+        success(execute(context(PermissionMode.ASK, WorkMode.REACT, handler), "edit_file", "path", ".env", "oldText", "x", "newText", "y"));
         first.permissions().revoke();
-        success(execute(first, "edit_file", "path", "a", "oldText", "y", "newText", "z"));
+        success(execute(first, "edit_file", "path", ".env", "oldText", "y", "newText", "z"));
         assertEquals(3, calls.get());
     }
     @Test void denialBlocksSameTargetThroughDifferentWriteToolUntilUserRevokes() throws Exception {
-        Files.writeString(directory.resolve("a"), "old");
+        Files.writeString(directory.resolve(".env"), "old");
         var asks = new AtomicInteger();
         var context = context(PermissionMode.ASK, WorkMode.REACT, request -> { asks.incrementAndGet(); return ApprovalHandler.Answer.DENY; });
-        assertEquals(ToolResult.ErrorCode.PERMISSION_DENIED, execute(context, "edit_file", "path", "a", "oldText", "old", "newText", "new").errorCode());
-        assertEquals(ToolResult.ErrorCode.PERMISSION_DENIED, execute(context, "write_file", "path", "./a", "content", "x", "overwrite", true).errorCode());
+        assertEquals(ToolResult.ErrorCode.PERMISSION_DENIED, execute(context, "edit_file", "path", ".env", "oldText", "old", "newText", "new").errorCode());
+        assertEquals(ToolResult.ErrorCode.PERMISSION_DENIED, execute(context, "write_file", "path", "./.env", "content", "x", "overwrite", true).errorCode());
         assertEquals(1, asks.get());
-        assertEquals("old", Files.readString(directory.resolve("a")));
+        assertEquals("old", Files.readString(directory.resolve(".env")));
         context.permissions().revoke();
-        execute(context, "edit_file", "path", "a", "oldText", "old", "newText", "new");
+        execute(context, "edit_file", "path", ".env", "oldText", "old", "newText", "new");
         assertEquals(2, asks.get());
     }
     @Test void directWriteExecuteAlsoChecksPermission() throws Exception {
         var context = new ToolContext(workspace());
-        var error = assertThrows(ToolException.class, () -> new WriteFileTool().execute(JSON.readTree("{\"path\":\"a\",\"content\":\"x\"}"), context));
+        var error = assertThrows(ToolException.class, () -> new WriteFileTool().execute(JSON.readTree("{\"path\":\".env\",\"content\":\"x\"}"), context));
         assertEquals(ToolResult.ErrorCode.APPROVAL_REQUIRED, error.code());
-        assertFalse(Files.exists(directory.resolve("a")));
+        assertFalse(Files.exists(directory.resolve(".env")));
     }
     @ParameterizedTest @EnumSource(PermissionMode.class)
     void planRejectsForcedMutationEvenInFullModeAndHidesDefinitions(PermissionMode mode) throws Exception {
@@ -110,12 +113,12 @@ class PermissionExecutionTest {
         assertEquals(0, context.permissions().grantCount());
     }
     @Test void changedFileWhileWaitingForApprovalIsNotOverwrittenOrGranted() throws Exception {
-        Path file = directory.resolve("a"); Files.writeString(file, "old");
+        Path file = directory.resolve(".env"); Files.writeString(file, "old");
         var context = context(PermissionMode.ASK, WorkMode.REACT, request -> {
             try { Files.writeString(file, "external"); } catch (Exception error) { throw new AssertionError(error); }
             return ApprovalHandler.Answer.APPROVE;
         });
-        assertEquals(ToolResult.ErrorCode.FILE_CONFLICT, execute(context, "edit_file", "path", "a", "oldText", "old", "newText", "new").errorCode());
+        assertEquals(ToolResult.ErrorCode.FILE_CONFLICT, execute(context, "edit_file", "path", ".env", "oldText", "old", "newText", "new").errorCode());
         assertEquals("external", Files.readString(file));
         assertEquals(0, context.permissions().grantCount());
         try (var paths = Files.list(directory)) { assertTrue(paths.noneMatch(p -> p.getFileName().toString().startsWith(".codey-"))); }
@@ -133,7 +136,7 @@ class PermissionExecutionTest {
         Files.writeString(directory.resolve("emoji.txt"), "😀".repeat(600));
         var seen = new ArrayList<ApprovalRequest>();
         var context = context(PermissionMode.ASK, WorkMode.REACT, request -> { seen.add(request); return ApprovalHandler.Answer.APPROVE; });
-        success(execute(context, "write_file", "path", "emoji.txt", "content", "😁".repeat(600), "overwrite", true));
+        success(execute(context, "write_file", "path", "emoji.txt", "content", "😁".repeat(200), "overwrite", true));
         String preview = seen.get(0).preview();
         assertTrue(preview.contains("😀")); assertTrue(preview.contains("😁"));
         assertTrue(preview.contains("已省略")); assertTrue(preview.length() < 1800);
@@ -207,7 +210,7 @@ class PermissionExecutionTest {
     @Test void interruptedApprovalPreventsWritingAndLeavesNoGrant() throws Exception {
         var context = context(PermissionMode.ASK, WorkMode.REACT, request -> { throw new InterruptedException(); });
         try {
-            assertEquals(ToolResult.ErrorCode.INTERRUPTED, execute(context, "write_file", "path", "a", "content", "x").errorCode());
+            assertEquals(ToolResult.ErrorCode.INTERRUPTED, execute(context, "write_file", "path", ".env", "content", "x").errorCode());
             assertTrue(Thread.currentThread().isInterrupted());
             assertFalse(Files.exists(directory.resolve("a")));
             assertEquals(0, context.permissions().grantCount());

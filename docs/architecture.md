@@ -2020,92 +2020,34 @@ OpenAI 官方文档将 sandbox（实际文件/网络限制）、approval policy�
 
 依据：[OpenAI Sandboxing](https://learn.chatgpt.com/docs/sandboxing)、[OpenAI Auto-review](https://learn.chatgpt.com/docs/sandboxing/auto-review)。Claude Code 另有 default、acceptEdits、auto、plan、bypassPermissions 等模式，并非恰好三种；其规则由宿主程序执行，模型提示词不授予权限。参考 [Anthropic 权限说明](https://code.claude.com/docs/en/permissions)。CodeY 借鉴分层和执行前审查，不承诺复刻产品的完整沙箱或模型审查实现。
 
-### CodeY 三种模式
+### CodeY 操作影响与范围授权（2026-11-08 更新）
 
-对用户提供三个预设，内部保留“访问范围、审批策略、审查者”三个维度，避免后续把规则写成散落的 if/else。
+早期按文件首次批准的实现已替换为具体操作分类。工作模式与权限独立：PLAN 在 full 下仍只读，MULTI 尚未开放，MCP 连接/调用仍按 UNKNOWN 工具从 PLAN 隐藏。
 
-默认组合为普通 ReAct + ask；PLAN、REACT、MULTI 是工作模式，ASK、AUTO、FULL 是权限预设，模型选择独立保存。以下 CodeY ask 按用户明确选择采用“只读自动执行，文件修改首次审批”的行为，不直接照搬上方 Codex 工作区编辑默认放行的预设。工作模式硬约束先执行，因此 PLAN + FULL 仍不允许写入/编辑/删除，子 Agent 也继承父任务的权限上限。
-
-| 模式 | 已确认的普通只读操作 | 工作区内写入、编辑、删除 | 其他需要授权或有风险的操作 |
+| 操作 | ask | auto | full |
 |---|---|---|---|
-| ask（默认） | 自动允许 | 当前会话每个文件首次修改时批准，之后复用该文件授权 | 展示具体操作，交给用户批准 |
-| auto | 自动允许 | 大部分普通修改自动批准，不逐文件打断；风险/未知转人工 | 独立审查明确批准后执行，否则转人工或报错 |
-| full | 自动允许 | 跳过常规审批 | 在实际工具能力和宿主限制内直接执行，硬禁止及非法操作仍报错 |
+| 工作区读写、技能说明读取 | 普通操作自动；敏感/破坏性人工 | 同左 | 跳过常规审批 |
+| 受限 Git 查询 | 自动 | 自动 | 自动 |
+| 已支持构建流程 | 首次确认，相同流程当前任务复用 | 显式信任项目且配置不变时自动，否则确认 | 跳过常规审批 |
+| 公开搜索/网页读取 | 首次确认具体服务链/源站，当前会话复用 | 普通公开请求自动 | 跳过常规审批 |
+| MCP 连接/查询 | 用户信任的具体范围自动，其余确认 | 同左 | 跳过常规审批 |
+| 其他外部影响、未知脚本/参数 | 本次人工确认 | 本次人工确认 | 跳过常规审批 |
 
-“需要额外授权”由宿主根据真实操作确定，例如工作区之外的目标、未授予的网络访问、凭证文件、改变工具/审批规则的项目配置，以及未来的高影响命令或外部 MCP 操作。ask 中普通源码文件首次写入同样询问，但同文件后续写/编辑/删除不反复询问；批准界面必须明确包含哪些操作。文件级授权不能顺带批准联网、运行任意程序或修改其他文件；已有明确硬禁止先于人工批准、模式和文件授权，full 也不跳过硬禁止。
+执行链：ToolExecutor 校验 → PermissionPolicy 工作模式硬检查 → Tool.prepare 固定操作 → OperationImpact → PermissionService 先查拒绝和可复用范围 → ask 基础规则 / auto 独立规则审查 / 人工 → 快照复检 → 执行 → completed 保存合法范围。没有调用主模型或额外模型审查，模型文本不产生批准。
 
-只读类别由可信工具实现与实际副作用确定，不由工具名字或模型声明决定。当前 read_file/list_files/search_file/grep_code 可作为普通只读工具；未来 Shell 中包含下载、重定向、脚本或构建产物写入的调用不能因为名字像“查看/测试”就按只读放行。删除工具尚未实现，规则先覆盖该操作类别，不能据此宣称已经可删文件。
+- `OperationImpact` 提供 WORKSPACE_EDIT、LOCAL_QUERY、PROJECT_BUILD、PUBLIC_NETWORK、TRUSTED_CONNECTION、TRUSTED_REMOTE_READ、UNKNOWN，以及 reason/reuseKey/taskScope。
+- `CommandImpactClassifier` 根据实际解析的程序和独立 argv 分类。Git 只开放少量固定 status/diff/log/--version 参数；查询增加 --no-pager、--no-optional-locks、core.fsmonitor=false、log.showSignature=false，diff 增加 --no-ext-diff/--no-textconv。`GitQueryGuard` 额外用固定只读 config 查询检查 clean/process 过滤器（执行前复检），存在此类配置或核对失败则人工确认，避免 status/diff 隐式运行过滤器。项目内同名程序不当作已安装 Git，-c、--output、--no-index、任意路径/额外参数均不自动放行。
+- Maven 只识别 compile/test/verify/package/test-compile 和少量批处理/安静/跳过测试参数；npm 只识别 test、run build/test/lint。解释器任意脚本、安装/发布/删除等保持 UNKNOWN。Maven --version 也可能读取启动配置，仍需确认。
+- 构建可能执行插件、测试、项目脚本和联网，不视为只读。ask 明确批准当前任务的具体流程；auto 需用户 `/permissions trust` 确认当前项目及已安装工具链。信任不接受模型调用，只在当前会话有效。
+- 构建 scope 绑定实际程序路径/大小/修改时间/fileKey、argv、cwd 和配置脚本内容指纹；目录扫描不跟随链接，相关文件/字节/访问节点有界，超限或读取失败回退 UNKNOWN。扫描 pom/package 清单、锁文件、.npmrc、.mvn 和常见脚本；排除依赖/产物。源代码语义、用户目录全局配置、已安装插件/工具链不在该快照的完整分析范围内，信任不是隔离。
+- `PermissionService.beginTask/endTask` 清理构建临时范围，AgentLoop 在成功/失败/中断/超预算退出时均清理；重启/恢复不恢复权限。构建配置/脚本变化既改变 scope，也使会话项目信任失效。联网范围可跨任务复用但不跨会话：搜索绑定服务链/端点/凭证摘要，fetch 绑定规范化协议/主机/端口。敏感请求不复用联网批准。
+- `FileImpactClassifier` 对 package.json 和 pom.xml 的展示元数据做结构比对；脚本/依赖/执行规则变化仍审查。密钥、规则、mcp.json、脚本等路径及清空/明显大幅删减不获得整文件授权，每次重查。JSON 严格解析，XML 禁用 DTD/外部实体；解析不明保持敏感。
+- `McpPermissions` 为用户配置的 autoApproveConnect + 精确 readOnlyTools；mcp.json 缺省不信任。注册向导及 /mcp 详情 t/r 提供设置/撤销，更新后释放旧连接。服务名/描述/get/list/readOnlyHint 都不代替用户信任；注册持久化不自动意味着已信任。用户信任的查询仍是外部服务操作，副作用边界由其实际实现决定。连接和调用均在执行前检查配置快照，防止审批期间替换连接参数。
+- `ConsoleApprovalHandler` 展示影响原因、风险信号和本次/任务/会话范围，只有 y/yes 批准。`/permissions revoke` 撤销临时范围、项目信任和拒绝；MCP 持久信任在 /mcp 菜单撤销。敏感/破坏性批准不建立复用范围；异常不新增授权。
 
-首版 auto 是清晰标注的规则版：只自动批准规则能确认的具体低风险请求，未知操作转人工，不声称具备语义完整的风险识别。后续 LlmApprovalReviewer 可以使用独立、权限更窄的调用，输入真实用户任务与具体操作证据、结构化输出决定和理由；主执行模型不自行批准自己的操作。审查器错误/超时不默认放行，规则检查仍先执行。
+full 跳过普通审批，不改变内置工具的工作区/URL边界、输入参数、冲突检查、上下文预算和 PLAN 限制。当前没有 OS 进程或网络沙箱，ProcessBuilder.directory 不限制子进程访问范围。规则是有限、可解释、可替换的策略；不宣称预测任意脚本全部行为或具备完整语义审查能力。未来可增加独立模型审查器作为建议来源，审批结论仍由宿主策略执行。
 
-当前有六个工作区文件工具与 execute_command。文件工具继续保留工作区路径检查；ask/auto 每次命令都需人工批准，full 跳过审批。命令进程继承当前用户的文件/网络能力，可能影响工作区外目标，cwd 不是沙箱。没有专用网络/删除工具或 OS 隔离。CLI 的 full 确认会说明实际能力；不能把文件路径检查误称为进程访问限制。
-
-### 模块职责与实际文件
-
-| 文件/组件 | 职责 |
-|---|---|
-| policy/PermissionMode.java | ask/auto/full 预设、名称、说明与配置解析 |
-| policy/PermissionPolicy.java | 基于操作、目标及宿主规则返回 ALLOW/ASK/DENY 和理由，不读取终端 |
-| policy/ApprovalRequest.java | callId、工具名、操作类型、真实目标、参数/变更指纹、风险说明、有限预览 |
-| policy/ApprovalReviewer.java | 独立自动审查接口；首版规则实现，模型实现后续接入 |
-| policy/ApprovalHandler.java | 人工审批接口，不绑定 System.in 或具体 CLI |
-| policy/PermissionService.java | 按模式协调规则、自动审查、人工选择和窄范围授权，不执行文件写入 |
-| PermissionService 内部授权/拒绝集合 | 每个活动会话一个服务，按真实工作区及规范化目标保存，不持久化；尚未单独建立 FileGrant 类型 |
-| cli/ConsoleApprovalHandler.java | 使用已有 ConsoleInput 展示预览并读取选择，避免另开 Reader 抢占输入 |
-| config/PermissionSettings.java | 从宿主配置/环境选择默认模式和管道审批开关 |
-| tool/PreparedToolOperation.java、ToolAccess.java | 准备后的操作与可信类别，审批在副作用之前；未知工具默认需审 |
-| agent/WorkMode.java | react/plan/multi 名称，multi 不开放执行 |
-| cli/RuntimeStatus.java、StatusRenderer.java | 模式/模型/估算已用量、容量和百分比；实际 usage 单独保留，按终端列宽渲染 |
-
-现有 ToolDefinition 的 name/description/JSON Schema 是模型使用说明，不足以做可信权限分类。新增操作类别等元数据由宿主 Java 实现提供，不接受模型在 arguments 中声明 safe=true、permission=full 或 approved=true 来改变权限。
-
-### 执行流程与批准绑定
-
-```text
-用户选择模式 → CLI 持有运行时权限状态
-模型生成 tool_calls → ToolExecutor 严格解析/校验
-  → 工具准备操作：检查真实路径、读取必要快照、计算写后内容/有限差异
-  → PermissionPolicy
-     DENY：不执行，回填 PERMISSION_DENIED
-     ALLOW：继续
-     ASK：ask → 人工；auto → 独立审查 → 明确批准/转人工；full → 跳过可交互审批
-  → 得到本次操作授权；ask 已有该文件授权时复用，首次批准建立文件级授权
-  → 重新校验目标、原版本和规则 → 执行准备好的相同操作
-  → 记录结果 → 原 callId 的 ToolResult → AgentLoop 继续
-```
-
-工具准备阶段可能需要有限读取已有文件来计算 diff，这也是访问，必须先通过相应读取规则；不能为了展示写入预览先读出原本受禁止的凭证。grep_code/search_file/list_files 的范围检查也不能只看顶层 path 参数：正文搜索需在打开每个候选文件前落实读权限，目录结果按规则过滤或标明省略，避免从目录工具绕过文件规则。后续命令、MCP、Skill 触发的操作也经过同一执行入口。
-
-区分“文件级授权”与“本次具体操作”：文件级授权绑定会话 ID、真实工作区、规范化目标文件和用户确认的操作类别，支持同文件后续不同内容的修改；本次准备的操作另绑定参数/内容指纹及原版本，确保执行的是刚准备/展示的那一份。等待首次审批时目标/原版本变化，需要重新准备并确认；已获文件授权的后续正常修改不因内容指纹不同而反复弹框。文件冲突则停止当前写入并重新读取，文件级授权仍不能覆盖硬限制。批准 A.java 不能用于 B.java 或目录内全部文件；重命名到新路径按新目标处理。文件冲突检查仍存在检查至提交的竞态窗口，权限模块不宣称提供文件系统事务隔离。
-
-### 人工交互与生命周期
-
-拟支持 `/mode plan|react|multi`（默认 react）、`/permissions` 查看模式/范围/文件授权，`/permissions ask|auto|full` 切换，`CODEY_PERMISSION_MODE=ask` 配置启动默认权限；命令目录和 JLine 补全同步添加。模式属于宿主运行状态，不由模型切换；只在用户输入空闲阶段切换，本次任务固定配置快照。旧会话恢复不自动恢复历史 full 或历史文件授权。进入 full 需要用户本次显式选择；从项目内容或模型回复解析到的模式指令不生效。LLM API 的正常模型请求是宿主已配置的通信，不因选择 ask 而每轮弹出一次“联网审批”；未来模型主动调用的 HTTP/Shell 联网才属于工具访问审查。
-
-一次审批示例：
-
-```text
-待批准：write_file · src/App.java
-操作：完整覆盖已有文件
-原因：当前会话尚未批准修改这个文件
-批准范围：当前会话对此文件的写入、编辑、删除（按已支持工具执行）
-预览：有限差异，超限标记已省略，可取消后自行查看
-[y] 批准本会话对此文件的修改  [n] 拒绝（默认）
-```
-
-按用户“一个文件确认一次”的要求，首版就支持文件级会话授权，不提供默认整目录或整机放行按钮；针对已明确展示的文件写入/编辑/删除范围，同文件后续修改复用批准。未包含的操作或新的目标重新检查，不把文件授权扩大为任意命令/联网授权。提供清晰查看和撤销入口；会话/工作区/权限模式变化、会话关闭及重启清除临时授权，单纯切换模型不额外提升权限。需要人工但无人输入、EOF、中断、审批器失败均不执行待批准操作。管道交互须明确启用或注入审批处理器，否则不能消费下一条普通聊天当作批准。
-
-审批预览对终端控制字符和换行做处理，文件名/工具结果不当作可信指令。普通改动可展示有限 diff；凭证等敏感目标只展示路径、操作和统计，不将密钥正文复制到终端、审查模型或审计记录。审计建议仅记录时间、会话/任务/callId、模式、工具、目标、指纹、决定/理由、批准来源和执行结果，默认不记录完整参数或文件正文；审计失败时的处理要在实现中明确。
-
-拒绝返回带 callId 的错误结果，模型可以解释或继续被允许的任务，但不能通过换工具或拆分调用规避同一拒绝。拒绝/授权状态由程序保留，必要时中止本轮反复请求。首版需区分用户拒绝、策略禁止、无人审批和原文件变化，不能都压成 EXECUTION_FAILED。
-
-### 实施进度与后续边界
-
-1. 已完成现有工具检查、逐文件人工审批及会话授权、拒绝回填、有限预览、模式切换与终端状态；默认 ReAct + ask，只读自动执行。
-2. 已接规则版独立审查接口和测试；模型审查器、持久审计、精确上下文计数后续实现，窗口配置已接入 models.json。
-3. execute_command 已接入逐次审批、超时与进程结果；联网和 MCP 各自实现时接入统一策略；Shell 子进程访问范围要靠容器/操作系统沙箱等实际约束，设置 ProcessBuilder.directory() 不限制文件或网络访问，也不能只靠命令字符串黑名单。
-
-验收至少覆盖：默认 ReAct + ask；普通只读不询问；ask 首次修改 A 文件需确认，同会话后续写/编辑/删除 A 复用展示过的授权，修改 B 需另确认；需审操作先审批再落盘；拒绝/EOF/中断/未知操作不产生副作用；批准范围不串文件/操作类别/会话；预览与实际修改一致；等待首次审批时原文件变化重新确认；规则禁止与 PLAN 只读约束在 full 下仍有效；后续敏感读取策略应覆盖 grep_code 等入口（当前尚未实现）；auto 审查失败转人工且不默认允许；恢复不重放批准或写入；网络/删除专用工具和进程沙箱未实现时如实展示能力范围，execute_command 的进程访问范围单独说明。
+使用与文件职责详见 README 的权限模块。历史验证记录保留当时语义，当前实现以本节为准。
 
 ## 18. 参考资料与维护方式
 
@@ -2133,7 +2075,7 @@ execute_command 是进程工具，用于运行编译、测试及诊断程序。�
 | [CommandResolver.java](../src/main/java/io/github/jackfeicoder/codey/tool/process/CommandResolver.java) | PATH 与真实程序定位，Windows 启动适配、程序基本身份复检 |
 | [CommandRunner.java](../src/main/java/io/github/jackfeicoder/codey/tool/process/CommandRunner.java) | ProcessBuilder 启动、stdin 关闭、两个日志流同时排空、超时/中断与后代清理 |
 | [CommandSettings.java](../src/main/java/io/github/jackfeicoder/codey/config/CommandSettings.java) | 启动时加载超时、日志预算和字符集，环境覆盖 .env |
-| ApprovalRequest / PermissionService | 命令专属操作摘要，逐次审批，拒绝缓存，不保存文件或命令长期授权 |
+| ApprovalRequest / PermissionService | 命令影响分类、具体流程的任务范围授权、拒绝缓存，不授予任意命令权限 |
 | Main / DebugPrinter | 注册生产第七个工具，进度显示程序/cwd 与退出摘要，不打印日志全文 |
 
 ### 参数与校验
@@ -2156,7 +2098,7 @@ AgentLoop 收到模型 tool_call
       → 生成真实程序/argv/cwd/超时的审批预览
       → 检查最小结果 JSON 是否适配输出预算
   → PreparedToolOperation / PermissionService
-      → ask/auto 每次人工确认，full 放行，plan 已拒绝
+      → 操作影响分类与范围/项目信任检查，未知转人工；full 跳过审批，plan 已拒绝
   → 再检查程序元数据及目录身份
   → ProcessBuilder.start，关闭 stdin
   → 两个消费任务排空 stdout/stderr，超过保留预算仍继续消费
@@ -2195,7 +2137,7 @@ Windows PATH兼容修复：`System.getenv().get("PATH")`的Map查找区分大小
 
 ### 权限与 Windows
 
-ask/auto 下每个命令都人工审批，不因名字看似只读而自动放行，也不因文件已授权而跳过。批准只用于当前固定操作。拒绝摘要使用真实程序 + argv + 真实 cwd 的 SHA-256，修改超时不会绕过同一拒绝；不同命令仍可独立申请，摘要不具备语义等价操作的完备识别能力。撤销、会话切换、重启沿既有机制清除状态。full 跳过命令审批，plan 即使 full 也拒绝，NONE 会话不提供命令工具。
+当前命令分类、受限查询与任务范围复用以权限模块的 2026-11-08 更新为准。未知操作仍仅批准当前固定操作。拒绝摘要使用真实程序 + argv + 真实 cwd 的 SHA-256，修改超时不会绕过同一拒绝；不同命令仍可独立申请，摘要不具备语义等价操作的完备识别能力。撤销、会话切换、重启沿既有机制清除状态。full 跳过命令审批，plan 即使 full 也拒绝，NONE 会话不提供命令工具。
 
 普通程序使用独立 argv，不自动解释管道/重定向/&&。JDK 17 Windows 默认 legacy 启动模式中，对普通程序按 CRT 规则编码空参数、引号与末尾反斜杠；程序仍可自行解释其参数。Windows .cmd/.bat 由系统 cmd.exe /d /v:off /s /c 适配，为避免参数被重新解释，首版批处理的程序路径/参数不接受引号、% ! ^ & | < > ( ) 和控制字符；带这些字符的路径也会被拒绝。该限制是批处理适配边界，不是通用命令风险判断器。没有“通过命令名黑名单就能限制文件/网络”的假设。
 
@@ -2858,7 +2800,7 @@ AgentLoop每轮重新取动态definitions，ContextBuilder/TokenEstimator统计�
 
 MCP工具仍经ToolExecutor → 输入Schema校验 → prepare审批 → tools/call → ToolResult。输入验证使用SDK提供的默认JSON Schema校验器，拒绝远程$ref/$dynamicRef/$recursiveRef以及$id以避免隐式联网。未知/不支持Schema会使发现或调用明确失败，不绕过校验。外部readOnlyHint不提升为可信本地READ_ONLY；首版PLAN隐藏召唤和外部工具，即使full也拒绝直接调用。mcp_release为READ_ONLY管理操作，不触发远端业务工具。
 
-ask/auto中召唤与每次外部调用分别审批；auto现有规则只自动批准普通文件，因此外部操作仍转人工。full跳过常规审批，参数、注册快照及PLAN约束保留。召唤批准只允许连接/发现，不批准随后业务操作；无文件目标不建立文件授权。审批展示服务、工具、参数预览（敏感字段隐藏），凭证头/环境值不展示。用户不再使用手动召唤/重连命令；模型调用mcp_summon后仍走同一执行和审批入口。
+ask/auto 对未信任的召唤与外部调用分别审批；用户显式信任的连接和精确查询工具自动执行，配置与菜单见权限模块。full跳过常规审批，参数、注册快照及PLAN约束保留。召唤批准只允许连接/发现，不批准随后业务操作；无文件目标不建立文件授权。审批展示服务、工具、参数预览（敏感字段隐藏），凭证头/环境值不展示。用户不再使用手动召唤/重连命令；模型调用mcp_summon后仍走同一执行和审批入口。
 
 ### 释放、失败与结果
 
@@ -3067,7 +3009,7 @@ HTTP200不必然代表业务成功：search_metadata.status=Error或带错误而
 
 职责独立于web_search：输入具体URL，下载静态响应并提取正文，不进行搜索、浏览器交互或额外LLM摘要。默认启用且不依赖搜索API密钥；支持text/html、application/xhtml+xml、text/markdown、text/x-markdown、text/plain。PDF、图片及其他类型明确返回WEB_FETCH_UNSUPPORTED；脚本/登录页面没有可读静态文本时说明能力边界。
 
-WebFetchTool定义url/startLine/maxLines的Schema和后端校验，身份认证和请求头不由模型填写。ToolAccess为READ_ONLY以支持Plan；prepare创建独立web_fetch审批，PreparedToolOperation与ApprovalReviewer扩展可信内置读取类别，不放行其他未分类工具。ask逐次批准，auto普通公开读取自动允许，full保留强制地址/大小限制。跨域跳转未自动跟随，结果仅返回原URL与redirectUrl，由模型另行调用后重新检查。
+WebFetchTool定义url/startLine/maxLines的Schema和后端校验，身份认证和请求头不由模型填写。ToolAccess为READ_ONLY以支持Plan；prepare创建独立web_fetch审批，PreparedToolOperation与ApprovalReviewer扩展可信内置读取类别，不放行其他未分类工具。ask首次批准源站并在当前会话复用，auto普通公开读取自动允许，full保留强制地址/大小限制。跨域跳转未自动跟随，结果仅返回原URL与redirectUrl，由模型另行调用后重新检查。
 
 WebAddressPolicy规范URL，HTTP升级HTTPS并移除fragment，生产仅标准端口，拒绝userinfo、明显凭证查询参数、localhost/特殊主机和数值IP URL。连接层采用Apache HttpClient 5.4.1的DnsResolver，验证DNS返回的全部IPv4/IPv6地址后直接用于连接，保持原主机名TLS验证；不先检查DNS再让JDK客户端独立解析。屏蔽内网、回环、链路本地、CGNAT、组播及保留地址，IPv6限制全球单播并排除特殊转换/隧道/文档段。包内loopback策略仅用于隔离测试，不提供env或模型开关。关闭代理自动发现、Cookie、认证缓存、自动重试、自动重定向和自动解压，不转发搜索服务认证信息。
 

@@ -177,7 +177,7 @@ public final class McpConnectionManager implements AutoCloseable {
     }
     public String tools(String name) {
         config(name); var current=active.get(name);
-        return current==null?"MCP "+name+" is "+state(name)+"; tools are not loaded.":current.tools.stream().map(t->t.definition().name()).toList().toString();
+        return current==null?"MCP "+name+" is "+state(name)+"; tools are not loaded.":current.tools.stream().map(t->t.rawName()+" → "+t.definition().name()).toList().toString();
     }
     private void refreshControls() {
         controls.forEach(registry::unregister); controls.clear();

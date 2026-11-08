@@ -50,7 +50,7 @@ public final class McpConfigLoader {
                 var entry = it.next(); String name = entry.getKey(); JsonNode n = entry.getValue();
                 if (!name.matches("[A-Za-z][A-Za-z0-9_-]{0,31}")) throw new IllegalArgumentException();
                 keys(n, Set.of("description","transport","url","command","args","env","headers","cwd","enabled",
-                        "enabledTools","disabledTools","startupTimeoutSeconds","toolTimeoutSeconds","estimatedTokens","activation","auth"));
+                        "enabledTools","disabledTools","startupTimeoutSeconds","toolTimeoutSeconds","estimatedTokens","activation","auth","permissions"));
                 String description = text(n,"description",null);
                 if (description == null || description.isBlank() || description.length() > 500 || description.chars().anyMatch(Character::isISOControl)) throw new IllegalArgumentException();
                 String transport = text(n,"transport",null);
@@ -82,9 +82,17 @@ public final class McpConfigLoader {
                     if(Set.of("auto","oauth").contains(auth.mode())&&headers.keySet().stream().anyMatch(k->k.equalsIgnoreCase("Authorization")))throw new IllegalArgumentException();
                 }
                 Long estimate = n.has("estimatedTokens") ? number(n,"estimatedTokens",0,0,1000000) * 1L : null;
+                McpPermissions permissions = McpPermissions.untrusted();
+                if (n.has("permissions")) {
+                    JsonNode p = n.get("permissions"); keys(p, Set.of("autoApproveConnect", "readOnlyTools"));
+                    var readOnly = new LinkedHashSet<>(strings(p.get("readOnlyTools")));
+                    if (readOnly.stream().anyMatch(s -> s.isBlank() || s.length() > 256 || s.chars().anyMatch(Character::isISOControl)))
+                        throw new IllegalArgumentException();
+                    permissions = new McpPermissions(p.has("autoApproveConnect") && bool(p,"autoApproveConnect"), readOnly);
+                }
                 result.add(new McpServerConfig(name,description,transport,url,command,args,env,headers,cwd,enabled,
                         new LinkedHashSet<>(strings(n.get("enabledTools"))),new LinkedHashSet<>(strings(n.get("disabledTools"))),
-                        number(n,"startupTimeoutSeconds",15,1,120),number(n,"toolTimeoutSeconds",60,1,600),estimate,auth));
+                        number(n,"startupTimeoutSeconds",15,1,120),number(n,"toolTimeoutSeconds",60,1,600),estimate,auth,permissions));
             }
             return List.copyOf(result);
         } catch (Exception invalid) { throw invalidConfig(); }

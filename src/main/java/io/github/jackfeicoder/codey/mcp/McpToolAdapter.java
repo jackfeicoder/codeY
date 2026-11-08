@@ -18,6 +18,8 @@ public final class McpToolAdapter implements Tool {
         this.definition=new ToolDefinition(publicName,"[MCP "+server+"] "+(remote.description()==null||remote.description().isBlank()?rawName:remote.description()),remote.schema());
     }
     @Override public ToolDefinition definition() { return definition; }
+    /** 只供宿主菜单展示精确信任名称，不从公开名称反向拆分。 */
+    String rawName() { return rawName; }
     /** 第三方的 readOnlyHint 不提升本地可信等级；PLAN 首版不开放远端调用。 */
     @Override public ToolAccess access() { return ToolAccess.UNKNOWN; }
     @Override public void validateArguments(JsonNode args,ToolContext context) {
@@ -28,10 +30,19 @@ public final class McpToolAdapter implements Tool {
         } catch(RuntimeException invalid) { throw new ToolException(ToolResult.ErrorCode.INVALID_ARGUMENTS,"MCP arguments do not match the input schema."); }
     }
     @Override public PreparedToolOperation prepare(JsonNode args,ToolContext context) {
-        var approval=new ApprovalRequest(definition.name(),null,null,"mcp_call",null,null,0,0,false,true,
+        var config = owner.config(server);
+        var approval=new ApprovalRequest(definition.name(),null,null,"mcp_call",null,null,0,0,false,false,
                 "MCP 服务："+server+"；工具："+rawName+"。参数（敏感键隐藏）："+preview(args)+"；不建立文件授权。",false);
+        if (config.permissions().readOnlyTools().contains(rawName))
+            approval = new ApprovalRequest(definition.name(),null,null,"mcp_call",null,null,0,0,false,false,
+                    approval.preview(),false,null,io.github.jackfeicoder.codey.policy.OperationImpact.of(
+                            io.github.jackfeicoder.codey.policy.OperationImpact.Kind.TRUSTED_REMOTE_READ,
+                            "用户明确将此服务器的具体工具列为可信查询；远端描述不构成授权。"));
         JsonNode copy=args.deepCopy();
-        return new PreparedToolOperation(approval,()->owner.call(server,rawName,copy));
+        return new PreparedToolOperation(approval,()->{
+            if (!owner.config(server).equals(config)) throw new ToolException(ToolResult.ErrorCode.FILE_CONFLICT,"MCP configuration changed during approval.");
+            return owner.call(server,rawName,copy);
+        });
     }
     /** 审批展示有界参数；密钥类字段隐藏，控制字符转为空格。 */
     private static String preview(JsonNode args) {

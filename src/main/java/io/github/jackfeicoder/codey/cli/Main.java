@@ -374,7 +374,7 @@ public final class Main {
                   Initial selection: --profile > last-used profile > saved session profile > CODEY_ACTIVE_PROFILE.
                   Successful selections persist in CODEY_DATA_DIR/model-preference.json, without credentials.
                   Workspace chats expose list_files, search_file, grep_code, read_file, write_file, edit_file and execute_command.
-                  execute_command runs one local program with args; ask/auto approve every invocation, PLAN disables it.
+                  execute_command classifies actual program/args; restricted queries run directly, builds use scoped approvals/project trust, unknown operations ask. PLAN disables it.
                   CODEY_COMMAND_TIMEOUT_SECONDS=60; CODEY_COMMAND_MAX_TIMEOUT_SECONDS=300 (hard maximum 600).
                   CODEY_COMMAND_MAX_OUTPUT_CHARS=8000; CODEY_COMMAND_CHARSET defaults to the Java platform charset.
                   Process working directories are not file/network sandboxes; full skips command approval.
@@ -388,7 +388,7 @@ public final class Main {
                   grep_code searches literal text in a directory or single UTF-8 file and returns matching lines.
                   write_file creates or explicitly overwrites full UTF-8 text; edit_file replaces exact text fragments.
                   Defaults: react + ask. First write to each file requires approval for that session.
-                  /permissions ask|auto|full|revoke; /mode react|plan; /status shows permissions and last input tokens.
+                  /permissions ask|auto|full|trust|revoke; /mode react|plan; /status shows permissions and context usage.
                   auto uses conservative local rules; full skips approval but does not expand tool or workspace capabilities.
                   Piped approvals require CODEY_ALLOW_PIPED_APPROVALS=true; otherwise pending writes fail closed.
                   Dedicated deletion/network tools, OS process sandboxes and multi-agent execution will follow.

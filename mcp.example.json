@@ -12,7 +12,11 @@
       "startupTimeoutSeconds": 15,
       "toolTimeoutSeconds": 60,
       "enabledTools": [],
-      "disabledTools": []
+      "disabledTools": [],
+      "permissions": {
+        "autoApproveConnect": false,
+        "readOnlyTools": []
+      }
     },
     "local_demo": {
       "description": "通过本地 Java MCP 程序提供工具",

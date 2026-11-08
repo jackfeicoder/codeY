@@ -41,7 +41,7 @@ class PermissionCliTest {
     }
     private static LlmResponse done() { return new LlmResponse(Message.assistant("done"), "stop", new LlmResponse.TokenUsage(123L, 3L, 126L)); }
 
-    @Test void askApprovesEachFileOnceAndSwitchingModelRetainsGrant() throws Exception {
+    @Test void ordinaryAskEditsNeedNoApprovalAcrossModelSwitch() throws Exception {
         var round = new AtomicInteger();
         LlmClient client = request -> switch(round.incrementAndGet()) {
             case 1 -> calls("create", "write_file", "{\"path\":\"a.txt\",\"content\":\"old\"}");
@@ -49,12 +49,12 @@ class PermissionCliTest {
             case 5 -> calls("other", "write_file", "{\"path\":\"b.txt\",\"content\":\"b\"}");
             default -> done();
         };
-        assertEquals(0, run("first\ny\n/model fixture model-b\nsecond\nthird\ny\n/status\n/exit\n", client,
+        assertEquals(0, run("first\n/model fixture model-b\nsecond\nthird\n/status\n/exit\n", client,
                 new PermissionSettings(PermissionMode.ASK, true), null));
         assertEquals("new", Files.readString(directory.resolve("a.txt")));
         assertEquals("b", Files.readString(directory.resolve("b.txt")));
-        assertEquals(2, output.toString().lines().filter(line -> line.startsWith("待批准：")).count());
-        assertTrue(output.toString().contains("文件授权 2"));
+        assertEquals(0, output.toString().lines().filter(line -> line.startsWith("待批准：")).count());
+        assertTrue(output.toString().contains("范围授权 0"));
         assertTrue(output.toString().contains("已用 ≈"));
         assertTrue(output.toString().contains("最近实际输入：123 tok"));
         assertEquals(12, store.list().sessions().get(0).messages().size());
@@ -62,7 +62,7 @@ class PermissionCliTest {
     @Test void ordinaryPipeDoesNotConsumeNextChatAsApproval() throws Exception {
         var count = new AtomicInteger();
         LlmClient client = request -> {
-            if (count.incrementAndGet() == 1) return calls("write", "write_file", "{\"path\":\"a\",\"content\":\"x\"}");
+            if (count.incrementAndGet() == 1) return calls("write", "write_file", "{\"path\":\".env\",\"content\":\"x\"}");
             if (count.get() == 2) assertTrue(request.messages().get(request.messages().size()-1).content().contains("APPROVAL_REQUIRED"));
             if (count.get() == 3) assertEquals("next question", request.messages().get(request.messages().size()-1).content());
             return done();
@@ -98,7 +98,7 @@ class PermissionCliTest {
         var count = new AtomicInteger();
         LlmClient client = request -> {
             int n = count.incrementAndGet();
-            if (n % 2 == 1) return calls("write-"+n, "write_file", "{\"path\":\"a\",\"content\":\"value"+n+"\",\"overwrite\":true}");
+            if (n % 2 == 1) return calls("write-"+n, "write_file", "{\"path\":\".env\",\"content\":\"value"+n+"\",\"overwrite\":true}");
             return done();
         };
         run("first\ny\n/permissions auto\n/permissions ask\nsecond\ny\n/exit\n", client,
@@ -107,15 +107,15 @@ class PermissionCliTest {
         String id = store.list().sessions().get(0).id();
         run("third\ny\n/exit\n", client, new PermissionSettings(PermissionMode.ASK, true), id);
         assertEquals(1, output.toString().lines().filter(line -> line.startsWith("待批准：")).count());
-        assertEquals("value5", Files.readString(directory.resolve("a")));
+        assertEquals("value5", Files.readString(directory.resolve(".env")));
     }
     @Test void eofOrNegativeAnswerDoesNotWriteAndFullNeedsExplicitConfirmation() throws Exception {
         var count = new AtomicInteger();
         LlmClient client = request -> count.incrementAndGet() == 1
-                ? calls("write", "write_file", "{\"path\":\"a\",\"content\":\"x\"}") : done();
+                ? calls("write", "write_file", "{\"path\":\".env\",\"content\":\"x\"}") : done();
         run("/permissions full\nn\nfirst\nn\n/status\n/exit\n", client,
                 new PermissionSettings(PermissionMode.ASK, true), null);
-        assertFalse(Files.exists(directory.resolve("a")));
+        assertFalse(Files.exists(directory.resolve(".env")));
         assertTrue(output.toString().contains("权限：ask"));
         count.set(0);
         run("first\n", client, new PermissionSettings(PermissionMode.ASK, true), null);
@@ -127,5 +127,17 @@ class PermissionCliTest {
         assertTrue(output.toString().contains("工作模式：plan；权限：auto"));
         assertTrue(output.toString().contains("已用 ≈"));
         assertTrue(output.toString().contains("/ ? (?%)"));
+    }
+    @Test void explicitProjectTrustIsConfirmedAndRevokeClearsItWithoutCallingModel() throws Exception {
+        run("/permissions auto\n/permissions trust\ny\n/status\n/permissions revoke\n/status\n/exit\n",
+                request->{fail("Permission management must not call model");return done();},new PermissionSettings(PermissionMode.ASK,true),null);
+        assertTrue(output.toString().contains("已信任当前项目构建配置快照"));
+        assertTrue(output.toString().contains("项目构建信任 true"));
+        assertTrue(output.toString().contains("项目构建信任 false"));
+    }
+    @Test void projectTrustDoesNotConsumeNextPipedChatWithoutExplicitOptIn() throws Exception {
+        var calls=new AtomicInteger();
+        run("/permissions trust\nnext question\n/exit\n",request->{calls.incrementAndGet();assertEquals("next question",request.messages().get(request.messages().size()-1).content());return done();},new PermissionSettings(),null);
+        assertEquals(1,calls.get());assertTrue(output.toString().contains("项目构建信任需要交互确认"));
     }
 }

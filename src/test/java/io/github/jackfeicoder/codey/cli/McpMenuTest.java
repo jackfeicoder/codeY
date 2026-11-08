@@ -62,10 +62,20 @@ class McpMenuTest {
     }
     @Test void menuRegisterAddsPersistentDormantEntryAndEofReturnsCleanly()throws Exception {
         try(var manager=manager(List.of())) {
-            run("r\n1\nremote\n查询资料\nhttps://example.com/mcp\n1\ny\n\n",manager);
+            run("r\n1\nremote\n查询资料\nhttps://example.com/mcp\n1\nn\n\ny\n\n",manager);
             assertEquals(List.of("remote"),manager.names());assertEquals("DORMANT",manager.state("remote"));assertEquals(0,opened.get());
             assertTrue(registry.find("mcp_summon").orElseThrow().definition().description().contains("查询资料"));
             run("1\n",manager);assertEquals(0,opened.get());
+        }
+    }
+    @Test void userCanSetAndRevokeSpecificMcpTrustFromExistingServiceMenu() throws Exception {
+        try(var manager=manager(List.of(seed()))) {
+            run("1\nt\ny\nr\nlist_accounts,get_headers\nb\n\n",manager);
+            var permissions=McpConfigLoader.load(root,Map.of()).get(0).permissions();
+            assertTrue(permissions.autoApproveConnect());assertEquals(Set.of("list_accounts","get_headers"),permissions.readOnlyTools());assertEquals(0,opened.get());
+            run("1\nt\ny\nr\n\nb\n\n",manager);
+            assertEquals(McpPermissions.untrusted(),McpConfigLoader.load(root,Map.of()).get(0).permissions());
+            assertFalse(output.toString().contains("fixture-private-token"));assertFalse(output.toString().contains("hidden-query"));
         }
     }
 }

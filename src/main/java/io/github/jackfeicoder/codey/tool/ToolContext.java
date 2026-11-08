@@ -10,7 +10,7 @@ import io.github.jackfeicoder.codey.policy.*;
  * @param workspace 当前会话工作区或 NONE，模型不能通过参数替换它
  * @param maxOutputChars 输出最多保留的 Unicode 码点数量，截断标记另存在结果字段
  * @param workMode 本次任务固定的工作模式，不从工具参数获取
- * @param permissions 当前会话审批服务；跨任务复用文件授权，不跨工作区或历史恢复
+ * @param permissions 当前会话审批服务；联网范围可跨任务复用，构建授权限当前任务，不跨工作区或历史恢复
  * @param taskTempDirectory 宿主管理的当前任务临时目录，可为空；不是权限授权或进程沙箱
  */
 public record ToolContext(WorkspaceBinding workspace, int maxOutputChars, WorkMode workMode, PermissionService permissions,
@@ -27,7 +27,7 @@ public record ToolContext(WorkspaceBinding workspace, int maxOutputChars, WorkMo
         this(workspace, DEFAULT_MAX_OUTPUT_CHARS);
     }
 
-    /** 独立库调用默认 ask、无审批输入；写入明确报需审批，不默默放行。 */
+    /** 独立库调用默认 ask；普通工作区编辑自动，风险操作无审批来源时返回 APPROVAL_REQUIRED。 */
     public ToolContext(WorkspaceBinding workspace, int maxOutputChars) {
         this(workspace, maxOutputChars, WorkMode.REACT,
                 defaultPermissions(workspace));

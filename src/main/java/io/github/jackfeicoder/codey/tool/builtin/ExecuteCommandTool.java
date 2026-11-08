@@ -49,20 +49,41 @@ public final class ExecuteCommandTool implements Tool {
         var rootIdentity = directoryIdentity(directory.root());
         var startIdentity = directoryIdentity(directory.start());
         var executable = CommandResolver.resolve(options.command(), options.args(), directory.start());
+        var candidate = io.github.jackfeicoder.codey.policy.CommandImpactClassifier.classify(
+                executable.executable(), options.args(), directory.root(), directory.start());
+        var classification = io.github.jackfeicoder.codey.policy.GitQueryGuard.needsCheck(candidate.impact(),candidate.args())
+                && !io.github.jackfeicoder.codey.policy.GitQueryGuard.noExecutableFilters(executable.executable(),directory.start())
+                ? new io.github.jackfeicoder.codey.policy.CommandImpactClassifier.Classified(candidate.args(),
+                    io.github.jackfeicoder.codey.policy.OperationImpact.of(io.github.jackfeicoder.codey.policy.OperationImpact.Kind.UNKNOWN,
+                            "Git 状态/差异可能触发已配置的 clean/process 过滤器，或配置核对未完成；本次人工确认。"))
+                : candidate;
+        options = new Options(options.command(), classification.args(), options.directory(), options.timeoutSeconds());
+        executable = CommandResolver.resolve(executable.executable().toString(), options.args(), directory.start());
+        final var launchOptions = options;
+        final var launchExecutable = executable;
         String preview = preview(executable, options, directory.start());
         String key = fingerprint(executable.executable(), options.args(), directory.start());
         var approval = new ApprovalRequest("execute_command", null, null, "execute_command", null, null,
-                0, 0, true, true, preview, false, key);
+                0, 0, false, false, preview, false, key).withImpact(classification.impact());
         // 启动前确保最小结果也装得下；执行后仅缩短日志，不让执行器截断 JSON。
         encode(new CommandRunner.Result("completed", Integer.MIN_VALUE, "", "", Long.MAX_VALUE,
                 false, false, false, false, false), context);
         return new PreparedToolOperation(approval, () -> {
-            var current = WorkspaceFiles.directory(context, WorkspaceFiles.relativePath(options.directory()));
+            var current = WorkspaceFiles.directory(context, WorkspaceFiles.relativePath(launchOptions.directory()));
             if (!current.root().equals(directory.root()) || !current.start().equals(directory.start())
                     || !directoryIdentity(current.root()).equals(rootIdentity) || !directoryIdentity(current.start()).equals(startIdentity))
                 throw new ToolException(ToolResult.ErrorCode.FILE_CONFLICT, "Working directory changed during approval.");
-            executable.verify();
-            return encode(runner.run(executable.invocation(), directory.start(), options.timeoutSeconds(),
+            launchExecutable.verify();
+            if (io.github.jackfeicoder.codey.policy.GitQueryGuard.needsCheck(classification.impact(),launchOptions.args())
+                    && !io.github.jackfeicoder.codey.policy.GitQueryGuard.noExecutableFilters(launchExecutable.executable(),current.start()))
+                throw new ToolException(ToolResult.ErrorCode.FILE_CONFLICT,"Git filter configuration changed; inspect and request again.");
+            if (classification.impact().kind() == io.github.jackfeicoder.codey.policy.OperationImpact.Kind.PROJECT_BUILD) {
+                var now = io.github.jackfeicoder.codey.policy.CommandImpactClassifier.classify(
+                        launchExecutable.executable(), launchOptions.args(), current.root(), current.start());
+                if (!classification.impact().equals(now.impact()))
+                    throw new ToolException(ToolResult.ErrorCode.FILE_CONFLICT, "Build configuration changed during approval; inspect and request again.");
+            }
+            return encode(runner.run(launchExecutable.invocation(), directory.start(), launchOptions.timeoutSeconds(),
                     settings.maxOutputChars(), settings.charset(), context.taskTempDirectory()==null ? java.util.Map.of()
                             : java.util.Map.of("CODEY_TASK_TMP_DIR",context.taskTempDirectory().toString())), context);
         });
@@ -182,7 +203,7 @@ public final class ExecuteCommandTool implements Tool {
                 + "绑定工作区目录不等于项目；先依据项目结构、配置或已有脚本确认项目及验证方式，不为每次文件修改强制运行程序。"
                 + "COMMAND_NOT_FOUND只表示当前CodeY进程未定位到程序，不证明电脑没有安装；先核对PATH或使用用户已确认的程序绝对路径，不无依据要求重新安装，不连续猜测替代程序。"
                 + "退出码 0 不代表用户任务已完成；非零需分析日志后决定下一步。"
-                + "ask/auto 每次人工确认，full 跳过审批，plan 禁用。工作目录不是文件或网络沙箱；无交互输入。"
+                + "ask/auto 自动允许受限 Git 状态查询；构建/测试按项目信任、具体参数与配置快照审批，未知命令人工确认。full 跳过审批，plan 禁用。工作目录不是文件或网络沙箱；无交互输入。"
                 + "Windows 自动适配 .cmd/.bat，但批处理参数不支持引号、百分号、感叹号和 Shell 元字符。", schema);
     }
 }

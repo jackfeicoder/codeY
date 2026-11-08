@@ -190,13 +190,16 @@ public final class WorkspaceTextFiles {
             Snapshot original, byte[] replacement, String operation) {
         String name = target.displayPath().toLowerCase(java.util.Locale.ROOT);
         boolean sensitive = Arrays.stream(name.split("/")).anyMatch(part -> part.equals(".git") || part.equals(".codey")
-                || part.equals(".claude") || part.equals(".codex") || part.equals(".ssh")
+                || part.equals(".claude") || part.equals(".codex") || part.equals(".ssh") || part.equals(".agents") || part.equals("mcp.json")
                 || part.startsWith(".env") && !part.endsWith(".example") || part.endsWith(".pem") || part.endsWith(".key")
                 || part.endsWith(".p12") || part.equals("agents.md") || part.equals("claude.md")
                 || part.equals("pom.xml") || part.equals("package.json") || part.endsWith(".ps1")
                 || part.endsWith(".cmd") || part.endsWith(".bat") || part.endsWith(".sh"));
         String oldText = original == null ? "" : original.text();
         String newText = decode(replacement);
+        if (original != null && (name.equals("pom.xml") || name.endsWith("/pom.xml") || name.equals("package.json") || name.endsWith("/package.json"))
+                && io.github.jackfeicoder.codey.policy.FileImpactClassifier.metadataOnly(name,oldText,newText)
+                && Arrays.stream(name.split("/")).noneMatch(p -> p.startsWith("."))) sensitive = false;
         boolean destructive = original != null && (replacement.length == 0
                 || oldText.length() > 1024 && newText.length() < oldText.length() / 2);
         String preview;

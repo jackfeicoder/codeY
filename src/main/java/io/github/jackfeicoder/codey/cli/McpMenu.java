@@ -46,6 +46,8 @@ public final class McpMenu {
             output.println("能力："+clean(config.description()));
             output.println("认证方式："+config.auth().mode()+"（不展示凭证）");
             output.println("当前工具："+clean(manager.tools(name)));
+            output.println("自动连接："+config.permissions().autoApproveConnect()+"；可信查询工具："+clean(config.permissions().readOnlyTools().toString()));
+            output.println("t 切换连接信任；r 设置可信查询工具（精确名称，逗号分隔；空行清空）");
             output.println("休眠表示已注册、尚未连接；任务中按需加载，任务结束释放，配置继续保留。");
             boolean disabled=manager.state(name).equals("DISABLED");
             output.println("e "+(disabled?"启用（恢复为休眠）":"停用（保留注册信息）")+"；回车或 b 返回列表。");
@@ -55,6 +57,29 @@ public final class McpMenu {
             if(action==null) return false;
             action=action.strip();
             if(action.isEmpty()||action.equalsIgnoreCase("b")||back(action)) return true;
+            if (action.equalsIgnoreCase("t") || action.equalsIgnoreCase("r")) {
+                if (store == null) { output.println("当前宿主仅支持查看。"); continue; }
+                var reads = config.permissions().readOnlyTools();
+                boolean connect = config.permissions().autoApproveConnect();
+                if (action.equalsIgnoreCase("t")) {
+                    String answer = input.readSetup("信任该服务的本地程序/端点，并"+(connect?"取消":"允许")+"自动连接？[y/N]> ",false);
+                    if (answer == null) return false;
+                    if (!answer.equalsIgnoreCase("y") && !answer.equalsIgnoreCase("yes")) continue;
+                    connect = !connect;
+                } else {
+                    output.println("仅添加你已确认的查询工具；远端 readOnlyHint 和工具名不保证无副作用。写入、发邮件、删除等继续审批。");
+                    String value = input.readSetup("可信查询工具（原始名称，逗号分隔，/cancel取消）> ",false);
+                    if (value == null) return false;
+                    if (value.strip().equals("/cancel")) continue;
+                    reads = new java.util.LinkedHashSet<>();
+                    for (String tool : value.split(",")) if (!tool.isBlank()) reads.add(tool.strip());
+                }
+                try {
+                    manager.applyConfiguration(store.setPermissions(name,new io.github.jackfeicoder.codey.mcp.McpPermissions(connect,reads)));
+                    output.println("MCP 信任范围已保存；已释放旧连接，下次按新配置加载。");
+                } catch (ConfigException | IllegalArgumentException invalid) { output.println("信任范围未保存，请检查工具名及配置。"); }
+                continue;
+            }
             if(oauth&&action.equalsIgnoreCase("a")) {
                 try{output.println(manager.resetAuthentication(name)?"已清除本地 OAuth 凭证；注册信息保留，下次需要时重新授权。":"当前宿主未提供 OAuth 凭证管理。");}
                 catch(io.github.jackfeicoder.codey.tool.ToolException failed){output.println("OAuth 凭证清除失败，原记录保留。");}

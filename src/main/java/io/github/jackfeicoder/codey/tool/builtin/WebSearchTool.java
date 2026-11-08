@@ -30,8 +30,13 @@ public final class WebSearchTool implements Tool {
     public PreparedToolOperation prepare(JsonNode arguments,ToolContext context){
         var options=options(arguments);boolean sensitive=SENSITIVE.matcher(options.query()).find();
         String preview="服务顺序："+service.providerNames()+"\n将发送搜索词："+(sensitive?"[疑似凭证，已隐藏，请检查查询]":options.query())
-                +"\n条数："+options.maxResults()+"；域名："+options.allowedDomains()+"；时间："+options.timeRange()+"。仅本次搜索，不授予文件/命令权限。";
-        var approval=new ApprovalRequest("web_search",null,null,"web_search",null,null,0,0,sensitive,false,preview,false,Integer.toHexString(options.hashCode()));
+                +"\n条数："+options.maxResults()+"；域名："+options.allowedDomains()+"；时间："+options.timeRange()+"。公开搜索范围可在当前会话复用，不授予文件/命令权限。";
+        var approval=new ApprovalRequest("web_search",null,null,"web_search",null,null,0,0,sensitive,false,preview,false,
+                io.github.jackfeicoder.codey.policy.ApprovalScope.key(options.toString()))
+                .withImpact(new io.github.jackfeicoder.codey.policy.OperationImpact(
+                        io.github.jackfeicoder.codey.policy.OperationImpact.Kind.PUBLIC_NETWORK,
+                        "已配置搜索服务 "+service.providerNames()+" 的公开查询（含配置的备用服务）",
+                        io.github.jackfeicoder.codey.policy.ApprovalScope.key("search",service.approvalScope()),false));
         return new PreparedToolOperation(approval,()->service.search(options,context.maxOutputChars()));
     }
     public String execute(JsonNode arguments,ToolContext context)throws InterruptedException{return prepare(arguments,context).execute(context);}

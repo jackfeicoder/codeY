@@ -25,7 +25,11 @@ public final class WebFetchTool implements Tool {
         var options=options(arguments);String url=service.normalize(options.url()).toString();
         var request=new WebFetchRequest(url,options.startLine(),options.maxLines());
         var approval=new ApprovalRequest("web_fetch",null,null,"web_fetch",null,null,0,0,false,false,
-                "读取公开网页："+url+"\n行段："+request.startLine()+" 起，最多 "+request.maxLines()+" 行；不登录、不转发凭证，跨域跳转另行审批。",false,url);
+                "读取公开网页："+url+"\n行段："+request.startLine()+" 起，最多 "+request.maxLines()+" 行；不登录、不转发凭证，跨域跳转另行审批。",false,url)
+                .withImpact(new io.github.jackfeicoder.codey.policy.OperationImpact(
+                        io.github.jackfeicoder.codey.policy.OperationImpact.Kind.PUBLIC_NETWORK,
+                        "公开网页源站："+java.net.URI.create(url).getScheme()+"://"+java.net.URI.create(url).getRawAuthority(),
+                        io.github.jackfeicoder.codey.policy.ApprovalScope.key("fetch",java.net.URI.create(url).getScheme(),java.net.URI.create(url).getRawAuthority()),false));
         return new PreparedToolOperation(approval,()->service.fetch(request,context.maxOutputChars()));
     }
     public String execute(JsonNode arguments,ToolContext context)throws InterruptedException{return prepare(arguments,context).execute(context);}

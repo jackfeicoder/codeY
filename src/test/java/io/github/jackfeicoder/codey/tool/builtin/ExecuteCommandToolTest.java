@@ -130,7 +130,7 @@ class ExecuteCommandToolTest {
     }
 
     @ParameterizedTest @EnumSource(value = PermissionMode.class, names = {"ASK", "AUTO"})
-    void everyCommandRequiresApprovalEvenWithFileGrants(PermissionMode mode) throws Exception {
+    void unknownCommandStillRequiresApprovalDespiteOrdinaryFileEdits(PermissionMode mode) throws Exception {
         var prompts = new AtomicInteger();
         var context = context(mode, request -> { prompts.incrementAndGet(); if (request.command()) assertFalse(request.fileGrant()); return ApprovalHandler.Answer.APPROVE; }, WorkMode.REACT, 16384);
         if (mode == PermissionMode.ASK) {
@@ -139,7 +139,7 @@ class ExecuteCommandToolTest {
         }
         body(execute(command("echo"), context)); body(execute(command("echo"), context));
         assertEquals(2, prompts.get());
-        assertEquals(mode == PermissionMode.ASK ? 1 : 0, context.permissions().grantCount());
+        assertEquals(0, context.permissions().grantCount());
     }
 
     @Test void denialOnlyCachesSameCommandAndMissingApprovalStartsNothing() throws Exception {
