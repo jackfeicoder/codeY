@@ -148,6 +148,7 @@ public final class Main {
                 var skillSettings=io.github.jackfeicoder.codey.config.SkillSettings.load(startup,environment);
                 System.out.println("Skill limits: catalog="+skillSettings.catalogTokens()+", resources="+skillSettings.resourceTokens()+" tok; full instructions use the model context budget; discovery is deferred until a task.");
                 AgentSettings agentSettings = AgentSettings.load(startup, environment);
+                System.out.println(io.github.jackfeicoder.codey.config.ToolSchedulingSettings.load(startup,environment));
                 LlmConfig config = profiles.activeConfig(); // 只做本地字段校验，不发送 HTTP 请求。
                 io.github.jackfeicoder.codey.config.PermissionSettings.load(startup, environment);
                 CommandSettings.load(startup, environment);
@@ -209,6 +210,7 @@ public final class Main {
                     result = new AgentLoop(client, promptTools, agentSettings.maxIterations(), debug,
                             contexts, snapshot -> { }, budget,
                             new HistoryCompactor(client, budget, compaction, contexts, debug), () -> { })
+                            .withToolScheduling(io.github.jackfeicoder.codey.config.ToolSchedulingSettings.load(startup,environment))
                             .run(new Session(basePrompt), prompt, new ToolContext(WorkspaceBinding.none()), stream);
                 } catch (LlmException | ContextLimitException failed) {
                     if (stream.hasDisplayedText()) System.err.println("以上流式内容尚未确认为完整结果。");
@@ -302,7 +304,8 @@ public final class Main {
                         new ChatCompletionsClient(titleConfig), capabilities);
             }, PromptLoader::loadBase, consoleInput, output, errors, options, chatTools, debug,
                     () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings, budgetSettings, compactionSettings, MemorySettings.load(startup, environment), MemoryExtractionSettings.load(startup, environment), MemoryConsolidationSettings.load(startup, environment)).withMcp(mcp, new io.github.jackfeicoder.codey.mcp.McpConfigStore(startup, environment)).withSkills(skills)
-                    .withTasks(new io.github.jackfeicoder.codey.task.TaskStore(settings.dataDirectory())).run();
+                    .withTasks(new io.github.jackfeicoder.codey.task.TaskStore(settings.dataDirectory()))
+                    .withToolScheduling(io.github.jackfeicoder.codey.config.ToolSchedulingSettings.load(startup,environment)).run();
         }
     }
 
@@ -379,6 +382,8 @@ public final class Main {
                   CODEY_COMMAND_MAX_OUTPUT_CHARS=8000; CODEY_COMMAND_CHARSET defaults to the Java platform charset.
                   Process working directories are not file/network sandboxes; full skips command approval.
                   CODEY_MAX_ITERATIONS defaults to 20 (range 1..100).
+                  CODEY_TOOL_MAX_PARALLEL defaults to 4 (range 1..8); 1 serializes independent local reads.
+                  CODEY_TOOL_READ_TIMEOUT_SECONDS defaults to 30 (range 1..120), including read worker queue time.
                   The final request disables tools and asks for an evidence-based answer; budget hints are not saved.
                   CODEY_LIST_FILES_DEFAULT_DEPTH defaults to 10 (range 1..20); Agent settings load on startup.
                   Completed assistant/tool groups are saved; failed or exhausted tasks are not committed.

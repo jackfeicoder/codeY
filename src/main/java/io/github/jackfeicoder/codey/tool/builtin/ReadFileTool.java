@@ -29,6 +29,7 @@ import java.util.Set;
  * 路径按真实文件检查，内存读取与输出有界；不修改文件，不调用模型或自动注册到 CLI。
  */
 public final class ReadFileTool implements Tool {
+    @Override public io.github.jackfeicoder.codey.tool.ToolExecutionMode executionMode() { return io.github.jackfeicoder.codey.tool.ToolExecutionMode.PARALLEL_READ; }
     /** 可信只读分类，供 PLAN 过滤与执行前检查使用。 */
     @Override public io.github.jackfeicoder.codey.tool.ToolAccess access() { return io.github.jackfeicoder.codey.tool.ToolAccess.READ_ONLY; }
     /** 缺省从文件第一行开始。 */

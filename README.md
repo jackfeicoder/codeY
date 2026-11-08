@@ -34,7 +34,7 @@ Skill 第一版已实现：用户/项目目录自动发现、`/skills` 菜单、
 | [CLI 交互模块](#module-cli) | 已实现：启动选择、输入、分页与会话命令 |
 | [会话管理模块](#module-session) | 已实现：内存历史、本地保存/恢复与标题 |
 | [任务管理与恢复模块](#module-task) | 已实现：会话绑定、执行事件落盘、失败继续、提交恢复与托管临时目录清理 |
-| [工具模块](#module-tool) | 已实现六个文件工具及 execute_command，已接入模型、审批和 CLI |
+| [工具模块](#module-tool) | 已实现文件/命令工具，独立本地读取有限并行、串行边界、超时取消与有序回填 |
 | [网络搜索](#module-web-search) | 已实现 web_search、Tavily/Brave/SerpApi 适配、联网审批与有序故障切换 |
 | [网页读取](#module-web-fetch) | 已实现静态正文提取、分页快照、地址/资源限制、审批与取消 |
 | [Agent 执行模块](#module-agent) | 已实现：工具循环、轮次预算、中断与完成状态 |
@@ -110,7 +110,7 @@ SerpApi 也可作为备用：设置`CODEY_WEB_SEARCH_PROVIDERS=tavily,serpapi`�
 | `WebSearchService.java` | 每次任务尝试预算、有序切换、来源ID和输出上限 |
 | `SearchHttp.java`、`SearchResults.java`、`WebSearchFailure.java` | 可取消HTTP、正文限额、来源过滤和诊断分类 |
 
-执行流程：`AgentLoop → ToolExecutor → WebSearchTool.prepare → 权限审批 → WebSearchService → 当前服务适配器 → 统一结果回填`。超时、网络故障、HTTP408/429/5xx才按顺序尝试备用，每家至多一次；空结果、400/401/403、格式错误、审批拒绝和取消不切换。结果包含实际服务、每次尝试状态/HTTP码、检索时间、来源ID和截断标记；文章发布时间只在服务提供时填写。不会抓取搜索结果页面，也不自动执行搜索片段中的命令。
+执行流程：`AgentLoop → ToolScheduler → ToolExecutor → WebSearchTool.prepare → 权限审批 → WebSearchService → 当前服务适配器 → 统一结果回填`。超时、网络故障、HTTP408/429/5xx才按顺序尝试备用，每家至多一次；空结果、400/401/403、格式错误、审批拒绝和取消不切换。结果包含实际服务、每次尝试状态/HTTP码、检索时间、来源ID和截断标记；文章发布时间只在服务提供时填写。不会抓取搜索结果页面，也不自动执行搜索片段中的命令。
 
 默认每服务超时20秒、整次搜索35秒、每次任务执行尝试最多5次逻辑搜索，通过`CODEY_WEB_SEARCH_TIMEOUT_SECONDS`、`CODEY_WEB_SEARCH_TOTAL_TIMEOUT_SECONDS`、`CODEY_WEB_SEARCH_MAX_CALLS`调整。一次逻辑搜索可包含主/备用各一次API请求；任务结束或用户继续原任务时重新分配本次额度。HTTP正文最多2MiB，结果受现有工具输出上限约束，保持完整JSON。Ctrl+C取消当前请求后停止切换，已完成结果沿用任务持久化/恢复机制。仅本地模拟测试验证协议和故障链，真实服务可用性、额度及搜索质量需用个人账号实测。
 
@@ -131,7 +131,7 @@ SerpApi 也可作为备用：设置`CODEY_WEB_SEARCH_PROVIDERS=tavily,serpapi`�
 | `tool/web/WebContentExtractor.java` | Jsoup静态正文提取、编码处理、代码/列表/链接保留 |
 | `tool/web/WebFetchService.java`、Request/Response | 任务快照缓存、分段输出和结果元数据 |
 
-执行链：`AgentLoop → ToolExecutor → WebFetchTool.prepare → 权限 → FetchHttpClient → 正文提取 → 任务快照 → 分段结果回填`。ask首次确认网页源站，成功后当前会话复用同源公开读取范围，auto允许普通公开页面，full跳过常规审批；Plan允许读取但仍走联网权限。HTTP升级HTTPS，仅使用标准端口，拒绝URL认证、已知令牌参数和本地/私网/保留地址；连接时的DNS解析返回经过检查的实际地址，不在检查后重新解析。默认不使用系统代理、不发送搜索密钥、Cookie或登录凭证。同域跳转重新校验，最多3跳；跨域跳转只返回`redirectUrl`，正文未读，需另发请求并重新检查权限。
+执行链：`AgentLoop → ToolScheduler → ToolExecutor → WebFetchTool.prepare → 权限 → FetchHttpClient → 正文提取 → 任务快照 → 分段结果回填`。ask首次确认网页源站，成功后当前会话复用同源公开读取范围，auto允许普通公开页面，full跳过常规审批；Plan允许读取但仍走联网权限。HTTP升级HTTPS，仅使用标准端口，拒绝URL认证、已知令牌参数和本地/私网/保留地址；连接时的DNS解析返回经过检查的实际地址，不在检查后重新解析。默认不使用系统代理、不发送搜索密钥、Cookie或登录凭证。同域跳转重新校验，最多3跳；跨域跳转只返回`redirectUrl`，正文未读，需另发请求并重新检查权限。
 
 默认`CODEY_WEB_FETCH_TIMEOUT_SECONDS=20`、`CODEY_WEB_FETCH_MAX_BYTES=2097152`（压缩前后各自限制）、`CODEY_WEB_FETCH_MAX_CALLS=10`（每任务执行尝试的下载次数）。`CODEY_WEB_FETCH_ENABLED=false`可关闭。任务内最多缓存8页、总正文约4M字符，不额外调用LLM摘要；分页命中缓存不再下载。完成/失败均释放内存缓存，已返回片段由任务日志保存；恢复后重新下载可能得到不同hash。这里是任务级快照，没有跨任务缓存或浏览器进程。
 
@@ -236,6 +236,7 @@ Main → 注册工具 / 加载会话设置 → SessionLauncher 展示历史
 | [AuthMode.java](src/main/java/io/github/jackfeicoder/codey/config/AuthMode.java) | 表达 Bearer 认证或无需认证的 NONE 模式 |
 | [SessionSettings.java](src/main/java/io/github/jackfeicoder/codey/config/SessionSettings.java) | 加载数据目录、建议工作区、自动标题设置，不保存模型凭证 |
 | [AgentSettings.java](src/main/java/io/github/jackfeicoder/codey/config/AgentSettings.java) | 启动时加载任务模型请求预算与目录工具默认深度，校验范围后由 Main 注入 |
+| [ToolSchedulingSettings.java](src/main/java/io/github/jackfeicoder/codey/config/ToolSchedulingSettings.java) | 独立本地读取并发数与超时，启动加载并注入 AgentLoop |
 | [CommandSettings.java](src/main/java/io/github/jackfeicoder/codey/config/CommandSettings.java) | 命令默认/最大超时、输出保留预算及解码字符集，环境覆盖 .env |
 | [StreamingSettings.java](src/main/java/io/github/jackfeicoder/codey/config/StreamingSettings.java) | 加载流式与 usage 兼容开关，默认均为 true，环境覆盖 .env |
 | [ModelCapabilities.java](src/main/java/io/github/jackfeicoder/codey/config/ModelCapabilities.java) | 保存可空的最大上下文 token 数，缺配置表示未知；与密钥和请求分开 |
@@ -260,6 +261,8 @@ Agent 运行参数也读取同一配置目录，优先级为进程环境 > `.env
 ```dotenv
 CODEY_MAX_ITERATIONS=20
 CODEY_LIST_FILES_DEFAULT_DEPTH=10
+CODEY_TOOL_MAX_PARALLEL=4
+CODEY_TOOL_READ_TIMEOUT_SECONDS=30
 ```
 
 轮次范围为 1–100，每条用户任务重新计算，包含最后一次只回答的请求；默认最多 19 轮工具探索加 1 轮收尾。目录深度范围为 1–20，表示模型省略 `maxDepth` 时的默认值；模型仍可显式指定其他合法深度。当前项目最深 Java 文件在第 10 层，提示词在第 5 层。修改这两个字段后重启 CodeY，`/model` 只重载模型配置。`--check-config` 会一并显示已解析的运行设置。
@@ -504,7 +507,34 @@ ToolCall → Registry.find → Executor 解析 JSON / 检查工作区
 
 **实现方式与边界**：工具用途用自然语言 description，参数用 JSON Schema，由协议适配器编码为结构化 `tools`；MD 只适合额外行为指导。当前只验证 schema 顶层为 object，没有通用 schema 校验器，具体字段/类型/业务限制由工具的 `validateArguments()` 明确实现。
 
-执行器拒绝重复键、尾随 JSON、非对象与超过 64 Ki 字符的参数；需要工作区的工具会检查 NONE/失效目录。默认输出最多 16000 个 Unicode 码点，截断状态单独记录。保留中断标志，不吞 JVM Error，不自动重试。当前按模型调用组顺序同步执行，已接入工作模式检查和审批；execute_command 单独实现进程超时，其他工具未统一增加执行超时，并行工具调度仍待实现。详见 [工具模块设计与示例](docs/architecture.md#tool-foundation)。
+执行器拒绝重复键、尾随 JSON、非对象与超过 64 Ki 字符的参数；需要工作区的工具会检查 NONE/失效目录。默认输出最多 16000 个 Unicode 码点，截断状态单独记录。保留中断标志，不吞 JVM Error，不自动重试。当前连续的独立本地读取有限并行，其他操作形成串行边界；读取有独立调度超时，execute_command 保留进程超时。详见下方并行调度。详见 [工具模块设计与示例](docs/architecture.md#tool-foundation)。
+
+#### 独立本地读取并行调度（已实现）
+
+仅 `list_files`、`search_file`、`grep_code`、`read_file` 显式声明 `PARALLEL_READ`。READ_ONLY 是权限类别，并不自动意味着线程安全；写入、命令、联网、MCP（含释放）及 Skill 仍串行。
+
+| 文件 | 职责 |
+|---|---|
+| `tool/ToolExecutionMode.java` | 默认 SERIAL，经过确认的独立读取显式选择 PARALLEL_READ |
+| `tool/ToolScheduler.java` | 连续读取分组、有限并发、串行边界、期限/取消、主线程回调与有序结果 |
+| `config/ToolSchedulingSettings.java` | 默认并发4，范围1～8；读取期限默认30秒，范围1～120秒 |
+| `tool/ToolRegistry.java`、`ToolExecutor.java` | 主线程冻结注册元数据，工作线程执行同一参数/权限/输出校验链 |
+| `agent/AgentLoop.java`、`observability/DebugPrinter.java` | 接入调度器，主线程显示并行组、逐项开始/失败和结果落盘 |
+| `task/TaskStore.java` | 原始事件按完成顺序保存，派生消息按 tool_call_id 对应的原调用顺序归位 |
+
+流程：`模型 tool_calls → 整组协议/ID 校验 → 按连续独立读取分组 → 最多N项同时调度 → 主线程记录完成结果 → 串行操作 → 按原调用顺序回填 → 下一轮模型`。
+
+例如 `[read A, read B, edit A, read A, read C]` 分为“并行读取A/B → 编辑A → 并行读取A/C”。写入前等待前组读取结束，后组读取看到编辑后的内容。依赖本轮目录/搜索结果的新调用应等下一轮提出，调度器不解析参数占位符或猜测依赖图。
+
+`CODEY_TOOL_MAX_PARALLEL=4`，范围1～8，1表示读取串行（仍有读取期限）；每个响应最多16个工具，与并发数和模型轮次分别管理。完成一个补一个，不按固定批次等待。全进程读取线程池硬上限8，等待队列16，多个嵌入任务共享此总上限；当前CLI仍每次运行一个用户任务。
+
+`CODEY_TOOL_READ_TIMEOUT_SECONDS=30`，范围1～120，从提交时开始计时并包含线程池排队，协调线程检查期限。达到期限返回 `TOOL_TIMEOUT` 并请求中断；单项业务错误不取消其他独立读取。不自动重试。队列饱和返回 `TOOL_SCHEDULER_BUSY`，不无限排队。
+
+Ctrl+C 停止调度，取消未结束读取；主线程尽量保存已取得的结果，未落盘结果由恢复模块标为未知。Java文件I/O不保证立即响应中断：超时取消后给1秒停止宽限，未停止则终止本次任务，阻止后续工具和模型请求。无法强停的读取仍占全局池槽位，使用守护线程且不新增无限线程。工作区也不构成所有读取共享的原子快照，外部进程修改文件仍可能影响结果。
+
+注册表、审批状态、终端输出及任务日志只在主线程操作，工作线程使用固定注册项。事件可以乱序完成，成功历史与恢复检查点保持原调用顺序，避免恢复时误判已经提交的历史。配置修改后重启，`--check-config` 查看解析值。控制台示例：`[第 1 轮] 并行读取 4 项 · 最多 4 项同时执行`。并行能力由Java实现声明，不是模型参数或新的工具。
+
+验证：本次新增32项配置、调度、真实文件/PLAN与任务恢复测试；`mvn verify` 共1192项通过，失败/错误/跳过均为0。同步屏障验证重叠执行、并发上限、补位和串行边界；覆盖排队超时、Ctrl+C、未响应中断时停止后续操作、错误脱敏和JVM Error传播。生产JAR在临时目录运行四个真实读取工具、并发2，验证两个模型替身请求、有序回填和历史保存；未调用真实模型或外部服务。
 
 <a id="execute-command"></a>
 
@@ -612,7 +642,7 @@ ToolCall("grep_code", {query, path?, filePattern?, caseSensitive?, maxResults?})
 `edit_file` 必填 `path/oldText/newText`，可选 `replaceAll` 默认 false。大小写、空白、换行精确匹配；旧片段非空且必须与新片段不同。零处匹配报 `TEXT_NOT_FOUND`，多处匹配报 `AMBIGUOUS_MATCH`；显式 true 才替换所有非重叠匹配。插入时把原锚点保留在新片段，删除时 `newText` 为空。只操作已有文件，不自动新建。
 
 ```text
-模型 tools 调用 → AgentLoop → ToolExecutor 严格解析/工作区检查
+模型 tools 调用 → AgentLoop → ToolScheduler → ToolExecutor 严格解析/工作区检查
   → WriteFileTool / EditFileTool 校验参数并构造目标内容
   → WorkspaceTextFiles 路径/编码/大小检查 → 提交前检查原文件快照
   → 同目录临时文件提交 → JSON 元数据 → 原调用 ID 的 tool 消息 → 模型继续
@@ -650,7 +680,7 @@ Main 注册工具 → Launcher/ChatCli 装配 AgentLoop 与当前工作区
       └─ 服务商仍返回工具：BUDGET_EXHAUSTED → 不执行、不追加该调用、不提交残缺历史
 ```
 
-**实现方式与边界**：默认最多请求模型 20 次，由 `CODEY_MAX_ITERATIONS` 配置，包含最终回答请求；临近上限通过临时 system 副本提醒，最后一次通过协议与执行器双重禁用工具。有效收尾回答与完整工具消息一并保存，CLI 提示预算受限；预算提示本身不进入历史。每个响应最多执行 16 个工具。整组执行前检查结束原因与跨步骤 ID 重复，截断的工具请求不执行。未知工具、业务参数错误与读取失败均回填关联错误，允许模型修正；网络/协议错误和线程中断沿 `LlmException` 退出，原历史保持完整。非空文本长度截断可保存并显示提示。空正文或纯空白且无工具调用时按 INVALID_RESPONSE 报错，不打印空 CodeY 回答、不提交本轮；不自动重试。COMPLETED 表示模型返回非空最终文本，并不证明代码修改或测试验收已完成。暂无线程外工具超时、任务总时间/累计 Token 消耗预算、重复无进展检测或执行中恢复。详见 [循环实现与验收](docs/architecture.md#agent-loop)。
+**实现方式与边界**：默认最多请求模型 20 次，由 `CODEY_MAX_ITERATIONS` 配置，包含最终回答请求；临近上限通过临时 system 副本提醒，最后一次通过协议与执行器双重禁用工具。有效收尾回答与完整工具消息一并保存，CLI 提示预算受限；预算提示本身不进入历史。每个响应最多执行 16 个工具。整组执行前检查结束原因与跨步骤 ID 重复，截断的工具请求不执行。未知工具、业务参数错误与读取失败均回填关联错误，允许模型修正；网络/协议错误和线程中断沿 `LlmException` 退出，原历史保持完整。非空文本长度截断可保存并显示提示。空正文或纯空白且无工具调用时按 INVALID_RESPONSE 报错，不打印空 CodeY 回答、不提交本轮；不自动重试。COMPLETED 表示模型返回非空最终文本，并不证明代码修改或测试验收已完成。本地读取已支持线程外调度超时与取消，执行中恢复见任务模块；任务总时间/累计 Token 消耗预算及重复无进展检测待实现。详见 [循环实现与验收](docs/architecture.md#agent-loop)。
 
 <a id="module-context"></a>
 

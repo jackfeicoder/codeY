@@ -13,7 +13,6 @@ import io.github.jackfeicoder.codey.observability.DebugPrinter;
 import io.github.jackfeicoder.codey.session.Session;
 import io.github.jackfeicoder.codey.session.Message;
 import io.github.jackfeicoder.codey.tool.ToolContext;
-import io.github.jackfeicoder.codey.tool.ToolExecutor;
 import io.github.jackfeicoder.codey.tool.ToolRegistry;
 
 import java.util.ArrayList;
@@ -22,20 +21,24 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 
-/** 单任务的 ReAct 风格循环：请求模型 → 顺序执行工具 → 回填结果 → 再请求，直到回答或预算耗尽。 */
+/** 单任务 ReAct 循环：请求模型 → 调度工具（独立读取有限并行）→ 有序回填 → 再请求。 */
 public final class AgentLoop {
     /** 包含最终回答请求在内，默认最多调用模型 20 次；最后一次只用于回答。 */
     public static final int DEFAULT_MAX_STEPS = 20;
     /** 配置和构造入口共用硬上限，避免用户参数绕过预算范围。 */
     public static final int MAX_STEPS = 100;
     /** 单个模型响应最多调度 16 个工具，避免响应一次要求无界执行。 */
-    public static final int MAX_TOOL_CALLS_PER_STEP = 16;
+    public static final int MAX_TOOL_CALLS_PER_STEP = io.github.jackfeicoder.codey.tool.ToolScheduler.MAX_CALLS;
     /** 一次 generate 对应一次模型请求，HTTP 逻辑仍在 LLM 层。 */
     private final LlmClient client;
     /** 汇总当前可用定义，不将说明拼入提示词。 */
     private final ToolRegistry registry;
-    /** 校验参数与执行工具，工具失败转换为关联结果。 */
-    private final ToolExecutor executor;
+    /** 调度参数由宿主注入；各工具参数、权限与输出校验仍由 ToolExecutor 处理。 */
+    private io.github.jackfeicoder.codey.config.ToolSchedulingSettings toolScheduling = new io.github.jackfeicoder.codey.config.ToolSchedulingSettings();
+    /** 宿主启动时注入；并行设置不来自模型参数，不改变调用次数预算。 */
+    public AgentLoop withToolScheduling(io.github.jackfeicoder.codey.config.ToolSchedulingSettings settings) {
+        this.toolScheduling=Objects.requireNonNull(settings);return this;
+    }
     /** 单任务的模型请求预算，构造后固定。 */
     private final int maxSteps;
     /** 在执行位置打印简洁进度，由 Main 提供输出；默认静默便于复用。 */
@@ -88,7 +91,6 @@ public final class AgentLoop {
         this.registry = Objects.requireNonNull(registry, "registry");
         if (maxSteps < 1 || maxSteps > MAX_STEPS) throw new IllegalArgumentException("Agent steps must be within 1..100.");
         this.maxSteps = maxSteps;
-        this.executor = new ToolExecutor(registry);
         this.debug = Objects.requireNonNull(debug, "debug");
         this.contexts = Objects.requireNonNull(contexts, "contexts");
         this.onContext = Objects.requireNonNull(onContext, "onContext");
@@ -139,6 +141,7 @@ public final class AgentLoop {
         int executions = 0;
         boolean warned = false; // 一个用户任务最多输出一次预警，不把每轮都刷成同一提醒。
         boolean summaryFailed = false;
+        var scheduler=new io.github.jackfeicoder.codey.tool.ToolScheduler(registry,toolScheduling);
         for (int step = 1; step <= maxSteps; step++) {
             checkInterrupted();
             boolean finalRound = step == maxSteps;
@@ -198,21 +201,22 @@ public final class AgentLoop {
             }
             messages.add(response.message());
             if (task != null) task.assistant(response.message());
-            for (var call : response.toolCalls()) {
+            final int round=step;
+            try {
+                var batch=scheduler.execute(
+                        response.toolCalls(),offered,context,new io.github.jackfeicoder.codey.tool.ToolScheduler.Observer() {
+                    public void started(io.github.jackfeicoder.codey.tool.ToolCall call) {
+                        debug.tool(round,call);if(task!=null)task.toolStarted(call.id());
+                    }
+                    public void completed(io.github.jackfeicoder.codey.tool.ToolResult result) {
+                        debug.toolFailed(round,result);if(task!=null)task.toolResult(result.toMessage());
+                    }
+                    public void parallelGroup(int size,int parallelism) {debug.parallelReads(round,size,parallelism);}
+                });
+                executions+=batch.size();
                 checkInterrupted();
-                debug.tool(step, call);
-                if (task != null) task.toolStarted(call.id());
-                var result = offered.contains(call.name()) ? executor.execute(call, context)
-                        : new io.github.jackfeicoder.codey.tool.ToolResult(call.id(), call.name(),
-                        io.github.jackfeicoder.codey.tool.ToolResult.Status.ERROR,
-                        "Tool was not offered in this request. Summon it and use it in the next request.",
-                        io.github.jackfeicoder.codey.tool.ToolResult.ErrorCode.UNKNOWN_TOOL, 0, false);
-                executions++;
-                debug.toolFailed(step, result);
-                if (task != null) task.toolResult(result.toMessage());
-                checkInterrupted(); // 中断不进入下一工具或模型请求。
-                messages.add(result.toMessage()); // 错误也回填，让模型下一轮修正参数。
-            }
+                batch.forEach(result->messages.add(result.toMessage()));
+            } catch(InterruptedException cancelled) {Thread.currentThread().interrupt();checkInterrupted();}
         }
         return new AgentResult(AgentResult.Status.BUDGET_EXHAUSTED,
                 messages, null, maxSteps, executions);

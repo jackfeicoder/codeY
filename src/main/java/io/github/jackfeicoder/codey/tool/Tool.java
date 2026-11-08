@@ -9,6 +9,8 @@ public interface Tool {
 
     /** 操作类别由实现声明，未知工具默认需审；不是模型可填写的参数。 */
     default ToolAccess access() { return ToolAccess.UNKNOWN; }
+    /** 只有无审批、无共享状态变更的独立读取实现才能显式选择 PARALLEL_READ。 */
+    default ToolExecutionMode executionMode() { return ToolExecutionMode.SERIAL; }
 
     /** 默认工具无需特殊预处理；写工具覆盖此方法捕获确定的旧快照、新内容和预览。 */
     default PreparedToolOperation prepare(JsonNode arguments, ToolContext context) throws InterruptedException {

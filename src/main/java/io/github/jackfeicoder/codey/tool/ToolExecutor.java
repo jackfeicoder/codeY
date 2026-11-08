@@ -29,6 +29,10 @@ public final class ToolExecutor {
 
     /** 预期失败归一化为结果，不自动重试；非法宿主参数与 JVM Error 不吞掉。 */
     public ToolResult execute(ToolCall call, ToolContext context) {
+        return execute(call,context,registry.find(Objects.requireNonNull(call).name()).orElse(null));
+    }
+    /** 调度器在主线程固定注册项；工作线程不访问动态注册表，所有校验和输出边界仍共用。 */
+    public ToolResult execute(ToolCall call, ToolContext context, ToolRegistry.RegisteredTool entry) {
         Objects.requireNonNull(call, "call");
         Objects.requireNonNull(context, "context");
         long start = System.nanoTime(); // 单调时钟用于耗时测量，不是执行超时控制。
@@ -36,8 +40,8 @@ public final class ToolExecutor {
             if (Thread.currentThread().isInterrupted()) {
                 throw new ToolException(ToolResult.ErrorCode.INTERRUPTED, "Tool execution was interrupted.");
             }
-            ToolRegistry.RegisteredTool entry = registry.find(call.name()).orElseThrow(() ->
-                    new ToolException(ToolResult.ErrorCode.UNKNOWN_TOOL, "Tool is not registered."));
+            if (entry == null) throw new ToolException(ToolResult.ErrorCode.UNKNOWN_TOOL, "Tool is not registered.");
+            if (!entry.definition().name().equals(call.name())) throw new IllegalArgumentException("Tool snapshot does not match call.");
             JsonNode arguments = parseArguments(call.arguments()); // 防止绕过 LLM 层直接调用时传入非法 JSON。
             if (entry.requiresWorkspace()) {
                 if (context.workspace().mode() == WorkspaceBinding.Mode.NONE) {

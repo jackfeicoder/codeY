@@ -150,7 +150,10 @@ public final class TaskStore {
             case "ASSISTANT" -> {state.messages.add(Objects.requireNonNull(e.message()));
                 if(e.message().toolCalls().isEmpty())state.status=TaskState.Status.COMMIT_PENDING;}
             case "TOOL_INTENT" -> {state.started.add(e.detail());state.toolCalls++;}
-            case "TOOL_RESULT", "RECOVERY_RESULT" -> state.messages.add(Objects.requireNonNull(e.message()));
+            case "TOOL_RESULT", "RECOVERY_RESULT" -> {
+                state.messages.add(Objects.requireNonNull(e.message()));
+                orderToolResults(state); // 事件保留实际完成顺序，派生消息按原调用顺序，恢复与提交比较一致。
+            }
             case "SKILLS" -> state.skills=List.copyOf(e.skills());
             case "RESUME" -> {state.status=TaskState.Status.RUNNING;state.reason="";state.attempts++;
                 state.anchorCount=e.anchorCount();state.anchorHash=e.anchorHash();state.profile=e.detail();}
@@ -160,6 +163,19 @@ public final class TaskStore {
             default -> throw new TaskException("未知任务事件类型。");
         }
         state.sequence=e.sequence();state.updatedAt=e.time();return state;
+    }
+
+    /** 最后一个工具组可部分完成；缺失项由恢复补齐，再按同一顺序归位。 */
+    private static void orderToolResults(TaskState state) {
+        for(int i=state.messages.size()-1;i>=0;i--) {
+            var message=state.messages.get(i);
+            if(message.role()!=io.github.jackfeicoder.codey.session.MessageRole.ASSISTANT)continue;
+            if(message.toolCalls().isEmpty())return;
+            var order=new java.util.HashMap<String,Integer>();
+            for(int n=0;n<message.toolCalls().size();n++)order.put(message.toolCalls().get(n).id(),n);
+            state.messages.subList(i+1,state.messages.size()).sort(java.util.Comparator.comparingInt(m->order.getOrDefault(m.toolCallId(),Integer.MAX_VALUE)));
+            return;
+        }
     }
 
     /** 文件强制落盘后，同目录原子替换；不退化为可能损坏旧记录的覆盖写。 */

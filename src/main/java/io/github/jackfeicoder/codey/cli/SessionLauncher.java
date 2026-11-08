@@ -126,6 +126,11 @@ public final class SessionLauncher {
     private ContextBuilder contexts = new ContextBuilder(this::projectRules, this::selectMemories);
     private io.github.jackfeicoder.codey.skill.SkillService skills;
     private io.github.jackfeicoder.codey.task.TaskStore tasks;
+    private io.github.jackfeicoder.codey.config.ToolSchedulingSettings toolScheduling = new io.github.jackfeicoder.codey.config.ToolSchedulingSettings();
+    /** 主入口注入启动快照；切换会话/模型保持调度设置，工作模式与审批仍独立检查。 */
+    public SessionLauncher withToolScheduling(io.github.jackfeicoder.codey.config.ToolSchedulingSettings settings) {
+        this.toolScheduling=java.util.Objects.requireNonNull(settings);return this;
+    }
     /** 生产入口启用会话内任务记录，测试/嵌入入口可保持内存模式。 */
     public SessionLauncher withTasks(io.github.jackfeicoder.codey.task.TaskStore tasks) {
         this.tasks=java.util.Objects.requireNonNull(tasks);return this;
@@ -774,7 +779,8 @@ public final class SessionLauncher {
             }
         };
         var loop = new AgentLoop(observed, tools, maxIterations, debug, taskContexts, this::updateContext, budgetPolicy,
-                new HistoryCompactor(selectedClient, budgetPolicy, compactionSettings, taskContexts, debug), this::saveCompaction);
+                new HistoryCompactor(selectedClient, budgetPolicy, compactionSettings, taskContexts, debug), this::saveCompaction)
+                .withToolScheduling(toolScheduling);
         if(task!=null)loop.withTask(task);
         ChatCli chat = new ChatCli(loop, active.session(),
                 new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions,

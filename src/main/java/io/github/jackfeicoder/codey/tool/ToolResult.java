@@ -12,7 +12,7 @@ import io.github.jackfeicoder.codey.session.Message;
  * @param status 明确区分成功和错误，避免把错误文本误当成功
  * @param output 工具输出或可展示错误说明
  * @param errorCode 成功时为 null，错误时必须存在
- * @param durationMillis 从查找/校验到完成的耗时，不表示已实现执行超时
+ * @param durationMillis 执行耗时；调度超时错误包含排队时间，各类别由独立预算控制
  * @param truncated 输出是否被宿主截断
  */
 public record ToolResult(String callId, String name, Status status, String output,
@@ -22,6 +22,7 @@ public record ToolResult(String callId, String name, Status status, String outpu
     /** 首版统一错误类别，后续路径/审批策略可按真实需求扩展。 */
     public enum ErrorCode {
         UNKNOWN_TOOL, INVALID_ARGUMENTS, WORKSPACE_REQUIRED, WORKSPACE_UNAVAILABLE, EXECUTION_FAILED, INTERRUPTED,
+        TOOL_TIMEOUT, TOOL_SCHEDULER_BUSY,
         PATH_OUTSIDE_WORKSPACE, FILE_NOT_FOUND, NOT_A_FILE, FILE_NOT_READABLE, FILE_READ_FAILED,
         FILE_TOO_LARGE, LINE_TOO_LONG, INVALID_ENCODING, NOT_TEXT_FILE, OUTPUT_LIMIT_TOO_SMALL,
         DIRECTORY_NOT_FOUND, NOT_A_DIRECTORY, DIRECTORY_NOT_READABLE, DIRECTORY_READ_FAILED,

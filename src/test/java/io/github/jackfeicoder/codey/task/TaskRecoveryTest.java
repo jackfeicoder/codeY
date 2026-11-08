@@ -24,6 +24,34 @@ class TaskRecoveryTest {
     private LlmResponse answer(){return new LlmResponse(Message.assistant("done"),"stop",null);}
     private Message calls(String... ids){return Message.assistantToolCalls(Arrays.stream(ids).map(id->new ToolCall(id,"fixture","{}")).toList());}
 
+    @Test void outOfOrderParallelResultsRebuildCanonicalHistoryAndDetectCommit() throws Exception {
+        var store=new TaskStore(data);String sid=sessionId();String id;
+        try(var run=create(store,sid)) {
+            id=run.state().id;run.assistant(calls("first","second","third"));
+            run.toolStarted("first");run.toolStarted("second");run.toolStarted("third");
+            run.toolResult(Message.tool("third","result-3"));run.toolResult(Message.tool("second","result-2"));run.toolResult(Message.tool("first","result-1"));
+            assertEquals(List.of("first","second","third"),run.state().messages.stream().filter(m->m.role()==MessageRole.TOOL).map(Message::toolCallId).toList());
+            run.assistant(Message.assistant("done"));session.completeAgentTurn(run.state().messages);
+        }
+        try(var run=store.open(sid,id)) {
+            assertTrue(run.alreadyCommitted(session.messages()));run.committed();
+        }
+    }
+    @Test void partialParallelResultsKeepKnownLaterCallsWhenEarlierCallsAreMissing() throws Exception {
+        var store=new TaskStore(data);String sid=sessionId();String id;
+        try(var run=create(store,sid)) {
+            id=run.state().id;run.assistant(calls("unknown-first","known-second","not-started"));
+            run.toolStarted("unknown-first");run.toolStarted("known-second");run.toolResult(Message.tool("known-second","keep-known"));
+        }
+        try(var run=store.open(sid,id)) {
+            run.resume("fixture",session.messages());
+            var results=run.state().messages.stream().filter(m->m.role()==MessageRole.TOOL).toList();
+            assertEquals(List.of("unknown-first","known-second","not-started"),results.stream().map(Message::toolCallId).toList());
+            assertTrue(results.get(0).content().contains("recovery_unknown"));assertEquals("keep-known",results.get(1).content());assertTrue(results.get(2).content().contains("recovery_not_started"));
+            assertTrue(new AgentLoop(r->answer(),new ToolRegistry(),2).withTask(run).run(session,"goal",new ToolContext(workspace)).completed());
+        }
+    }
+
     @Test void recoversKnownResultsAndMarksUncertainCallsWithoutReplayingThem() throws Exception {
         var store=new TaskStore(data);String sid=sessionId();String id;
         try(var run=create(store,sid)) {

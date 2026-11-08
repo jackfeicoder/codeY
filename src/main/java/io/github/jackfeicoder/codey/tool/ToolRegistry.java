@@ -6,7 +6,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
-/** 单线程工具注册表：稳定保存名称/定义/实现，拒绝重复注册，不执行工具。 */
+/** 主线程工具注册表：稳定保存定义/实现/调度能力；读取工作线程只使用已固定的注册项快照。 */
 public final class ToolRegistry {
     /** 按注册顺序保存，定义展示顺序确定；名称区分大小写。 */
     private final Map<String, RegisteredTool> tools = new LinkedHashMap<>();
@@ -34,13 +34,21 @@ public final class ToolRegistry {
     public void finishTask() { for (Runnable cleanup : List.copyOf(taskCleanups)) cleanup.run(); }
 
     /** 注册时固定元数据，即使实现之后改变 definition() 也不改变已注册说明。 */
-    public record RegisteredTool(ToolDefinition definition, Tool implementation, boolean requiresWorkspace, ToolAccess access) { }
+    public record RegisteredTool(ToolDefinition definition, Tool implementation, boolean requiresWorkspace, ToolAccess access,
+                                 ToolExecutionMode executionMode) {
+        public RegisteredTool(ToolDefinition definition,Tool implementation,boolean requiresWorkspace,ToolAccess access) {
+            this(definition,implementation,requiresWorkspace,access,ToolExecutionMode.SERIAL);
+        }
+    }
 
     /** 返回 this 便于装配多个工具；重复名称明确报错，不静默覆盖。 */
     public ToolRegistry register(Tool tool) {
         Objects.requireNonNull(tool, "tool");
         ToolDefinition definition = Objects.requireNonNull(tool.definition(), "definition");
-        RegisteredTool entry = new RegisteredTool(definition, tool, tool.requiresWorkspace(), Objects.requireNonNull(tool.access()));
+        RegisteredTool entry = new RegisteredTool(definition, tool, tool.requiresWorkspace(), Objects.requireNonNull(tool.access()),
+                Objects.requireNonNull(tool.executionMode()));
+        if (entry.executionMode() == ToolExecutionMode.PARALLEL_READ && entry.access() != ToolAccess.READ_ONLY)
+            throw new IllegalArgumentException("Parallel execution requires a trusted read-only tool.");
         if (tools.putIfAbsent(definition.name(), entry) != null) {
             throw new IllegalArgumentException("Tool is already registered: " + definition.name());
         }

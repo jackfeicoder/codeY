@@ -34,6 +34,10 @@ public final class DebugPrinter {
 
     /** 在请求前显示当前任务的模型调用序号，下一任务从 1 开始。 */
     public void round(int step) { line(Kind.REQUEST, "[第 " + step + " 轮] 请求模型"); }
+    /** 只显示本轮并行组与并发上限，启动/失败仍逐项显示，不输出工具正文。 */
+    public void parallelReads(int step,int size,int parallelism) {
+        line(Kind.TOOL,"  [第 "+step+" 轮] 并行读取 "+size+" 项 · 最多 "+Math.min(size,parallelism)+" 项同时执行");
+    }
     /** 摘要进度独立于业务轮次，不输出历史、摘要正文或模型错误原文。 */
     public void compaction(String text) { line(Kind.CONTEXT, "[上下文压缩] " + text); }
 
