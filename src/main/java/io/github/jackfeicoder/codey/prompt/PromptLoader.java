@@ -6,6 +6,8 @@ import java.nio.charset.StandardCharsets;
 
 /** 提示词资源加载器：从 classpath 读取 UTF-8 文本，开发运行和打包 JAR 使用同一路径。 */
 public final class PromptLoader {
+    /** 规划阶段独立资源，历史基础提示词快照不影响新版规划指令。 */
+    public static String loadPlan() { return loadResource("/prompts/plan.md"); }
     /** 内置基础提示词在 classpath 中的绝对资源路径，与启动目录无关。 */
     private static final String BASE_RESOURCE = "/prompts/base.md";
 

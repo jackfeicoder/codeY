@@ -16,7 +16,10 @@ import java.util.List;
  * @param budgetLimited 是否进入预算收尾，CLI 显示提示；有效总结仍可保存完整轮次
  */
 public record AgentResult(Status status, List<Message> turnMessages, LlmResponse response,
-                          int modelCalls, int toolCalls, boolean budgetLimited) {
+                          int modelCalls, int toolCalls, boolean budgetLimited, boolean hostFinal) {
+    public AgentResult(Status status,List<Message> turnMessages,LlmResponse response,int modelCalls,int toolCalls,boolean budgetLimited) {
+        this(status,turnMessages,response,modelCalls,toolCalls,budgetLimited,false);
+    }
     /** 保留旧构造入口，预算退出默认标记受限。 */
     public AgentResult(Status status, List<Message> turnMessages, LlmResponse response, int modelCalls, int toolCalls) {
         this(status, turnMessages, response, modelCalls, toolCalls, status == Status.BUDGET_EXHAUSTED);

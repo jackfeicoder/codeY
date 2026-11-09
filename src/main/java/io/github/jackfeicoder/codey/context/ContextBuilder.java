@@ -78,7 +78,7 @@ public final class ContextBuilder {
         var skillView=skills.get();
         String skillBody=currentTurn.isEmpty()?"":skillView.instructions();
         String runtime = (taskInstructions.isEmpty() ? "" : "\n\n[本次任务指令]\n" + taskInstructions)
-                + runtimeInstructions(mode, step, maxSteps);
+                + runtimeInstructions(mode, step, maxSteps, tools.stream().anyMatch(t->t.name().equals("submit_plan")||t.name().equals("update_plan")));
         var raw = history.subList(1, history.size());
         String summaryText = "";
         if (state != null) {
@@ -93,7 +93,8 @@ public final class ContextBuilder {
         messages.add(Message.system(base + rules + runtime + skillView.catalog()));
         messages.addAll(recent);
         messages.addAll(currentTurn);
-        var request = new LlmRequest(messages, tools, step < maxSteps);
+        boolean controlOnly = !tools.isEmpty() && tools.stream().allMatch(t->t.name().equals("submit_plan")||t.name().equals("update_plan"));
+        var request = new LlmRequest(messages, tools, step < maxSteps || controlOnly);
         long past = raw.stream().mapToLong(estimator::messageBodyTokens).sum();
         long user = 0, assistant = 0, results = 0, resources = 0;
         var resourceCalls=new HashSet<String>();
@@ -127,7 +128,7 @@ public final class ContextBuilder {
         }
         long recall = selected.recalledTokens() + (!selected.recalled().isEmpty() && !currentTurn.isEmpty()
                 ? estimator.textTokens("\n[当前用户任务]\n") : 0);
-        request = new LlmRequest(messages, tools, step < maxSteps);
+        request = new LlmRequest(messages, tools, step < maxSteps || controlOnly);
         return new ContextSnapshot(request, new ContextSnapshot.TokenBreakdown(estimator.textTokens(base),
                 estimator.textTokens(runtime), past, user, assistant, results, definitions, overhead,
                 estimator.textTokens(summaryText), estimator.textTokens(rules), selected.alwaysTokens(), recall,
@@ -135,9 +136,9 @@ public final class ContextBuilder {
     }
 
     /** 运行时指令只叠加在本次 system 副本，保持原有 PLAN 和请求轮次预算语义。 */
-    private static String runtimeInstructions(WorkMode mode, int step, int maxSteps) {
+    private static String runtimeInstructions(WorkMode mode, int step, int maxSteps, boolean planControls) {
         String runtime = mode == WorkMode.PLAN
-                ? "\n\n[当前工作模式：PLAN]\n只读探索并输出计划，不修改文件、不执行副作用操作。用户可用 /mode react 切换后实施。" : "";
+                ? "\n\n[当前工作模式：PLAN]\n只读探索并输出计划，不修改工作区、不执行业务副作用。\n"+io.github.jackfeicoder.codey.prompt.PromptLoader.loadPlan() : "";
         int remaining = maxSteps - step + 1;
         if (remaining <= 3) {
             String instruction = step == maxSteps
@@ -145,6 +146,7 @@ public final class ContextBuilder {
                     + "明确尚未完成或尚未确认的部分，不要声称未执行的操作已完成，不要再请求工具。"
                     : "当前任务最多允许 " + maxSteps + " 次模型请求，包括本次还剩 " + remaining
                     + " 次。请优先使用已有证据，避免重复探索；信息足够时立即回答，最后一次请求将禁用工具并用于总结。";
+            if(step==maxSteps&&planControls)instruction="这是当前任务最后一次模型请求，业务工具已禁用；只可用submit_plan或update_plan提交已有计划/步骤结果。证据不足则声明BLOCKED，避免声称已完成。";
             runtime += "\n\n[运行时任务预算]\n" + instruction;
         }
         return runtime;

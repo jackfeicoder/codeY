@@ -305,6 +305,7 @@ public final class Main {
             }, PromptLoader::loadBase, consoleInput, output, errors, options, chatTools, debug,
                     () -> ConfigLoader.loadModelCatalog(startup, environment), agentSettings.maxIterations(), permissionSettings, budgetSettings, compactionSettings, MemorySettings.load(startup, environment), MemoryExtractionSettings.load(startup, environment), MemoryConsolidationSettings.load(startup, environment)).withMcp(mcp, new io.github.jackfeicoder.codey.mcp.McpConfigStore(startup, environment)).withSkills(skills)
                     .withTasks(new io.github.jackfeicoder.codey.task.TaskStore(settings.dataDirectory()))
+                    .withPlans()
                     .withToolScheduling(io.github.jackfeicoder.codey.config.ToolSchedulingSettings.load(startup,environment)).run();
         }
     }
@@ -366,6 +367,9 @@ public final class Main {
                   /sessions refreshes; /rename TITLE renames; /back returns to the active chat.
                   /help lists commands; /list model lists profile aliases and model IDs.
                   /model ALIAS [MODEL_ID] switches the active model while preserving history.
+                  /plan TASK investigates read-only and submits a versioned plan; /plan displays the current plan.
+                  Review with 执行 / 调整 / 稍后; approved steps run sequentially in dependency order with existing permissions.
+                  Plan progress survives restart; 继续 resumes, 增加预算 20 adds to the shared 60-request execution budget.
                   Each CODEY_PROFILE_*_MODEL accepts comma-separated model IDs; the first is the fallback.
                   Interactive terminals support Tab completion and arrow-key candidate selection.
                   Use --profile "ALIAS MODEL_ID" to select a specific model at startup.
@@ -384,7 +388,7 @@ public final class Main {
                   CODEY_MAX_ITERATIONS defaults to 20 (range 1..100).
                   CODEY_TOOL_MAX_PARALLEL defaults to 4 (range 1..8); 1 serializes independent local reads.
                   CODEY_TOOL_READ_TIMEOUT_SECONDS defaults to 30 (range 1..120), including read worker queue time.
-                  The final request disables tools and asks for an evidence-based answer; budget hints are not saved.
+                  The final request disables business tools; bound plan control may still submit plan or step results.
                   CODEY_LIST_FILES_DEFAULT_DEPTH defaults to 10 (range 1..20); Agent settings load on startup.
                   Completed assistant/tool groups are saved; failed or exhausted tasks are not committed.
                   Progress shows numbered model requests, called tools and involved files.

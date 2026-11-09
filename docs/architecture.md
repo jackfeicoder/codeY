@@ -3037,3 +3037,57 @@ Java17使用固定上限 ThreadPoolExecutor 与 FutureTask，单个任务并发�
 该方案没有并发写入、任意DAG分析、跨用户任务调度或工作区原子快照；可并行工具由可信Java实现负责遵守无共享状态修改的约定。配置 CODEY_TOOL_MAX_PARALLEL=4、CODEY_TOOL_READ_TIMEOUT_SECONDS=30 启动读取，环境覆盖.env；改为1保留超时并串行执行读取。工具并发与MapReduce摘要并发、模型请求轮次分别管理。使用及文件职责见README工具模块。
 
 验证记录：本阶段新增32项测试，完整mvn verify为1192项，失败/错误/跳过均为0。同步信号验证并行重叠、完成补位、顺序屏障、调用ID有序回填、全局8线程上限和排队超时；验证普通错误/JVM Error、取消、未响应中断、日志异常、PLAN真实文件读取、任务乱序结果重建、部分完成后中断/重启恢复及提交识别。生产JAR使用临时工作区与模型替身运行四个真实文件工具，并发设2，成功完成2轮请求、有序回填和历史校验；不代表真实模型任务速度或成功率。
+
+## 结构化计划与分步实施（2026-11-09）
+
+### 职责与执行链
+
+PLAN沿用现有AgentLoop、上下文、工具与TaskStore；不另建一套LLM调用或执行器。模型调查项目并调用submit_plan，Java接收结构化计划、校验依赖图、持久化，然后结束当前规划阶段，等待当前用户审阅。用户输入执行后按稳定拓扑顺序逐步使用普通ReAct执行；普通工作模式与ask/auto/full仍分别控制，批准计划不赋予操作权限。
+
+```text
+/plan 需求（或 /mode plan 后输入需求）
+  → SessionLauncher.beginPlanning / TaskRun.bindPlan
+  → ContextBuilder：plan.md + 当前计划状态 + 原有上下文
+  → AgentLoop只读调查（本地读取仍有限并行）
+  → submit_plan(title, steps[])
+  → PlanService.submit → orderedSteps图校验 → PlanStore.save
+  → 阶段终态屏障，完整历史提交，等待用户
+  → 执行 / 调整+修改意见 / 稍后
+  → 批准绑定当前版本指纹
+  → nextStep选择依赖均完成的步骤
+  → 创建或恢复关联TaskRun → PlanBinding固定stepId/taskId/version
+  → 原AgentLoop + 原ToolExecutor + 原PermissionService
+  → update_plan(status, note, evidence[])
+  → 候选结果落盘 → 完整会话提交 → TaskRun.committed
+  → PlanService.committed确认进度 → 下一步/完成/阻塞
+```
+
+### 数据结构与文件分工
+
+`ExecutionPlan`保存UUID、会话与工作区归属、原始目标、标题、规格版本、批准指纹、阶段、共享请求预算、步骤、有限旧版本和乐观写入序号。`PlanStep`保存id、description、verification、kind、files、dependsOn、status、taskId、note、proposed与evidence。kind为ANALYSIS/IMPLEMENTATION/VERIFICATION；步骤状态为PENDING/IN_PROGRESS/COMPLETED/BLOCKED。proposed与status分离，避免把模型声明或尚未提交的任务当成最终完成。
+
+`ExecutionPlan.orderedSteps`使用稳定就绪选择实现拓扑排序；最多20步，循环、自依赖、缺失引用、重复ID/依赖直接拒绝，返回INVALID_ARGUMENTS让模型在原规划任务中修正。规模小采用扫描就绪集合，首版不引入图框架。文件线索和验收文字用于指导实施，不当作文件权限或完备的业务断言。
+
+`PlanStore`写入`CODEY_DATA_DIR/sessions/<sid>/plans/<planId>.json`，文件最大512KiB；目录锁、expectedSequence乐观检查、同目录临时文件force及原子替换；读写校验会话/工作区、UUID、结构、大小和链接路径。当前会话选择最近更新的计划，历史计划JSON保留，尚无历史计划选择菜单。旧修订最多20版；计划不写工作区Markdown。
+
+`PlanService`负责状态机与业务校验；`PlanBinding`是本次AgentLoop的宿主能力，不来自模型参数；`PlanControlTool`提供两个串行工具，访问类别PLAN_CONTROL只允许写内部计划状态。Registry按绑定和工作模式显示submit_plan或update_plan，Executor独立检查绑定及终态。`prompts/plan.md`指导模型，真正的模式/图/版本/提交门禁由程序执行。`TaskState.PlanLink`及PLAN_LINK事件关联计划、版本、步骤/规划任务；旧任务无此字段仍按原流程恢复。
+
+### 修订、证据和故障边界
+
+用户可在审阅时输入调整，再发送修改意见，或直接`/plan 修改要求`；模型提交完整替换版本。规格字段进入批准指纹，模型没有批准、增加预算或切模式的工具。修订清除批准；按拓扑顺序，只继承规格相同且上游均未改变的已完成步骤。受影响步骤不自动撤销既有文件修改，后续实施必须核实实际状态。
+
+update_plan只能操作宿主固定的当前步骤，evidence引用本执行任务已持久化的成功工具结果；拒绝伪造ID、失败或截断结果及计划控制工具自身作为证明。实施步骤要求非空业务证据，分析步骤可用说明，验证步骤至少引用一条status=completed、exitCode=0且无超时/不完整/截断标记的命令结果。它证明工具结果来源和执行成功，不等价于已自动验证全部验收语义。
+
+submit_plan或终态update_plan后，宿主结束当前阶段；同一响应余下的调用回填拒绝结果而不执行，防止提交后继续产生副作用。历史仍保存完整assistant/tool配对和宿主收尾。共享预算最后一次请求只保留计划控制定义，业务工具继续禁用；控制失败可保存任务并等用户继续。
+
+失败、中断、轮次耗尽、上下文阻断均停止当前步骤，下游保持待执行；不自动重新规划或无界重试。继续复用原TaskRun及其结果，recovery_unknown先核实，已完成步骤跳过。候选落盘、历史提交、任务完成、计划确认之间若崩溃，恢复先检查持久化证据和任务状态：缺少最终回答时由宿主补齐；已有完整提交时只落实计划进度；两种情况均不重新请求模型或重放工具。预算为0仍可做本地提交对账。
+
+共享主执行模型预算默认60次，跨步骤/失败/重启/修订不重置；每次请求前持久扣除。每步尝试另受CODEY_MAX_ITERATIONS限制。用户显式输入`增加预算 20`可补1～100次，总上限1000。独立摘要/标题调用不纳入该计数，规划调查按普通任务限制；此预算不是全部API费用统计。
+
+### 用户入口与实现范围
+
+`/plan 需求`开始/修订，`/plan`查看，`执行`批准实施当前版，`调整`进入规划反馈，`稍后`保留计划返回ReAct，`继续`恢复已批准计划。待审阅时继续不表示批准。`/status`显示版本、阶段与预算，`/help`和Tab目录包含/plan。重启只加载状态与提示，不自动实施；/continue关联计划任务也转入相同恢复门禁。
+
+第一版步骤串行，拓扑依赖仍用于正确排序、阻塞和修订影响传播；无依赖不代表可并发修改。步骤内继续沿用四种文件读取工具并行。没有多Agent执行、人工逐字段计划编辑器、OS沙箱或通用业务验收引擎。空闲/context预览尚未绑定步骤上下文，实际每轮请求会将计划状态、步骤指令和控制Schema纳入完整预算检查。
+
+验证：新增28项计划测试，完整`mvn -q verify`共1220项通过，失败/错误/跳过均为0。覆盖依赖环及非法输入、作用域与阶段终态、审阅修订、拓扑实施、证据、失败续接、跨重启共享预算、候选/任务提交间崩溃对账与零预算本地恢复。打包JAR以本地模拟模型、隔离工作区运行规划→用户批准→真实write_file→update_plan→完成，核实会话/任务/计划均持久化；只发生2次模拟模型请求，未使用真实模型额度。真实模型的拆分质量与业务验收判断仍需实际任务评估。

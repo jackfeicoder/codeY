@@ -126,6 +126,14 @@ public final class SessionLauncher {
     private ContextBuilder contexts = new ContextBuilder(this::projectRules, this::selectMemories);
     private io.github.jackfeicoder.codey.skill.SkillService skills;
     private io.github.jackfeicoder.codey.task.TaskStore tasks;
+    private boolean plansEnabled;
+    private io.github.jackfeicoder.codey.plan.PlanService plans;
+    /** 生产入口在任务库后启用；旧嵌入调用可保留纯文本PLAN。 */
+    public SessionLauncher withPlans() {
+        if(tasks==null)throw new IllegalArgumentException("Plan mode requires a task store.");
+        if(!plansEnabled){tools.register(new io.github.jackfeicoder.codey.plan.PlanControlTool(true));tools.register(new io.github.jackfeicoder.codey.plan.PlanControlTool(false));}
+        plansEnabled=true;return this;
+    }
     private io.github.jackfeicoder.codey.config.ToolSchedulingSettings toolScheduling = new io.github.jackfeicoder.codey.config.ToolSchedulingSettings();
     /** 主入口注入启动快照；切换会话/模型保持调度设置，工作模式与审批仍独立检查。 */
     public SessionLauncher withToolScheduling(io.github.jackfeicoder.codey.config.ToolSchedulingSettings settings) {
@@ -349,6 +357,8 @@ public final class SessionLauncher {
                         changePermissions(command.substring(12).strip());
                     } else if (command.equals("/mode") || command.startsWith("/mode ")) {
                         changeWorkMode(command.substring(5).strip());
+                    } else if (command.equals("/plan") || command.startsWith("/plan ")) {
+                        planCommand(command.substring(5).strip());
                     } else if (command.equals("/status")) {
                         printStatus();
                     } else if (command.equals("/context")) {
@@ -413,7 +423,8 @@ public final class SessionLauncher {
                     } else if (browsing) {
                         resume(command, true);
                     } else {
-                        if (command.equals("继续") && tasks!=null && !pendingTasks().isEmpty()) continueTask("");
+                        if(planInput(command)) { /* 计划审阅/继续仅由当前用户输入触发。 */ }
+                        else if (command.equals("继续") && tasks!=null && !pendingTasks().isEmpty()) continueTask("");
                         else answer(line);
                     }
                 } catch (io.github.jackfeicoder.codey.task.TaskException failed) {
@@ -629,6 +640,9 @@ public final class SessionLauncher {
             throw failed;
         }
         active = candidate;
+        plans=plansEnabled?new io.github.jackfeicoder.codey.plan.PlanService(
+                new io.github.jackfeicoder.codey.plan.PlanStore(settings.dataDirectory(),active.snapshot().id(),active.snapshot().workspace()),
+                active.snapshot().id(),active.snapshot().workspace()):null;
         model = selected;
         budgetPolicy = new ContextBudgetPolicy(selected.capabilities(), budgetSettings);
         // 替换会话清除旧批准；full 不自动扩散到另一个会话，工作模式回到 ReAct。
@@ -650,6 +664,7 @@ public final class SessionLauncher {
             long pending=tasks.list(active.snapshot().id()).stream().filter(t->!t.completed()).count();
             if(pending>0)output.println("[任务] 有 "+pending+" 个未完成任务；/tasks 查看，输入“继续”恢复。");
         }
+        if(plans!=null&&plans.current()!=null)output.println("[计划] "+plans.current().phase+" · /plan 查看；待审阅计划不会自动实施。");
     }
 
     /** 统一列出交互命令；管理页和聊天中都可查看，不向模型发送。 */
@@ -732,6 +747,7 @@ public final class SessionLauncher {
     private void answer(String line) { answer(line, ""); }
 
     private void answer(String line, String taskInstructions) {
+        if(plans!=null&&workMode==WorkMode.PLAN)plans.beginPlanning(line);
         answerWithSkill(line,taskInstructions,null);
     }
     private void runSkill(SkillCommands.Invocation invocation) {
@@ -759,7 +775,20 @@ public final class SessionLauncher {
             }
         } finally {if(skills!=null)skills.endTask();}
     }
-    private void executeAnswer(String line, String taskInstructions, io.github.jackfeicoder.codey.task.TaskRun task) {
+    private boolean executeAnswer(String line, String taskInstructions, io.github.jackfeicoder.codey.task.TaskRun task) {
+        io.github.jackfeicoder.codey.plan.PlanBinding planBinding=null;
+        if(plans!=null&&task!=null) {
+            if(task.state().plan==null&&workMode==WorkMode.PLAN) {
+                if(plans.current()==null||plans.current().phase!=io.github.jackfeicoder.codey.plan.ExecutionPlan.Phase.DRAFT)plans.beginPlanning(line);
+                task.bindPlan(new io.github.jackfeicoder.codey.task.TaskState.PlanLink(plans.current().id,plans.current().version,null,true));
+            }
+            var link=task.state().plan;
+            if(link!=null) {
+                if(!plans.current().id.equals(link.planId())||plans.current().version!=link.version())throw new IllegalArgumentException("任务关联的计划版本已修订，请查看 /plan。");
+                planBinding=new io.github.jackfeicoder.codey.plan.PlanBinding(plans,task.state().id,link.stepId(),link.planning(),()->task.state().messages);
+                taskInstructions=taskInstructions+"\n"+plans.context()+ (link.planning()?"":"\n[当前执行步骤] "+link.stepId()+"。只实施此步骤；完成或阻塞必须用update_plan提交结果。遇到旧操作结果未知，先核实实际状态再决定执行。\n");
+            }
+        }
         ContextBuilder taskContexts = taskInstructions.isEmpty() ? contexts : contexts.withTaskInstructions(taskInstructions);
         // 模型客户端/模式在任务开始时固定，运行中不消费切换命令；状态只观察响应。
         final var selectedClient = model.chat();
@@ -778,18 +807,23 @@ public final class SessionLauncher {
                 return response;
             }
         };
-        var loop = new AgentLoop(observed, tools, maxIterations, debug, taskContexts, this::updateContext, budgetPolicy,
+        int requestLimit=planBinding!=null&&!planBinding.planning?Math.min(maxIterations,Math.max(1,plans.remaining())):maxIterations;
+        var loop = new AgentLoop(observed, tools, requestLimit, debug, taskContexts, this::updateContext, budgetPolicy,
                 new HistoryCompactor(selectedClient, budgetPolicy, compactionSettings, taskContexts, debug), this::saveCompaction)
                 .withToolScheduling(toolScheduling);
         if(task!=null)loop.withTask(task);
         ChatCli chat = new ChatCli(loop, active.session(),
                 new ToolContext(active.snapshot().workspace(), ToolContext.DEFAULT_MAX_OUTPUT_CHARS, workMode, permissions,
-                        task==null?null:task.tempDirectory()), input, output, errors);
-        if (chat.answer(line)) {
+                        task==null?null:task.tempDirectory(),planBinding), input, output, errors);
+        boolean finished=chat.answer(line);
+        if (finished) {
             active.captureTurn();
             active.save();
             if(task!=null) {
                 task.committed();
+                if(task.state().plan!=null&&!task.state().plan.planning()) {
+                    var link=task.state().plan;plans.committed(link.stepId(),task.state().id,link.version());
+                }
                 output.println("[任务] 已完成，托管临时目录已尝试清理；执行记录保留。"+(task.state().reason.isEmpty()?"":task.state().reason));
             }
             if (task==null ? taskInstructions.isEmpty() : task.state().instructions.isEmpty()) {
@@ -800,6 +834,8 @@ public final class SessionLauncher {
         } else if(task!=null) {
             output.println("[任务] 进度已保存，输入“继续”或 /continue "+task.state().id+" 接着执行。");
         }
+        if(planBinding!=null&&planBinding.planning)showPlan();
+        return finished;
     }
 
     /** 普通历史与未完成任务分开显示，避免把失败过程伪装为成功回答。 */
@@ -815,10 +851,124 @@ public final class SessionLauncher {
                 +" / 工具 "+task.toolCalls+" | "+ConsoleApprovalHandler.clean(task.goal.length()>100?task.goal.substring(0,100)+"…":task.goal));
         output.println("输入 继续 恢复唯一未完成任务，或 /continue 任务ID（可用唯一前缀）选择。");
     }
+    /** 唯一计划入口：查看/规划，审阅动作来自当前用户输入，不从模型回复猜测。 */
+    private void planCommand(String text) {
+        if(plans==null||active==null||browsing){output.println("请先进入已启用计划与任务模块的会话。");return;}
+        if(text.isEmpty()){showPlan();return;}
+        workMode=WorkMode.PLAN;updateModes();answer(text);
+    }
+    private void showPlan() {
+        if(plans==null)return;
+        for(String line:plans.render().split("\\R"))output.println(ConsoleApprovalHandler.clean(line));
+        if(plans.current()==null||plans.current().phase==io.github.jackfeicoder.codey.plan.ExecutionPlan.Phase.COMPLETED)return;
+        output.println("[1/执行] 审阅并实施当前版本；[2/调整] 继续规划；[3/稍后] 返回普通聊天。/plan 随时查看。");
+        output.println("执行失败后输入 继续；预算不足可显式输入 增加预算 20。计划批准不改变当前权限模式。");
+    }
+    private boolean planInput(String text) {
+        if(plans==null||plans.current()==null)return false;
+        var plan=plans.current();
+        if(plan.phase==io.github.jackfeicoder.codey.plan.ExecutionPlan.Phase.COMPLETED)return false;
+        if(text.matches("增加预算\\s+[0-9]{1,3}")) {
+            plans.addBudget(Integer.parseInt(text.substring(4).strip()));output.println("[计划] 已补充预算，剩余 "+plans.remaining()+" 次；输入继续或执行。");return true;
+        }
+        if(text.equals("执行")||text.equals("开始实施")||text.equals("按此计划执行")||text.equals("1")) {runPlan(true);return true;}
+        if(text.equals("调整")||text.equals("2")){workMode=WorkMode.PLAN;updateModes();output.println("请输入对当前计划的修改要求，修订后重新审阅。");return true;}
+        if(text.equals("稍后")||text.equals("3")){workMode=WorkMode.REACT;updateModes();output.println("[计划] 已保留，可用 /plan 查看；当前进入普通聊天。");return true;}
+        if(text.equals("继续")) {
+            if(plan.phase==io.github.jackfeicoder.codey.plan.ExecutionPlan.Phase.AWAITING_REVIEW){output.println("计划仍待审阅。继续不表示批准；请输入执行，或输入修改意见。修改意见请在 /mode plan 中发送。");return true;}
+            if(plans.approved()&&plan.phase!=io.github.jackfeicoder.codey.plan.ExecutionPlan.Phase.COMPLETED){runPlan(false);return true;}
+        }
+        return false;
+    }
+    /** 以已有TaskRun逐步实施；不创建第二套工具循环，不并发写入，也不重置计划总预算。 */
+    private void runPlan(boolean approve) {
+        if(plans==null||tasks==null||active==null||browsing)return;
+        reconcilePlanningTask();
+        if(approve)plans.approve();
+        if(!plans.approved())throw new IllegalArgumentException("请先审阅批准当前计划版本。");
+        workMode=WorkMode.REACT;updateModes();
+        while(!Thread.currentThread().isInterrupted()) {
+            var step=plans.nextStep();if(step==null){showPlan();return;}
+            var plan=plans.current();
+            io.github.jackfeicoder.codey.task.TaskRun task=null;
+            try {
+                if(step.taskId!=null) {
+                    task=tasks.open(active.snapshot().id(),step.taskId);
+                    if(task.state().completed()) {
+                        // task已提交而计划尚未更新时，仅补写计划状态；不重放已完成操作。
+                        if(step.proposed==io.github.jackfeicoder.codey.plan.PlanStep.Status.COMPLETED
+                                ||step.status==io.github.jackfeicoder.codey.plan.PlanStep.Status.IN_PROGRESS&&step.proposed!=null) {
+                            plans.revalidateOutcome(step.id,task.state().messages);
+                            plans.committed(step.id,task.state().id,plan.version);
+                            if(plans.current().step(step.id).status!=io.github.jackfeicoder.codey.plan.PlanStep.Status.COMPLETED){showPlan();return;}
+                            continue;
+                        }
+                        task.close();task=null;
+                    }
+                    else if(task.state().status==io.github.jackfeicoder.codey.task.TaskState.Status.COMMIT_PENDING) {
+                        commitPendingTask(task);plans.committed(step.id,task.state().id,plan.version);
+                        if(plans.current().step(step.id).status!=io.github.jackfeicoder.codey.plan.PlanStep.Status.COMPLETED){showPlan();return;}
+                        continue;
+                    }else if(step.proposed==io.github.jackfeicoder.codey.plan.PlanStep.Status.COMPLETED||step.proposed==io.github.jackfeicoder.codey.plan.PlanStep.Status.BLOCKED) {
+                        plans.revalidateOutcome(step.id,task.state().messages);
+                        task.resume(model.profile(),active.session().messages());
+                        task.assistant(io.github.jackfeicoder.codey.session.Message.assistant("已核实持久化的步骤结果："+step.id+"，无需重放工具。"));
+                        commitPendingTask(task);plans.committed(step.id,task.state().id,plan.version);
+                        if(plans.current().step(step.id).status!=io.github.jackfeicoder.codey.plan.PlanStep.Status.COMPLETED){showPlan();return;}
+                        continue;
+                    }else task.resume(model.profile(),active.session().messages());
+                }
+                if(plans.remaining()<=0){output.println("[计划] 总模型预算已用完，进度保留；可显式输入 增加预算 20。");return;}
+                if(task==null) {
+                    task=tasks.create(active.snapshot().id(),active.snapshot().workspace(),model.profile(),"计划步骤 "+step.id+"："+step.description,
+                            "按当前批准计划只执行指定步骤。先核实已有结果和实际状态；不要盲目重放不确定的写操作。",active.session().messages());
+                    task.bindPlan(new io.github.jackfeicoder.codey.task.TaskState.PlanLink(plan.id,plan.version,step.id,false));
+                }
+                plans.startStep(step.id,task.state().id);
+                if(skills!=null){skills.beginTask(active.snapshot().workspace());skills.restoreReferences(task.state().skills);task.withSkills(skills::activeReferences);}
+                output.println("[计划] 执行 "+step.id+"："+ConsoleApprovalHandler.clean(step.description));
+                boolean completed=executeAnswer(task.state().goal,task.runtimeInstructions(),task);
+                if(!completed)plans.blocked(step.id,task.state().id,"任务预算耗尽或上下文拦截；进度已保存，继续时沿用原任务。");
+                if(plans.current().step(step.id).status!=io.github.jackfeicoder.codey.plan.PlanStep.Status.COMPLETED){showPlan();return;}
+            }catch(RuntimeException failed) {
+                if(task!=null)plans.blocked(step.id,task.state().id,Thread.currentThread().isInterrupted()?"执行已中断，原任务进度保留。":"执行失败；先查看原任务结果，再继续或修订计划。");
+                throw failed;
+            }finally{if(task!=null)task.close();if(skills!=null)skills.endTask();}
+        }
+        showPlan();
+    }
+    private void commitPendingTask(io.github.jackfeicoder.codey.task.TaskRun task) {
+        if(!task.alreadyCommitted(active.session().messages())){active.session().completeAgentTurn(task.state().messages);active.captureTurn();active.save();}
+        task.committed();
+    }
+    /** 计划先落盘、历史尚未提交时，用已核实的计划产物完成提交，不重新规划。 */
+    private void reconcilePlanningTask() {
+        var plan=plans.current();if(plan==null||plan.planningTaskId==null)return;
+        try(var task=tasks.open(active.snapshot().id(),plan.planningTaskId)) {
+            if(task.state().completed())return;
+            if(task.state().status!=io.github.jackfeicoder.codey.task.TaskState.Status.COMMIT_PENDING) {
+                task.resume(model.profile(),active.session().messages());
+                task.assistant(io.github.jackfeicoder.codey.session.Message.assistant(plans.render()+"\n已核实计划产物，等待用户审阅。"));
+            }
+            commitPendingTask(task);
+        }
+    }
     private void continueTask(String id) {
         var pending=pendingTasks();
         var matches=id.isEmpty()?pending:pending.stream().filter(t->t.id.startsWith(id)).toList();
         if(matches.size()!=1){output.println(matches.isEmpty()?"没有匹配的未完成任务。":"存在多个未完成任务，请用 /continue 任务ID 选择。");listTasks();return;}
+        var link=matches.get(0).plan;
+        if(link!=null&&plans!=null) {
+            var plan=plans.current();
+            if(plan==null||!plan.id.equals(link.planId()))throw new IllegalArgumentException("该任务不属于当前计划。");
+            if(!link.planning()) {
+                if(link.version()!=plan.version||!java.util.Objects.equals(plan.step(link.stepId()).taskId,matches.get(0).id))throw new IllegalArgumentException("旧版计划任务已失效，请查看 /plan。");
+                runPlan(false);return;
+            }
+            if(matches.get(0).id.equals(plan.planningTaskId)){reconcilePlanningTask();showPlan();return;}
+            if(link.version()!=plan.version)throw new IllegalArgumentException("规划任务版本已修订，请查看 /plan。");
+            workMode=WorkMode.PLAN;updateModes();
+        }
         try(var task=tasks.open(active.snapshot().id(),matches.get(0).id)) {
             var state=task.state();
             if(!state.workspace.equals(active.snapshot().workspace()))throw new io.github.jackfeicoder.codey.task.TaskException("任务工作区与当前会话不一致。");
@@ -930,6 +1080,9 @@ public final class SessionLauncher {
     private void updateModes() { runtimeStatus.modes(workMode, permissionMode); }
     private void printStatus() {
         output.println("工作模式：" + workMode.value() + "；权限：" + permissionMode.value());
+        if(plans!=null&&plans.current()!=null) {
+            var plan=plans.current();output.println("当前计划：v"+plan.version+" · "+plan.phase+"；执行模型预算 "+plan.modelCalls+"/"+plan.maxModelCalls+"，/plan 查看步骤。");
+        }
         output.println("模型与用量：" + runtimeStatus.right());
         output.println("已用为当前上下文的本地估算（≈），百分比为估算输入 / 配置容量，不是累计消耗；/context 查看拆分。");
         output.println("最近实际输入：" + (runtimeStatus.lastInputTokens() == null ? "未知" : runtimeStatus.lastInputTokens() + " tok")

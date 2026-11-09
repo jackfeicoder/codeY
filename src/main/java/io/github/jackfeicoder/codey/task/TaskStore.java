@@ -150,6 +150,7 @@ public final class TaskStore {
             case "ASSISTANT" -> {state.messages.add(Objects.requireNonNull(e.message()));
                 if(e.message().toolCalls().isEmpty())state.status=TaskState.Status.COMMIT_PENDING;}
             case "TOOL_INTENT" -> {state.started.add(e.detail());state.toolCalls++;}
+            case "PLAN_LINK" -> {try{state.plan=JSON.readValue(e.detail(),TaskState.PlanLink.class);}catch(Exception invalid){throw new TaskException("任务计划关联损坏。");}}
             case "TOOL_RESULT", "RECOVERY_RESULT" -> {
                 state.messages.add(Objects.requireNonNull(e.message()));
                 orderToolResults(state); // 事件保留实际完成顺序，派生消息按原调用顺序，恢复与提交比较一致。

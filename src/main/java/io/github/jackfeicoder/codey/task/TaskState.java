@@ -37,6 +37,9 @@ public final class TaskState {
     public Set<String> started = new LinkedHashSet<>();
     /** 本任务已经加载的技能身份快照。 */
     public List<SkillRef> skills = List.of();
+    /** 计划关联是宿主元数据，不从模型正文解析；旧任务缺省为null。 */
+    public PlanLink plan;
+    public record PlanLink(String planId,int version,String stepId,boolean planning) { }
 
     /** 只存来源与内容指纹，恢复时重新校验文件；不持久化权限、进程或认证信息。 */
     public record SkillRef(String name, String source, String fingerprint) { }

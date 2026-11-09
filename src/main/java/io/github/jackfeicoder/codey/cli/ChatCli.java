@@ -129,7 +129,7 @@ public final class ChatCli {
         }
         session.completeAgentTurn(result.turnMessages());
         var response = result.response();
-        if (!stream.lastResponseHadText()) input.theme().assistant(output, response.text());
+        if (result.hostFinal() || !stream.lastResponseHadText()) input.theme().assistant(output, response.text());
         if (result.budgetLimited()) {
             input.theme().line(errors, ConsoleTheme.Tone.WARNING, "本轮已到模型请求上限，回答基于现有信息；需要进一步调查可继续追问。");
         }

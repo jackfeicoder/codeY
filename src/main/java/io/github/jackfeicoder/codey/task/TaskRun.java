@@ -57,6 +57,7 @@ public final class TaskRun implements AutoCloseable {
     public void request(){captureSkills();event("REQUEST",null,null,null,null,null,null);}
     public void assistant(Message message){event("ASSISTANT",message,null,null,null,null,null);}
     public void toolStarted(String id){event("TOOL_INTENT",null,id,null,null,null,null);}
+    public void bindPlan(TaskState.PlanLink link){try{event("PLAN_LINK",null,TaskStore.JSON.writeValueAsString(link),null,null,null,null);}catch(java.io.IOException e){throw new TaskException("计划关联保存失败。");}}
     public void toolResult(Message message){event("TOOL_RESULT",message,null,null,null,null,null);captureSkills();}
     public void stop(TaskState.Status status){stop(status,status.name());}
     /** reason 由宿主传入错误类别，不保存可能含凭证的异常全文。 */

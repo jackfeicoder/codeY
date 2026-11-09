@@ -12,6 +12,7 @@ public final class CommandCatalog {
             new Command("/help", "/help", "查看全部交互命令"),
             new Command("/permissions", "/permissions [ask|auto|full|trust|revoke]", "查看/切换权限、信任项目构建或撤销授权"),
             new Command("/mode", "/mode [react|plan]", "切换工作模式；multi 尚待实现"),
+            new Command("/plan", "/plan [任务或修订要求]", "查看计划，或进入只读调查并提交结构化计划"),
             new Command("/status", "/status", "查看模式、模型、上下文用量、范围授权和项目构建信任"),
             new Command("/mcp", "/mcp [register]", "查看服务菜单或注册；Agent 按需加载、自动释放"),
             new Command("/skills", "/skills", "查看用户/项目技能并选择调用"),

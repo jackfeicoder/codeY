@@ -146,6 +146,9 @@ public final class AgentLoop {
             checkInterrupted();
             boolean finalRound = step == maxSteps;
             var definitions = registry.definitions(context);
+            // 最后一轮仅允许计划控制结果落盘；文件/命令等业务工具仍禁用。
+            if(finalRound&&context.plan()!=null)definitions=definitions.stream()
+                    .filter(d->d.name().equals("submit_plan")||d.name().equals("update_plan")).toList();
             // 固定本轮已注册名称；原有隐藏工具仍由执行器报告工作区/权限错误，新工具下一轮才可用。
             var offered = registry.definitions().stream().map(io.github.jackfeicoder.codey.tool.ToolDefinition::name)
                     .collect(java.util.stream.Collectors.toSet());
@@ -165,6 +168,7 @@ public final class AgentLoop {
             }
             LlmRequest request = snapshot.request();
             debug.round(step);
+            if(context.plan()!=null)context.plan().beforeRequest();
             if (task != null) task.request(); // 网络调用前先落盘，崩溃时可识别执行边界。
             LlmResponse response;
             if (stream == null) response = client.generate(request);
@@ -189,7 +193,8 @@ public final class AgentLoop {
                         messages, response, step, executions, finalRound);
             }
             // 即使服务商忽略 tool_choice=none，也不执行最后一轮提出的工具，更不提交残缺回答。
-            if (finalRound) return new AgentResult(AgentResult.Status.BUDGET_EXHAUSTED,
+            if (finalRound && (context.plan()==null || response.toolCalls().stream().anyMatch(c->
+                    !c.name().equals("submit_plan")&&!c.name().equals("update_plan")))) return new AgentResult(AgentResult.Status.BUDGET_EXHAUSTED,
                     messages, null, step, executions, true);
             // 在执行任何工具前检查整组：截断或异常结束原因不触发工具副作用。
             if (!"tool_calls".equals(response.finishReason())
@@ -216,6 +221,11 @@ public final class AgentLoop {
                 executions+=batch.size();
                 checkInterrupted();
                 batch.forEach(result->messages.add(result.toMessage()));
+                if(context.plan()!=null&&context.plan().terminal()) {
+                    var finalMessage=Message.assistant(context.plan().finalText());messages.add(finalMessage);
+                    if(task!=null)task.assistant(finalMessage);
+                    return new AgentResult(AgentResult.Status.COMPLETED,messages,new LlmResponse(finalMessage,"stop",null),step,executions,false,true);
+                }
             } catch(InterruptedException cancelled) {Thread.currentThread().interrupt();checkInterrupted();}
         }
         return new AgentResult(AgentResult.Status.BUDGET_EXHAUSTED,

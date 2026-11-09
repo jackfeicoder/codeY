@@ -41,6 +41,8 @@ public final class ToolExecutor {
                 throw new ToolException(ToolResult.ErrorCode.INTERRUPTED, "Tool execution was interrupted.");
             }
             if (entry == null) throw new ToolException(ToolResult.ErrorCode.UNKNOWN_TOOL, "Tool is not registered.");
+            if(context.plan()!=null&&context.plan().terminal())throw new ToolException(ToolResult.ErrorCode.PERMISSION_DENIED,"Plan control finished this phase; no further tool actions are allowed.");
+            if(!entry.implementation().available(context))throw new ToolException(ToolResult.ErrorCode.PERMISSION_DENIED,"Tool is not available in the current host scope.");
             if (!entry.definition().name().equals(call.name())) throw new IllegalArgumentException("Tool snapshot does not match call.");
             JsonNode arguments = parseArguments(call.arguments()); // 防止绕过 LLM 层直接调用时传入非法 JSON。
             if (entry.requiresWorkspace()) {

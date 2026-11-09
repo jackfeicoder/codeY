@@ -12,9 +12,13 @@ import io.github.jackfeicoder.codey.policy.*;
  * @param workMode 本次任务固定的工作模式，不从工具参数获取
  * @param permissions 当前会话审批服务；联网范围可跨任务复用，构建授权限当前任务，不跨工作区或历史恢复
  * @param taskTempDirectory 宿主管理的当前任务临时目录，可为空；不是权限授权或进程沙箱
+ * @param plan 宿主绑定的计划版本/任务/步骤能力，可为空；模型参数不能替换或批准计划
  */
 public record ToolContext(WorkspaceBinding workspace, int maxOutputChars, WorkMode workMode, PermissionService permissions,
-                          java.nio.file.Path taskTempDirectory) {
+                          java.nio.file.Path taskTempDirectory, io.github.jackfeicoder.codey.plan.PlanBinding plan) {
+    public ToolContext(WorkspaceBinding workspace,int maxOutputChars,WorkMode workMode,PermissionService permissions,java.nio.file.Path taskTempDirectory) {
+        this(workspace,maxOutputChars,workMode,permissions,taskTempDirectory,null);
+    }
     /** 旧调用没有托管临时目录，行为保持原样。 */
     public ToolContext(WorkspaceBinding workspace, int maxOutputChars, WorkMode workMode, PermissionService permissions) {
         this(workspace,maxOutputChars,workMode,permissions,null);

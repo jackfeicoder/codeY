@@ -69,7 +69,8 @@ public final class ToolRegistry {
     public List<ToolDefinition> definitions(ToolContext context) {
         Objects.requireNonNull(context, "context");
         return tools.values().stream().filter(entry -> !entry.requiresWorkspace() || context.hasWorkspace())
-                .filter(entry -> context.workMode() != io.github.jackfeicoder.codey.agent.WorkMode.PLAN || entry.access() == ToolAccess.READ_ONLY)
+                .filter(entry -> context.workMode() != io.github.jackfeicoder.codey.agent.WorkMode.PLAN || entry.access() == ToolAccess.READ_ONLY || entry.access()==ToolAccess.PLAN_CONTROL)
+                .filter(entry -> entry.implementation().available(context))
                 .map(RegisteredTool::definition).toList();
     }
 }

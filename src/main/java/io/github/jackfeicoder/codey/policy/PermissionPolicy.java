@@ -10,7 +10,7 @@ public final class PermissionPolicy {
     private PermissionPolicy() { }
     public static void check(WorkMode mode, ToolAccess access) {
         if (mode == WorkMode.MULTI) throw new ToolException(ErrorCode.PERMISSION_DENIED, "Multi-agent execution is not implemented.");
-        if (mode == WorkMode.PLAN && access != ToolAccess.READ_ONLY) {
+        if (mode == WorkMode.PLAN && access != ToolAccess.READ_ONLY && access != ToolAccess.PLAN_CONTROL) {
             throw new ToolException(ErrorCode.PERMISSION_DENIED, "PLAN only allows trusted read-only tools. Switch to react to modify files.");
         }
     }
