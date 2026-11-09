@@ -13,12 +13,20 @@ public final class ConsoleTheme {
     private final boolean colors;
     /** 布局与颜色分别开关；NO_COLOR 终端仍显示回答分区并转义外部控制字符。 */
     private final boolean interactive;
+    private final int columns;
 
     public ConsoleTheme(boolean colors) { this(colors, colors); }
     public ConsoleTheme(boolean interactive, boolean colors) {
+        this(interactive, colors, 80);
+    }
+    public ConsoleTheme(boolean interactive, boolean colors, int columns) {
         this.interactive = interactive;
         this.colors = interactive && colors;
+        this.columns = Math.max(1, columns);
     }
+    boolean interactive() { return interactive; }
+    int columns() { return columns; }
+    String styled(AttributedString text) { return colors ? text.toAnsi() : text.toString(); }
 
     /** 使用基础 ANSI 调色板，让 Windows Terminal、深色和浅色主题自行映射颜色。 */
     public static AttributedStyle style(Tone tone) {
@@ -55,20 +63,13 @@ public final class ConsoleTheme {
         output.flush();
     }
 
-    /** 回答标签用绿色，正文使用终端默认前景色；Markdown 标题/代码区提供轻量高亮。 */
+    /** 完整回答和流式回答共用Markdown展示器，原始内容仍由会话原样保存。 */
     public void assistant(PrintWriter output, String content) {
         if (!interactive) { output.println("CodeY> " + content); output.flush(); return; }
-        output.println();
-        output.println(text(Tone.ASSISTANT, "● CodeY"));
-        boolean code = false;
-        for (String line : content.replace("\r\n", "\n").split("\n", -1)) {
-            if (line.stripLeading().startsWith("```")) {
-                code = !code;
-                output.println(text(Tone.MUTED, line));
-            } else if (code) output.println(text(Tone.THINKING, line));
-            else if (line.matches("^#{1,6} .*")) output.println(text(Tone.USER, line));
-            else output.println(safeText(line));
-        }
+        beginAssistant(output, true);
+        var markdown = new TerminalMarkdown(this, output);
+        markdown.accept(safeText(content));
+        markdown.finish();
         output.println();
         output.flush();
     }

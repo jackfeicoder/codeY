@@ -191,8 +191,9 @@ public final class ConsoleInput implements AutoCloseable {
     }
     public boolean isInteractive() { return reader != null; }
     public int columns() { return terminal == null ? 80 : terminal.getWidth(); }
+    public int rows() { return terminal == null ? 24 : terminal.getHeight(); }
     /** 展示层唯一主题入口；业务与进度代码无需检测终端或拼接 ANSI。 */
-    public ConsoleTheme theme() { return new ConsoleTheme(isInteractive(), !System.getenv().containsKey("NO_COLOR")); }
+    public ConsoleTheme theme() { return new ConsoleTheme(isInteractive(), !System.getenv().containsKey("NO_COLOR"), columns()); }
 
     /** 复用简洁进度数据；纯文本仍使用旧格式，交互终端只改变视觉呈现。 */
     public io.github.jackfeicoder.codey.observability.DebugPrinter progressPrinter(PrintWriter destination) {

@@ -14,6 +14,8 @@ public final class ConsoleStreamOutput implements AgentStreamListener {
     private boolean displayedText;
     private char pendingHigh;
     private boolean pendingCr;
+    /** 仅交互终端排版；管道继续逐分片输出原始Markdown。 */
+    private TerminalMarkdown markdown;
 
     public ConsoleStreamOutput(ConsoleTheme theme, PrintWriter output, Runnable afterResponse, boolean label) {
         this.theme = java.util.Objects.requireNonNull(theme); this.output = java.util.Objects.requireNonNull(output);
@@ -21,6 +23,7 @@ public final class ConsoleStreamOutput implements AgentStreamListener {
     }
     @Override public void onResponseStart(int step) {
         responseHadText = false; pendingHigh = 0; pendingCr = false;
+        markdown = theme.interactive() ? new TerminalMarkdown(theme, output) : null;
     }
     @Override public void onText(String delta) {
         if (delta.isEmpty()) return;
@@ -45,18 +48,20 @@ public final class ConsoleStreamOutput implements AgentStreamListener {
             else if (Character.isLowSurrogate(ch)) visible.append(String.format("\\u%04x", (int) ch));
             else visible.append(ConsoleTheme.safeText(String.valueOf(ch)));
         }
-        output.print(visible); output.flush();
+        display(visible.toString()); output.flush();
     }
     /** 工具进度/审批提示前关闭本段正文；失败时也收尾，不把错误接在半行回答后。 */
     @Override public void onResponseEnd(int step) {
         if (responseHadText) {
-            if (pendingCr) output.print("\\u000d");
-            if (pendingHigh != 0) output.print(String.format("\\u%04x", (int) pendingHigh));
+            if (pendingCr) display("\\u000d");
+            if (pendingHigh != 0) display(String.format("\\u%04x", (int) pendingHigh));
             pendingCr = false; pendingHigh = 0;
-            theme.endAssistant(output);
+            if(markdown!=null){markdown.finish();output.println();output.flush();}
+            else theme.endAssistant(output);
         }
         afterResponse.run();
     }
     public boolean lastResponseHadText() { return responseHadText; }
     public boolean hasDisplayedText() { return displayedText; }
+    private void display(String text) { if(markdown==null)output.print(text);else markdown.accept(text); }
 }

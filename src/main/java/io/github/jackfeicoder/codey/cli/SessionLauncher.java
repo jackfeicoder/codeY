@@ -483,11 +483,9 @@ public final class SessionLauncher {
         listing = result.sessions();
         displayed = 0;
         result.warnings().forEach(errors::println);
-        output.println("CodeY · 所有工作区的最近会话");
-        output.println("序号 | ID | 标题 | 工作区 | 更新时间");
+        new SessionView(input.theme(),output).welcome(startup.toString(),listing.size());
         more();
-        output.println("输入序号、完整标题或 ID；/new 新建，/more_session 下一批，/sessions 刷新，/help 查看命令，exit 或 /exit 退出。");
-        if (active != null) output.println("/back 返回当前会话。");
+        new SessionView(input.theme(),output).footer(active!=null);
     }
 
     /** 每次追加 10 条，末尾提示明确，不循环回第一页。 */
@@ -496,16 +494,16 @@ public final class SessionLauncher {
             output.println(displayed == 0 ? "暂无历史会话，请输入 /new。" : "没有更多会话。");
             return;
         }
-        int end = Math.min(displayed + PAGE_SIZE, listing.size());
+        int pageSize=input.isInteractive()?Math.max(3,Math.min(PAGE_SIZE,(input.rows()-12)/2)):PAGE_SIZE;
+        int end = Math.min(displayed + pageSize, listing.size());
         for (int index = displayed; index < end; index++) {
             SessionSnapshot snapshot = listing.get(index);
             String time = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
                     .withZone(ZoneId.systemDefault()).format(Instant.parse(snapshot.updatedAt()));
-            output.println((index + 1) + " | " + shortId(snapshot.id()) + " | " + snapshot.title()
-                    + " | " + snapshot.workspace().display() + " | " + time);
+            new SessionView(input.theme(),output).row(index+1,snapshot,shortId(snapshot.id()),time);
         }
         displayed = end;
-        output.println("已显示 " + displayed + " / " + listing.size() + " 条。");
+        input.theme().line(output,ConsoleTheme.Tone.MUTED,"已显示 " + displayed + " / " + listing.size() + " 条。");
     }
 
     /** 显示前缀在整份列表中唯一；完整 ID 始终用于保存和读取。 */
@@ -655,14 +653,13 @@ public final class SessionLauncher {
         startupProfile = null; // 后续新建与恢复使用最近选择，不重复套用启动覆盖。
         rememberModel(selected.profile());
         browsing = false;
-        output.println("会话：" + active.snapshot().title() + " | ID " + active.snapshot().id()
-                + " | " + active.snapshot().workspace().display() + " | Profile " + selected.profile());
+        new SessionView(input.theme(),output).selected(active.snapshot(),selected.profile());
         if (!SessionSnapshot.hash(basePrompt.get()).equals(active.snapshot().promptHash())) {
             output.println("基础提示词版本已变化，本会话沿用创建时的快照。");
         }
         if(tasks!=null) {
             long pending=tasks.list(active.snapshot().id()).stream().filter(t->!t.completed()).count();
-            if(pending>0)output.println("[任务] 有 "+pending+" 个未完成任务；/tasks 查看，输入“继续”恢复。");
+            if(pending>0)input.theme().line(output,ConsoleTheme.Tone.WARNING,"有 "+pending+" 个未完成任务，输入“继续”恢复；/tasks 查看。");
         }
         if(plans!=null&&plans.current()!=null)output.println("[计划] "+plans.current().phase+" · /plan 查看；待审阅计划不会自动实施。");
     }
@@ -730,17 +727,9 @@ public final class SessionLauncher {
         catch (ConfigException failed) { input.theme().line(errors, ConsoleTheme.Tone.ERROR, "模型已选择，但默认偏好未保存：" + failed.getMessage()); }
     }
 
-    /** 预览最近四条消息，有界输出；纯工具调用没有文本时展示名称和调用 ID。 */
+    /** 展示最近成功对话，不把中间工具JSON和调用ID当成聊天内容。 */
     private void preview(SessionSnapshot snapshot) {
-        output.println("历史：" + snapshot.title() + " | " + snapshot.id() + " | " + snapshot.workspace().display());
-        var messages = snapshot.messages();
-        for (int index = Math.max(0, messages.size() - 4); index < messages.size(); index++) {
-            var message = messages.get(index);
-            String content = message.content() == null ? "工具调用：" + message.toolCalls().stream()
-                    .map(call -> call.name() + " [" + call.id() + "]").toList() : message.content();
-            if (content.length() > 500) content = content.substring(0, 500) + "…";
-            output.println(message.role() + ": " + content);
-        }
+        new SessionView(input.theme(),output).preview(snapshot);
     }
 
     /** 先保存成功回答，再执行一次有界标题任务；生成文本不会加入历史。 */
@@ -770,7 +759,6 @@ public final class SessionLauncher {
             else try(var task=tasks.create(active.snapshot().id(),active.snapshot().workspace(),model.profile(),line,
                     taskInstructions,active.session().messages())) {
                 if(skills!=null)task.withSkills(skills::activeReferences);
-                output.println("[任务] "+task.state().id+" · 进度随执行保存；/tasks 查看，继续 恢复。");
                 executeAnswer(line,task.runtimeInstructions(),task);
             }
         } finally {if(skills!=null)skills.endTask();}
@@ -824,7 +812,7 @@ public final class SessionLauncher {
                 if(task.state().plan!=null&&!task.state().plan.planning()) {
                     var link=task.state().plan;plans.committed(link.stepId(),task.state().id,link.version());
                 }
-                output.println("[任务] 已完成，托管临时目录已尝试清理；执行记录保留。"+(task.state().reason.isEmpty()?"":task.state().reason));
+                if(!task.state().reason.isEmpty())input.theme().line(output,ConsoleTheme.Tone.WARNING,task.state().reason);
             }
             if (task==null ? taskInstructions.isEmpty() : task.state().instructions.isEmpty()) {
                 extractMemory(line, selectedClient);
@@ -832,7 +820,7 @@ public final class SessionLauncher {
             }
             if (!Thread.currentThread().isInterrupted()) generateTitle();
         } else if(task!=null) {
-            output.println("[任务] 进度已保存，输入“继续”或 /continue "+task.state().id+" 接着执行。");
+            input.theme().line(output,ConsoleTheme.Tone.MUTED,"进度已保存，输入“继续”恢复；/tasks 查看。");
         }
         if(planBinding!=null&&planBinding.planning)showPlan();
         return finished;
@@ -861,8 +849,8 @@ public final class SessionLauncher {
         if(plans==null)return;
         for(String line:plans.render().split("\\R"))output.println(ConsoleApprovalHandler.clean(line));
         if(plans.current()==null||plans.current().phase==io.github.jackfeicoder.codey.plan.ExecutionPlan.Phase.COMPLETED)return;
-        output.println("[1/执行] 审阅并实施当前版本；[2/调整] 继续规划；[3/稍后] 返回普通聊天。/plan 随时查看。");
-        output.println("执行失败后输入 继续；预算不足可显式输入 增加预算 20。计划批准不改变当前权限模式。");
+        input.theme().line(output,ConsoleTheme.Tone.COMMAND,"  [1/执行] 实施计划  [2/调整] 修改计划  [3/稍后] 返回聊天");
+        input.theme().line(output,ConsoleTheme.Tone.MUTED,"  /plan 查看 · 失败后输入继续 · 权限模式保持不变");
     }
     private boolean planInput(String text) {
         if(plans==null||plans.current()==null)return false;

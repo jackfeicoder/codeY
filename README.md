@@ -413,7 +413,9 @@ CODEY_LLM_STREAM_INCLUDE_USAGE=true
 | [ChatCli.java](src/main/java/io/github/jackfeicoder/codey/cli/ChatCli.java) | `answer()` 调用 AgentLoop、展示状态并提交完整成功轮次；`run()` 保留给内存调用者，生产入口使用 Launcher |
 | [ConsoleInput.java](src/main/java/io/github/jackfeicoder/codey/cli/ConsoleInput.java) | 原生终端使用 JLine 编辑与补全，管道/测试使用 BufferedReader，关闭时恢复终端状态 |
 | [ConsoleTheme.java](src/main/java/io/github/jackfeicoder/codey/cli/ConsoleTheme.java) | 按消息类型统一颜色、回答与命令排版；仅展示时转义控制字符，支持 NO_COLOR 与纯文本管道 |
-| [ConsoleStreamOutput.java](src/main/java/io/github/jackfeicoder/codey/cli/ConsoleStreamOutput.java) | 接收正文增量、即时刷新、跨片段处理 Unicode/换行与控制字符，关闭段落后刷新底栏 |
+| [ConsoleStreamOutput.java](src/main/java/io/github/jackfeicoder/codey/cli/ConsoleStreamOutput.java) | 接收正文增量、跨片段处理 Unicode/换行与控制字符，终端转交Markdown排版，管道保持原始文本 |
+| [TerminalMarkdown.java](src/main/java/io/github/jackfeicoder/codey/cli/TerminalMarkdown.java) | 终端标题、强调、代码、引用、列表、链接和有界表格排版，按显示列宽适配窄屏 |
+| [SessionView.java](src/main/java/io/github/jackfeicoder/codey/cli/SessionView.java) | 欢迎面板、会话条目、进入会话摘要与成功对话预览，隐藏工具JSON |
 | [CommandCatalog.java](src/main/java/io/github/jackfeicoder/codey/cli/CommandCatalog.java) | `/help` 与补全共享命令名称、用法和说明 |
 | [CommandCompleter.java](src/main/java/io/github/jackfeicoder/codey/cli/CommandCompleter.java) | 按输入词位置补全命令、供应商及该供应商下的模型，仅读取本地目录 |
 
@@ -427,9 +429,13 @@ Main 解析参数
   └─ 无参数/--chat：注册 list_files/search_file/grep_code/read_file → SessionLauncher → ChatCli.answer → AgentLoop
 ```
 
-**实现方式与边界**：列表模式的普通文本匹配序号、完整标题或唯一 ID 前缀；聊天模式的普通文本就是问题，切换用 `/resume`。最近每批 10 条，分页持有稳定列表快照，`/sessions` 才刷新；重名与前缀冲突展示候选项。查看列表和历史预览不要求模型凭证，准备继续时才校验。交互终端使用 JLine 3.30.17 与 JNI provider，Tab 唯一匹配直接补全，多个匹配进入菜单，方向键或 Tab 选择、Enter 确认，再 Enter 执行。Ctrl+C 取消当前编辑，EOF 保存退出。路径/标题等辅助输入不提示命令，不启用 shell 转义或 `!` 历史展开。管道/IDE 无原生控制台时使用 UTF-8 逐行输入，不启用补全。未知斜杠命令不发模型请求。命令表和启动例子见 [构建与启动](#build-run)。
+**实现方式与边界**：列表模式的普通文本匹配序号、完整标题或唯一 ID 前缀；聊天模式的普通文本就是问题，切换用 `/resume`。交互终端按高度每批3～10条，管道每批10条，分页持有稳定列表快照，`/sessions` 才刷新；重名与前缀冲突展示候选项。查看列表和历史预览不要求模型凭证，准备继续时才校验。交互终端使用 JLine 3.30.17 与 JNI provider，Tab 唯一匹配直接补全，多个匹配进入菜单，方向键或 Tab 选择、Enter 确认，再 Enter 执行。Ctrl+C 取消当前编辑，EOF 保存退出。路径/标题等辅助输入不提示命令，不启用 shell 转义或 `!` 历史展开。管道/IDE 无原生控制台时使用 UTF-8 逐行输入，不启用补全。未知斜杠命令不发模型请求。命令表和启动例子见 [构建与启动](#build-run)。
 
-**终端 UI**：主输入使用分隔线与 `❯` 提示，输入文字青色加粗，斜杠命令紫色；宽窗口右侧提示 Tab/方向键和 `/help`。命令菜单选中项使用青色背景，说明文字灰色，`/permissions`、`/mode` 候选带具体用途；`/help` 按窗口宽度分列或换行。模型等待提示黄色，工具摘要青色并缩进，错误红色；回答标签绿色，正文采用终端默认前景色，流式正文即时显示，完整回答备用渲染器保留 Markdown 标题与代码块轻量着色。等待提示仅表示正在请求模型，不展示模型内部推理或等待动画。
+**终端 UI**：启动页显示简洁欢迎面板与会话列表，标题和更新时间突出，短ID及工作区路径弱化；窄屏裁剪标题和路径展示，完整数据仍用于选择和保存。进入会话只预览最近成功用户轮次的提问与最终回复（最多600码点/8行），不输出tool JSON或中间调用ID。普通任务的创建ID、保存和成功清理日志默认隐藏；错误、清理异常、未完成任务及继续入口仍保留，`/tasks` 显式查看详情。
+
+主输入使用分隔线与 `❯` 提示，输入文字青色加粗，斜杠命令紫色；宽窗口右侧提示 Tab/方向键和 `/help`。命令菜单选中项使用青色背景，说明文字灰色，`/permissions`、`/mode` 候选带具体用途；`/help` 按窗口宽度分列或换行。模型等待黄色，工具摘要青色，错误红色，回答标签绿色。流式和非流式回答共用轻量终端Markdown展示，去掉标题/强调/行内代码的语法标记，显示字重、颜色、代码区、列表及引用；链接保留目标URL。表格按中文/emoji显示列宽排版，较宽表格或窄终端改成逐条键值展示，不裁掉单元格数据。
+
+展示器按行及表格缓冲，普通长正文提前输出；单行缓冲8192字符、表格每批40行/约32K字符，超长行保留文字但不保证跨缓冲边界的复杂Markdown样式。它不是完整CommonMark/GFM或HTML渲染器，不执行HTML，也不支持图片/LaTeX显示或代码语法分析。管道保留原始Markdown和既有即时增量输出，`NO_COLOR` 只关颜色，原生终端仍排版。样式不写回原消息、任务或模型上下文；等待提示不展示模型内部推理。
 
 <a id="module-session"></a>
 

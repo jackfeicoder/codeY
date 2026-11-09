@@ -99,4 +99,10 @@ class TaskCommandsTest {
         });
         assertEquals(1,calls.get());assertEquals(4,store.load(sid).messages().size());
     }
+    @Test void ordinaryTaskKeepsDurableRecordsWithoutPrintingLifecycleNoise() throws Exception {
+        launch("hello\n/exit\n",new SessionLauncher.Options(null,true,"quiet",null,null),r->new LlmResponse(Message.assistant("done"),"stop",null));
+        var session=new JsonSessionStore(data).list().sessions().get(0);var task=new TaskStore(data).list(session.id()).get(0);
+        assertTrue(task.completed());assertEquals(2,session.messages().size());
+        assertFalse(output.toString().contains(task.id));assertFalse(output.toString().contains("进度随执行保存"));assertFalse(output.toString().contains("托管临时目录已尝试清理"));
+    }
 }

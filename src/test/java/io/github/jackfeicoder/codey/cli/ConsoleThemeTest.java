@@ -21,6 +21,22 @@ import static org.junit.jupiter.api.Assertions.*;
 /** 真实 JLine 展示与消息隔离：配色仅影响控制台，不污染历史、模型请求或管道。 */
 @Timeout(5)
 class ConsoleThemeTest {
+    @Test void nativeStreamRendersMarkdownOnceWhileHistoryRetainsOriginalText() throws Exception {
+        var display=new ByteArrayOutputStream();var terminal=new DumbTerminal("fixture","xterm",new ByteArrayInputStream(new byte[0]),display,StandardCharsets.UTF_8);
+        terminal.setSize(new org.jline.terminal.Size(90,25));var out=new PrintWriter(display,true,StandardCharsets.UTF_8);
+        String answer="## 完成\n**结果** `index.html`\n\n| 文件 | 大小 |\n|---|---|\n| a.html | 100 B |";
+        var client=new io.github.jackfeicoder.codey.llm.LlmClient() {
+            public LlmResponse generate(io.github.jackfeicoder.codey.llm.LlmRequest request){throw new AssertionError("stream expected");}
+            public LlmResponse generateStream(io.github.jackfeicoder.codey.llm.LlmRequest request,java.util.function.Consumer<String> text){for(int i=0;i<answer.length();i++)text.accept(answer.substring(i,i+1));return new LlmResponse(Message.assistant(answer),"stop",null);}
+        };
+        var session=new Session("base");
+        try(var input=new ConsoleInput(new BufferedReader(new StringReader("")),out,terminal)) {
+            assertTrue(new ChatCli(new AgentLoop(client,new ToolRegistry()),session,new ToolContext(WorkspaceBinding.none()),input,out,out).answer("question"));
+        }
+        String visible=AttributedString.fromAnsi(display.toString(StandardCharsets.UTF_8)).toString();
+        assertFalse(visible.contains("**结果**"));assertFalse(visible.contains("|---|"));assertTrue(visible.contains("index.html"));assertTrue(visible.contains("100 B"));
+        assertEquals(1,visible.split("● CodeY",-1).length-1);assertEquals(answer,session.messages().get(2).content());
+    }
     @Test void plainThemeAndProgressKeepExistingMachineReadableOutput() throws Exception {
         var text = new StringWriter();
         var out = new PrintWriter(text);
@@ -42,7 +58,8 @@ class ConsoleThemeTest {
         new ConsoleTheme(true).assistant(new PrintWriter(text), answer);
         String visible = AttributedString.fromAnsi(text.toString()).toString().replace("\r\n", "\n");
         assertTrue(visible.contains("● CodeY"));
-        assertTrue(visible.contains("# 中文😀\n"));
+        assertTrue(visible.contains("中文😀\n"));
+        assertFalse(visible.contains("# 中文😀"));
         assertTrue(visible.contains("正文".repeat(1800)));
         assertTrue(visible.contains("\\u001b[2J尾部"));
         assertFalse(text.toString().contains("\u001b[2J"));
